@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/rootGearContainer"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#03060B">
+
+    <!-- 硬件加速 WebView：承载 1920×384 3D 正方体向上翻转档位页面 -->
+    <WebView
+        android:id="@+id/webViewGear"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_gravity="center"
+        android:background="#03060B" />
+
+</FrameLayout>

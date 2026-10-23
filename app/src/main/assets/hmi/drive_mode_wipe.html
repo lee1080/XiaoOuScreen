@@ -1,0 +1,1169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>1920×384 车辆模式切换系统 · 由左至右擦除转场</title>
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;800;900&family=Inter:wght@500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * {
+      box-sizing: border-box;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+    }
+    body {
+      margin: 0;
+      padding: 0;
+      background: #05070c;
+      color: #ffffff;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      min-height: 100vh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+    body.overlay-mode {
+      background: transparent !important;
+    }
+
+    /* 顶部控制台栏 (仅在单机调试网页时显示，悬浮窗或车机下完全隐藏) */
+    #debug-header {
+      width: 100%;
+      background: rgba(10, 14, 24, 0.92);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      backdrop-filter: blur(16px);
+      z-index: 60;
+      position: sticky;
+      top: 0;
+      transition: transform 0.3s ease;
+    }
+    body.overlay-mode #debug-header,
+    body.overlay-mode #debug-tips {
+      display: none !important;
+    }
+
+    /* 视口外层容器：自适应居中舞台 */
+    .viewport-outer {
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      overflow: hidden;
+      position: relative;
+    }
+    body.overlay-mode .viewport-outer {
+      background: transparent !important;
+      position: absolute;
+      inset: 0;
+    }
+
+    /* 严格 1920 × 384 舞台容器 (绝对居中 + 硬件加速缩放) */
+    .drive-stage {
+      width: 1920px;
+      height: 384px;
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%) scale(1);
+      transform-origin: center center;
+      flex-shrink: 0;
+      overflow: hidden;
+      border-radius: 14px;
+      box-shadow: 0 24px 64px rgba(0, 0, 0, 0.85), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    }
+    body.overlay-mode .drive-stage {
+      border-radius: 0;
+      box-shadow: none;
+    }
+
+    /* =========================================================================
+       5 大模式背景渐变 (严格遵循欧尚小欧屏设计规范)
+       • ECO: 翡翠绿渐变
+       • NORMAL: 天青蓝渐变
+       • SPORT: 烈焰橙渐变
+       • RACE: 猩红渐变
+       • CUSTOM: 金属钛灰渐变
+       ========================================================================= */
+    .bg-mode-ECO {
+      background: radial-gradient(ellipse 1180px 420px at 50% 50%, #34d399 0%, #10b981 25%, #047857 54%, #064e3b 78%, #021610 100%);
+    }
+    .bg-mode-NORMAL {
+      background: radial-gradient(ellipse 1180px 420px at 50% 50%, #38bdf8 0%, #0ea5e9 25%, #0284c7 54%, #0c3b5e 78%, #030e1a 100%);
+    }
+    .bg-mode-SPORT {
+      background: radial-gradient(ellipse 1180px 420px at 50% 50%, #fbbf24 0%, #f97316 25%, #ea580c 52%, #7c2d12 78%, #180602 100%);
+    }
+    .bg-mode-RACE {
+      background: radial-gradient(ellipse 1180px 420px at 50% 50%, #fb7185 0%, #ef4444 24%, #dc2626 50%, #7f1d1d 76%, #190204 100%);
+    }
+    .bg-mode-CUSTOM {
+      background: radial-gradient(ellipse 1180px 420px at 50% 50%, #e2e8f0 0%, #94a3b8 24%, #475569 52%, #1e293b 78%, #070a10 100%);
+    }
+
+    /* 左右两侧 130px 物理安全暗角渐变 (消除塑料模具裁切割裂感铁律) */
+    .vignette-sides {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      z-index: 35;
+      background: linear-gradient(90deg, 
+        #000000 0px, 
+        rgba(0, 0, 0, 0) 130px, 
+        rgba(0, 0, 0, 0) 1790px, 
+        #000000 1920px);
+    }
+
+    /* 舞台主图层容器 */
+    .stage-layer {
+      position: absolute;
+      inset: 0;
+      width: 1920px;
+      height: 384px;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    /* 底层主页面快照图层 (带高保真车机深空渐变底色，杜绝快照解码前纯黑闪烁) */
+    #layer-main-snapshot {
+      z-index: 10;
+      background: radial-gradient(ellipse 1300px 500px at 50% 120%, #17223b 0%, #0c1220 50%, #050811 100%);
+    }
+    #img-main-snapshot {
+      width: 1920px;
+      height: 384px;
+      object-fit: cover;
+      display: block;
+    }
+
+    /* 上一个模式暂存图层 (连切模式时作为垫底底图，杜绝切模瞬间闪黑/漏出底图) */
+    #layer-prev-mode {
+      z-index: 15;
+      display: none;
+    }
+
+    /* 顶层模式渲染图层 (带擦除 clip-path) */
+    #layer-mode-view {
+      z-index: 20;
+      transition: background 0.3s ease;
+      will-change: clip-path;
+    }
+
+    /* 回退擦除覆盖图层 (方案 A: 主页面快照自左向右重新展开覆盖模式页) */
+    #layer-return-snapshot {
+      z-index: 25;
+      display: none;
+      background: radial-gradient(ellipse 1300px 500px at 50% 120%, #17223b 0%, #0c1220 50%, #050811 100%);
+      will-change: clip-path;
+    }
+    #img-return-snapshot {
+      width: 1920px;
+      height: 384px;
+      object-fit: cover;
+      display: block;
+    }
+
+    /* =========================================================================
+       半透明光刃发光带 (The Radiant Light Blade)
+       • 宽度 48px，中心高光，向两侧带主题色渐变发光晕
+       • 倾斜 -6deg 与 clip-path 倾斜切割线严格平行 (tan(6deg)*384 ≈ 40.35px)
+       ========================================================================= */
+    #light-blade {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 52px;
+      pointer-events: none;
+      z-index: 30;
+      transform: translateX(-50%) skewX(-6deg);
+      opacity: 0;
+      will-change: transform, left, opacity;
+      background: linear-gradient(
+        90deg,
+        rgba(255, 255, 255, 0) 0%,
+        rgba(var(--blade-rgb, 249, 115, 22), 0.22) 26%,
+        rgba(255, 255, 255, 0.95) 50%,
+        rgba(var(--blade-rgb, 249, 115, 22), 0.38) 72%,
+        rgba(255, 255, 255, 0) 100%
+      );
+      filter: drop-shadow(0 0 24px var(--blade-glow, rgba(249, 115, 22, 0.85)))
+              drop-shadow(0 0 8px #ffffff);
+    }
+
+    /* 中央排版舞台 */
+    .mode-center-stage {
+      position: relative;
+      z-index: 28;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    /* 极简巨幅模式大字 (ECO / NORMAL / SPORT / RACE / CUSTOM) */
+    .mode-hero-word {
+      font-family: 'Orbitron', -apple-system, sans-serif;
+      font-size: 148px;
+      font-weight: 900;
+      line-height: 1;
+      letter-spacing: 0.12em;
+      padding-left: 0.12em;
+      text-transform: uppercase;
+      background: linear-gradient(180deg, #ffffff 42%, #f1f5f9 80%, #cbd5e1 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      filter: drop-shadow(0 0 38px var(--mode-glow, rgba(255, 255, 255, 0.65)))
+              drop-shadow(0 12px 26px rgba(0, 0, 0, 0.75));
+      transition: filter 0.35s ease;
+    }
+
+    /* 6 字母适度收敛对齐 (NORMAL / CUSTOM) */
+    .mode-hero-word.word-6 {
+      font-size: 128px;
+      letter-spacing: 0.09em;
+      padding-left: 0.09em;
+    }
+
+    @keyframes subtleFloat {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.018); }
+    }
+    .stage-breathe {
+      animation: subtleFloat 3.8s ease-in-out infinite;
+    }
+
+    /* =========================================================================
+       5 款模式专属装饰元素微动效 (Bespoke SVG Animations)
+       ========================================================================= */
+
+    /* 1. ECO 翡翠绿: 叶脉光晕脉冲与气流波浪呼吸微流动 */
+    @keyframes ecoArcPulse {
+      0%, 100% { transform: scale(1); opacity: 0.75; }
+      50% { transform: scale(1.05); opacity: 1; filter: drop-shadow(0 0 6px #34d399); }
+    }
+    @keyframes ecoStreamLeft {
+      0%, 100% { transform: translate(0, 0); opacity: 0.65; }
+      50% { transform: translate(12px, -3px); opacity: 0.95; }
+    }
+    @keyframes ecoStreamRight {
+      0%, 100% { transform: translate(0, 0); opacity: 0.65; }
+      50% { transform: translate(-12px, -3px); opacity: 0.95; }
+    }
+    .anim-eco-arc {
+      transform-origin: 960px 70px;
+      animation: ecoArcPulse 3.2s ease-in-out infinite;
+    }
+    .anim-eco-flow-l {
+      animation: ecoStreamLeft 4.0s ease-in-out infinite;
+    }
+    .anim-eco-flow-r {
+      animation: ecoStreamRight 4.0s ease-in-out infinite;
+    }
+
+    /* 2. NORMAL 天青蓝: 平衡水平横杆舒张与层流端点微光信标 */
+    @keyframes normalBarExpand {
+      0%, 100% { transform: scaleX(0.96); opacity: 0.7; }
+      50% { transform: scaleX(1.02); opacity: 1; }
+    }
+    @keyframes normalBeaconPulse {
+      0%, 100% { transform: scale(1); filter: drop-shadow(0 0 3px #38bdf8); }
+      50% { transform: scale(1.4); filter: drop-shadow(0 0 10px #ffffff); }
+    }
+    .anim-normal-bar {
+      transform-origin: center center;
+      animation: normalBarExpand 4.5s ease-in-out infinite;
+    }
+    .anim-normal-beacon-l {
+      transform-origin: 470px 192px;
+      animation: normalBeaconPulse 2.8s ease-in-out infinite;
+    }
+    .anim-normal-beacon-r {
+      transform-origin: 1450px 192px;
+      animation: normalBeaconPulse 2.8s ease-in-out infinite;
+    }
+
+    /* 3. SPORT 烈焰橙: 破风刀锋双角推力脉冲 (Throttle Thrust Pump) */
+    @keyframes sportBracketBreath {
+      0%, 100% { opacity: 0.75; }
+      50% { opacity: 1; filter: drop-shadow(0 0 8px #f97316); }
+    }
+    @keyframes sportBladeThrustL {
+      0%, 100% { transform: translateX(0); }
+      40% { transform: translateX(8px); }
+      60% { transform: translateX(8px); }
+    }
+    @keyframes sportBladeThrustR {
+      0%, 100% { transform: translateX(0); }
+      40% { transform: translateX(-8px); }
+      60% { transform: translateX(-8px); }
+    }
+    .anim-sport-bracket {
+      animation: sportBracketBreath 2.6s ease-in-out infinite;
+    }
+    .anim-sport-blade-l {
+      animation: sportBladeThrustL 2.2s cubic-bezier(0.25, 1, 0.5, 1) infinite;
+    }
+    .anim-sport-blade-r {
+      animation: sportBladeThrustR 2.2s cubic-bezier(0.25, 1, 0.5, 1) infinite;
+    }
+
+    /* 4. RACE 猩红: 顶部转速灯条高频微频闪与弯心路肩斜纹扫光 */
+    @keyframes raceShiftStrobe {
+      0%, 100% { opacity: 1; filter: drop-shadow(0 0 16px #ef4444); }
+      50% { opacity: 0.38; filter: drop-shadow(0 0 4px #ef4444); }
+    }
+    @keyframes raceKerbSweepL {
+      0%, 100% { opacity: 0.85; }
+      50% { opacity: 0.35; }
+    }
+    @keyframes raceKerbSweepR {
+      0%, 100% { opacity: 0.85; }
+      50% { opacity: 0.35; }
+    }
+    .anim-race-shift {
+      animation: raceShiftStrobe 0.55s ease-in-out infinite;
+    }
+    .anim-race-kerb-l {
+      animation: raceKerbSweepL 1.6s ease-in-out infinite;
+    }
+    .anim-race-kerb-r {
+      animation: raceKerbSweepR 1.6s ease-in-out infinite;
+    }
+
+    /* 5. CUSTOM 金属钛灰: 虚线刻度微移动与精密校准滑块微漂移 */
+    @keyframes customScaleCrawl {
+      0% { stroke-dashoffset: 0; }
+      100% { stroke-dashoffset: 32; }
+    }
+    @keyframes customSliderDrift1 {
+      0%, 100% { transform: translateX(0); }
+      50% { transform: translateX(7px); }
+    }
+    @keyframes customSliderDrift2 {
+      0%, 100% { transform: translateX(0); }
+      50% { transform: translateX(-6px); }
+    }
+    @keyframes customSliderDrift3 {
+      0%, 100% { transform: translateX(0); }
+      50% { transform: translateX(8px); }
+    }
+    .anim-custom-scale {
+      animation: customScaleCrawl 5.0s linear infinite;
+    }
+    .anim-custom-node-1 {
+      animation: customSliderDrift1 3.5s ease-in-out infinite;
+    }
+    .anim-custom-node-2 {
+      animation: customSliderDrift2 3.8s ease-in-out infinite;
+    }
+    .anim-custom-node-3 {
+      animation: customSliderDrift3 4.2s ease-in-out infinite;
+    }
+
+    /* 2 秒倒计时底部微型细线 */
+    .dwell-bar-wrap {
+      position: absolute;
+      bottom: 0px;
+      left: 130px;
+      right: 130px;
+      height: 2px;
+      background: rgba(255, 255, 255, 0.12);
+      z-index: 34;
+      pointer-events: none;
+      overflow: hidden;
+    }
+    .dwell-bar-fill {
+      width: 100%;
+      height: 100%;
+      background: #ffffff;
+      transform-origin: left center;
+      transform: scaleX(0);
+      opacity: 0.85;
+      box-shadow: 0 0 8px #ffffff;
+    }
+  </style>
+</head>
+<body class="text-white antialiased">
+
+  <!-- 顶部控制台栏 (仅单机/网页调试可用，在车机悬浮窗自动隐藏) -->
+  <header id="debug-header" class="w-full">
+    <div class="max-w-[1920px] mx-auto px-4 py-2 flex flex-wrap items-center justify-between gap-3 text-xs">
+      <div class="flex items-center gap-2.5">
+        <div class="w-2.5 h-2.5 rounded-full bg-orange-500 shadow-[0_0_10px_#f97316]"></div>
+        <span class="font-bold tracking-wider font-['Orbitron']">DRIVE MODE · WIPE TRANSITION</span>
+        <span class="px-2 py-0.5 font-mono text-[11px] rounded bg-white/10 text-slate-300">1920 × 384 · 左至右擦除光刃</span>
+      </div>
+
+      <!-- 5 大模式快速切换按钮 -->
+      <div class="flex items-center gap-1.5 bg-slate-900/90 p-1 rounded-xl border border-slate-800">
+        <button type="button" data-mode="ECO" class="btn-mode px-3 py-1 rounded-lg font-bold font-['Orbitron'] transition-all">ECO</button>
+        <button type="button" data-mode="NORMAL" class="btn-mode px-3 py-1 rounded-lg font-bold font-['Orbitron'] transition-all">NORMAL</button>
+        <button type="button" data-mode="SPORT" class="btn-mode px-3 py-1 rounded-lg font-bold font-['Orbitron'] transition-all">SPORT</button>
+        <button type="button" data-mode="RACE" class="btn-mode px-3 py-1 rounded-lg font-bold font-['Orbitron'] transition-all">RACE</button>
+        <button type="button" data-mode="CUSTOM" class="btn-mode px-3 py-1 rounded-lg font-bold font-['Orbitron'] transition-all">CUSTOM</button>
+      </div>
+
+      <div class="flex items-center gap-2">
+        <span id="state-badge" class="font-mono text-slate-400">STATUS: IDLE</span>
+        <button type="button" id="btn-scale-toggle" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 font-semibold border border-slate-700 transition-all">
+          <span id="scale-label">自适应缩放</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- 视口居中舞台 -->
+  <div class="viewport-outer">
+    <div id="drive-stage" class="drive-stage">
+
+      <!-- 1. 左右两侧 130px 物理安全暗角渐变 (全局最外层单层叠加) -->
+      <div class="vignette-sides"></div>
+
+      <!-- 2. 半透明光刃发光带 (随擦除推进自左向右扫过) -->
+      <div id="light-blade"></div>
+
+      <!-- 3. 底层图层：主显示界面快照 (天气/歌词) -->
+      <div id="layer-main-snapshot" class="stage-layer">
+        <img id="img-main-snapshot" alt="Main Screen Snapshot" src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='1920' height='384' viewBox='0 0 1920 384'><rect width='100%' height='100%' fill='%23050811'/><text x='50%' y='52%' fill='%2338BDF8' font-family='sans-serif' font-size='24' font-weight='600' text-anchor='middle'>主显示界面 (时间天气 / 车载歌词)</text></svg>" />
+      </div>
+
+      <!-- 3.5 上一个模式暂存图层 (连切模式时作为垫底底图，杜绝切模瞬间闪黑/漏出底图) -->
+      <div id="layer-prev-mode" class="stage-layer" style="display: none; z-index: 15;">
+        <div id="prev-mode-stage" class="mode-center-stage">
+          <div id="prev-mode-word" class="mode-hero-word"></div>
+        </div>
+      </div>
+
+      <!-- 4. 模式页面图层 (擦除进场展示对应模式) -->
+      <div id="layer-mode-view" class="stage-layer bg-mode-SPORT">
+        <div id="mode-svg-container" class="absolute inset-0 pointer-events-none"></div>
+        <div id="mode-stage" class="mode-center-stage stage-breathe">
+          <div id="mode-word" class="mode-hero-word">SPORT</div>
+        </div>
+
+        <!-- 2 秒倒计时底部微型细线 -->
+        <div class="dwell-bar-wrap">
+          <div id="dwell-bar-fill" class="dwell-bar-fill"></div>
+        </div>
+      </div>
+
+      <!-- 5. 回退覆盖图层 (方案 A: 主页面快照再次自左向右擦除覆盖模式页) -->
+      <div id="layer-return-snapshot" class="stage-layer">
+        <img id="img-return-snapshot" alt="Return Screen Snapshot" src="" />
+      </div>
+
+    </div>
+
+    <!-- 底部调试快捷说明 (车机悬浮窗自动隐藏) -->
+    <div id="debug-tips" class="mt-4 text-xs text-slate-400 font-mono text-center">
+      按键盘 <kbd class="px-1.5 py-0.5 rounded bg-white/10 text-white">1</kbd>–<kbd class="px-1.5 py-0.5 rounded bg-white/10 text-white">5</kbd> 或方向键模拟切换车辆模式 · 自动执行由左至右擦除进场 → 2.0s 驻留 → 由左至右擦除回退
+    </div>
+  </div>
+
+  <script>
+    // =========================================================================
+    // 5 大驾驶模式规格定义与色彩
+    // =========================================================================
+    const DRIVE_MODES = {
+      ECO: {
+        key: 'ECO',
+        name: '节能模式',
+        bgClass: 'bg-mode-ECO',
+        btnBg: '#10b981',
+        glowColor: 'rgba(52, 211, 153, 0.85)',
+        accent: '#10b981',
+        accentLight: '#a7f3d0',
+        bladeRgb: '52, 211, 153',
+        isSixLetters: false
+      },
+      NORMAL: {
+        key: 'NORMAL',
+        name: '舒适/正常模式',
+        bgClass: 'bg-mode-NORMAL',
+        btnBg: '#0ea5e9',
+        glowColor: 'rgba(56, 189, 248, 0.85)',
+        accent: '#0ea5e9',
+        accentLight: '#bae6fd',
+        bladeRgb: '56, 189, 248',
+        isSixLetters: true
+      },
+      SPORT: {
+        key: 'SPORT',
+        name: '运动模式',
+        bgClass: 'bg-mode-SPORT',
+        btnBg: '#f97316',
+        glowColor: 'rgba(251, 146, 60, 0.90)',
+        accent: '#f97316',
+        accentLight: '#fed7aa',
+        bladeRgb: '249, 115, 22',
+        isSixLetters: false
+      },
+      RACE: {
+        key: 'RACE',
+        name: '赛道模式',
+        bgClass: 'bg-mode-RACE',
+        btnBg: '#ef4444',
+        glowColor: 'rgba(248, 113, 113, 0.92)',
+        accent: '#ef4444',
+        accentLight: '#fecdd3',
+        bladeRgb: '239, 68, 68',
+        isSixLetters: false
+      },
+      CUSTOM: {
+        key: 'CUSTOM',
+        name: '个性化/其他模式',
+        bgClass: 'bg-mode-CUSTOM',
+        btnBg: '#cbd5e1',
+        glowColor: 'rgba(226, 232, 240, 0.80)',
+        accent: '#94a3b8',
+        accentLight: '#f1f5f9',
+        bladeRgb: '203, 213, 225',
+        isSixLetters: true
+      }
+    };
+
+    const MODE_KEYS = ['ECO', 'NORMAL', 'SPORT', 'RACE', 'CUSTOM'];
+
+    // 状态机
+    let currentMode = 'SPORT';
+    let isOverlayMode = false;
+    let autoScale = true;
+    let transitionState = 'IDLE'; // 'IDLE' | 'WIPING_IN' | 'DWELLING' | 'WIPING_OUT'
+
+    let wipeAnimFrameId = null;
+    let dwellTimerId = null;
+    let activeSnapshotUrl = '';
+
+    // =========================================================================
+    // 生成专属 5 款模式 SVG 装饰图层 (带高帧率微动效)
+    // =========================================================================
+    function getModeBespokeSVG(modeObj) {
+      const { key, accent, accentLight } = modeObj;
+      const uid = `svg-${key}`;
+
+      let decoInner = '';
+
+      if (key === 'ECO') {
+        // ECO: 叶脉光晕脉冲弧与有机气流微流动
+        decoInner = `
+          <!-- 顶部叶脉微光弧 (带脉冲呼吸) -->
+          <g class="anim-eco-arc">
+            <path d="M 920 82 Q 960 58 1000 82" fill="none" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round" opacity="0.9" />
+            <path d="M 942 74 Q 960 64 978 74" fill="none" stroke="${accentLight}" stroke-width="1.8" stroke-linecap="round" opacity="0.75" />
+          </g>
+
+          <!-- 左侧轻盈气流 (微向右平移呼吸) -->
+          <g class="anim-eco-flow-l">
+            <path d="M 160 220 C 310 220, 400 164, 550 192" fill="none" stroke="url(#fadeL-${uid})" stroke-width="3" stroke-linecap="round" />
+            <path d="M 260 246 C 370 246, 440 198, 535 214" fill="none" stroke="url(#fadeL-${uid})" stroke-width="1.6" stroke-linecap="round" opacity="0.65" />
+          </g>
+
+          <!-- 右侧轻盈气流 (微向左平移呼吸) -->
+          <g class="anim-eco-flow-r">
+            <path d="M 1760 220 C 1610 220, 1520 164, 1370 192" fill="none" stroke="url(#fadeR-${uid})" stroke-width="3" stroke-linecap="round" />
+            <path d="M 1660 246 C 1550 246, 1480 198, 1385 214" fill="none" stroke="url(#fadeR-${uid})" stroke-width="1.6" stroke-linecap="round" opacity="0.65" />
+          </g>
+
+          <!-- 底部有机光弧 -->
+          <path d="M 790 296 Q 960 314 1130 296" fill="none" stroke="url(#centerGlow-${uid})" stroke-width="2.2" stroke-linecap="round" opacity="0.75" />
+        `;
+      } else if (key === 'NORMAL') {
+        // NORMAL: 平衡水平横杆舒张与层流端点微光信标
+        decoInner = `
+          <!-- 上下平衡横杆 (带微水平呼吸) -->
+          <g class="anim-normal-bar">
+            <line x1="850" y1="76" x2="1070" y2="76" stroke="url(#centerGlow-${uid})" stroke-width="2.6" stroke-linecap="round" />
+            <line x1="810" y1="308" x2="1110" y2="308" stroke="url(#centerGlow-${uid})" stroke-width="2.6" stroke-linecap="round" />
+          </g>
+
+          <!-- 左侧平稳层流与微光信标 -->
+          <path d="M 140 192 L 470 192" stroke="url(#fadeL-${uid})" stroke-width="2.8" stroke-linecap="round" />
+          <path d="M 240 172 Q 360 160 455 178" fill="none" stroke="url(#fadeL-${uid})" stroke-width="1.6" stroke-linecap="round" opacity="0.7" />
+          <path d="M 240 212 Q 360 224 455 206" fill="none" stroke="url(#fadeL-${uid})" stroke-width="1.6" stroke-linecap="round" opacity="0.7" />
+          <circle cx="470" cy="192" r="3.6" fill="#ffffff" class="anim-normal-beacon-l" />
+
+          <!-- 右侧平稳层流与微光信标 -->
+          <path d="M 1780 192 L 1450 192" stroke="url(#fadeR-${uid})" stroke-width="2.8" stroke-linecap="round" />
+          <path d="M 1680 172 Q 1560 160 1465 178" fill="none" stroke="url(#fadeR-${uid})" stroke-width="1.6" stroke-linecap="round" opacity="0.7" />
+          <path d="M 1680 212 Q 1560 224 1465 206" fill="none" stroke="url(#fadeR-${uid})" stroke-width="1.6" stroke-linecap="round" opacity="0.7" />
+          <circle cx="1450" cy="192" r="3.6" fill="#ffffff" class="anim-normal-beacon-r" />
+        `;
+      } else if (key === 'SPORT') {
+        // SPORT: 破风刀锋双角推力脉冲 (Throttle Thrust Pump)
+        decoInner = `
+          <!-- 上下破风托架 -->
+          <g class="anim-sport-bracket">
+            <path d="M 760 86 L 790 72 L 1130 72 L 1160 86" fill="none" stroke="url(#centerGlow-${uid})" stroke-width="2.8" stroke-linecap="round" />
+            <path d="M 760 298 L 790 312 L 1130 312 L 1160 298" fill="none" stroke="url(#centerGlow-${uid})" stroke-width="2.8" stroke-linecap="round" />
+          </g>
+
+          <!-- 左侧推进破风刀锋 (微向右聚集推进动量) -->
+          <path d="M 140 192 L 495 192" stroke="url(#fadeL-${uid})" stroke-width="3" stroke-linecap="round" />
+          <g class="anim-sport-blade-l">
+            <path d="M 545 148 L 508 192 L 545 236" fill="none" stroke="#ffffff" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow-${uid})" />
+            <path d="M 512 162 L 484 192 L 512 222" fill="none" stroke="${accentLight}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity="0.85" />
+          </g>
+
+          <!-- 右侧推进破风刀锋 (微向左聚集推进动量) -->
+          <path d="M 1780 192 L 1425 192" stroke="url(#fadeR-${uid})" stroke-width="3" stroke-linecap="round" />
+          <g class="anim-sport-blade-r">
+            <path d="M 1375 148 L 1412 192 L 1375 236" fill="none" stroke="#ffffff" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow-${uid})" />
+            <path d="M 1408 162 L 1436 192 L 1408 222" fill="none" stroke="${accentLight}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity="0.85" />
+          </g>
+        `;
+      } else if (key === 'RACE') {
+        // RACE: 顶部转速灯条高频微频闪与弯心路肩斜纹扫光
+        decoInner = `
+          <!-- 顶部红线换挡灯条 (Shift-Light Bar 竞速微频闪) -->
+          <line x1="720" y1="68" x2="1200" y2="68" stroke="url(#centerGlow-${uid})" stroke-width="3.5" stroke-linecap="round" filter="url(#glow-${uid})" />
+          <rect x="942" y="63" width="36" height="10" rx="2" fill="#ffffff" class="anim-race-shift" />
+
+          <!-- 底部赛道基准线 -->
+          <line x1="760" y1="314" x2="1160" y2="314" stroke="url(#centerGlow-${uid})" stroke-width="2.5" stroke-linecap="round" />
+
+          <!-- 左侧赛道弯心红白路肩斜纹 (Apex Kerbs) -->
+          <path d="M 120 192 L 460 192" stroke="url(#fadeL-${uid})" stroke-width="2.5" stroke-linecap="round" />
+          <g filter="url(#glow-${uid})" class="anim-race-kerb-l">
+            <polygon points="565,152 583,152 555,232 537,232" fill="#ffffff" />
+            <polygon points="530,158 545,158 521,226 506,226" fill="${accentLight}" opacity="0.85" />
+            <polygon points="498,166 510,166 490,218 478,218" fill="${accentLight}" opacity="0.55" />
+            <polygon points="470,174 480,174 464,210 454,210" fill="${accentLight}" opacity="0.30" />
+          </g>
+
+          <!-- 右侧赛道弯心红白路肩斜纹 -->
+          <path d="M 1800 192 L 1460 192" stroke="url(#fadeR-${uid})" stroke-width="2.5" stroke-linecap="round" />
+          <g filter="url(#glow-${uid})" class="anim-race-kerb-r">
+            <polygon points="1355,152 1337,152 1365,232 1383,232" fill="#ffffff" />
+            <polygon points="1390,158 1375,158 1399,226 1414,226" fill="${accentLight}" opacity="0.85" />
+            <polygon points="1422,166 1410,166 1430,218 1442,218" fill="${accentLight}" opacity="0.55" />
+            <polygon points="1450,174 1440,174 1456,210 1466,210" fill="${accentLight}" opacity="0.30" />
+          </g>
+        `;
+      } else {
+        // CUSTOM: 虚线刻度微移动与精密校准滑块微漂移
+        decoInner = `
+          <!-- 顶部与底部精密刻度标尺 (带细微微爬行) -->
+          <g class="anim-custom-scale">
+            <line x1="780" y1="74" x2="1140" y2="74" stroke="url(#centerGlow-${uid})" stroke-width="2" stroke-dasharray="4 12" />
+            <line x1="780" y1="310" x2="1140" y2="310" stroke="url(#centerGlow-${uid})" stroke-width="2" stroke-dasharray="4 12" />
+          </g>
+
+          <!-- 左侧精密校准轨道与浮动游标 -->
+          <line x1="180" y1="166" x2="465" y2="166" stroke="url(#fadeL-${uid})" stroke-width="1.8" stroke-linecap="round" />
+          <circle cx="390" cy="166" r="5" fill="#ffffff" filter="url(#glow-${uid})" class="anim-custom-node-1" />
+
+          <line x1="130" y1="192" x2="465" y2="192" stroke="url(#fadeL-${uid})" stroke-width="2.5" stroke-linecap="round" />
+          <rect x="432" y="186" width="12" height="12" rx="3" transform="rotate(45 438 192)" fill="#ffffff" filter="url(#glow-${uid})" class="anim-custom-node-2" />
+
+          <line x1="180" y1="218" x2="465" y2="218" stroke="url(#fadeL-${uid})" stroke-width="1.8" stroke-linecap="round" />
+          <circle cx="340" cy="218" r="5" fill="${accentLight}" class="anim-custom-node-3" />
+
+          <!-- 右侧精密校准轨道与浮动游标 (对称) -->
+          <line x1="1740" y1="166" x2="1455" y2="166" stroke="url(#fadeR-${uid})" stroke-width="1.8" stroke-linecap="round" />
+          <circle cx="1530" cy="166" r="5" fill="#ffffff" filter="url(#glow-${uid})" class="anim-custom-node-1" />
+
+          <line x1="1790" y1="192" x2="1455" y2="192" stroke="url(#fadeR-${uid})" stroke-width="2.5" stroke-linecap="round" />
+          <rect x="1476" y="186" width="12" height="12" rx="3" transform="rotate(45 1482 192)" fill="#ffffff" filter="url(#glow-${uid})" class="anim-custom-node-2" />
+
+          <line x1="1740" y1="218" x2="1455" y2="218" stroke="url(#fadeR-${uid})" stroke-width="1.8" stroke-linecap="round" />
+          <circle cx="1580" cy="218" r="5" fill="${accentLight}" class="anim-custom-node-3" />
+        `;
+      }
+
+      return `
+        <svg viewBox="0 0 1920 384" class="w-full h-full">
+          <defs>
+            <filter id="glow-${uid}" x="-20%" y="-20%" width="140%" height="140%">
+              <feGaussianBlur stdDeviation="5" result="blur" />
+              <feComposite in="SourceGraphic" in2="blur" operator="over" />
+            </filter>
+            <linearGradient id="centerGlow-${uid}" x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" stop-color="${accent}" stop-opacity="0" />
+              <stop offset="50%" stop-color="#ffffff" stop-opacity="0.95" />
+              <stop offset="100%" stop-color="${accent}" stop-opacity="0" />
+            </linearGradient>
+            <linearGradient id="fadeL-${uid}" x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" stop-color="${accent}" stop-opacity="0" />
+              <stop offset="55%" stop-color="${accentLight}" stop-opacity="0.45" />
+              <stop offset="100%" stop-color="#ffffff" stop-opacity="0.95" />
+            </linearGradient>
+            <linearGradient id="fadeR-${uid}" x1="100%" y1="0%" x2="0%" y2="0%">
+              <stop offset="0%" stop-color="${accent}" stop-opacity="0" />
+              <stop offset="55%" stop-color="${accentLight}" stop-opacity="0.45" />
+              <stop offset="100%" stop-color="#ffffff" stop-opacity="0.95" />
+            </linearGradient>
+          </defs>
+
+          <!-- 上下边缘极细发光视平线 (微光定焦) -->
+          <rect x="420" y="0" width="1080" height="2" fill="url(#centerGlow-${uid})" opacity="0.8" />
+          <rect x="420" y="382" width="1080" height="2" fill="url(#centerGlow-${uid})" opacity="0.8" />
+
+          ${decoInner}
+        </svg>
+      `;
+    }
+
+    // =========================================================================
+    // 渲染模式界面内容
+    // =========================================================================
+    function applyModeContent(modeKey) {
+      const m = DRIVE_MODES[modeKey] || DRIVE_MODES.CUSTOM;
+      currentMode = m.key;
+
+      const layerMode = document.getElementById('layer-mode-view');
+      const svgContainer = document.getElementById('mode-svg-container');
+      const modeWord = document.getElementById('mode-word');
+      const stage = document.getElementById('mode-stage');
+      const lightBlade = document.getElementById('light-blade');
+
+      // 更新类名与背景
+      layerMode.className = `stage-layer ${m.bgClass}`;
+      stage.style.setProperty('--mode-glow', m.glowColor);
+      modeWord.textContent = m.key;
+      modeWord.className = `mode-hero-word ${m.isSixLetters ? 'word-6' : ''}`;
+
+      // 注入专属 SVG 装饰层
+      svgContainer.innerHTML = getModeBespokeSVG(m);
+
+      // 配置半透明光刃发光带参数
+      lightBlade.style.setProperty('--blade-rgb', m.bladeRgb);
+      lightBlade.style.setProperty('--blade-glow', m.glowColor);
+
+      // 同步调试栏按钮高亮
+      document.querySelectorAll('.btn-mode').forEach(btn => {
+        const k = btn.getAttribute('data-mode');
+        if (k === m.key) {
+          btn.style.backgroundColor = m.btnBg;
+          btn.style.color = '#020617';
+          btn.style.boxShadow = `0 0 16px ${m.btnBg}`;
+        } else {
+          btn.style.backgroundColor = 'transparent';
+          btn.style.color = '#94a3b8';
+          btn.style.boxShadow = 'none';
+        }
+      });
+    }
+
+    // =========================================================================
+    // 缓动曲线与数学动画
+    // =========================================================================
+    function easeOutCubic(t) {
+      return 1 - Math.pow(1 - t, 3);
+    }
+    function easeInOutQuad(t) {
+      return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+    }
+
+    // =========================================================================
+    // 核心转场管线：由左至右擦除入场 → 2.0s 驻留 → 由左至右擦除退场
+    // =========================================================================
+    function triggerDriveModeSwitch(targetMode, snapshotBase64 = '') {
+      const modeKey = (targetMode || '').toUpperCase().trim();
+      const validMode = DRIVE_MODES[modeKey] ? modeKey : 'CUSTOM';
+
+      // 清除可能正在执行的动画或定时器
+      if (wipeAnimFrameId) {
+        cancelAnimationFrame(wipeAnimFrameId);
+        wipeAnimFrameId = null;
+      }
+      if (dwellTimerId) {
+        clearTimeout(dwellTimerId);
+        dwellTimerId = null;
+      }
+
+      // 如果当前正处于模式显示态 (DWELLING / WIPING_IN / WIPING_OUT)，将当前可见的模式作为底图暂存到 layer-prev-mode，
+      // 新模式由左至右平滑擦除覆盖旧模式，底层绝无闪黑或漏底！
+      const isSwitchingBetweenModes = (transitionState === 'DWELLING' || transitionState === 'WIPING_IN');
+      const layerPrev = document.getElementById('layer-prev-mode');
+      if (isSwitchingBetweenModes && currentMode && DRIVE_MODES[currentMode]) {
+        const prevM = DRIVE_MODES[currentMode];
+        layerPrev.className = `stage-layer ${prevM.bgClass}`;
+        const prevWord = document.getElementById('prev-mode-word');
+        prevWord.textContent = prevM.key;
+        prevWord.className = `mode-hero-word ${prevM.isSixLetters ? 'word-6' : ''}`;
+        document.getElementById('prev-mode-stage').style.setProperty('--mode-glow', prevM.glowColor);
+        layerPrev.style.display = 'flex';
+      } else {
+        layerPrev.style.display = 'none';
+      }
+
+      // 1. 设置快照画面 (主页面快照，供入场初态或退场覆盖)
+      if (snapshotBase64 && snapshotBase64.length > 50) {
+        activeSnapshotUrl = snapshotBase64;
+      }
+      if (activeSnapshotUrl) {
+        document.getElementById('img-main-snapshot').src = activeSnapshotUrl;
+        document.getElementById('img-return-snapshot').src = activeSnapshotUrl;
+      }
+
+      // 2. 准备模式内容
+      applyModeContent(validMode);
+
+      // 隐藏退场层，重置进度条
+      const layerReturn = document.getElementById('layer-return-snapshot');
+      layerReturn.style.display = 'none';
+      layerReturn.style.clipPath = 'polygon(0 0, 0 0, 0 100%, 0 100%)';
+
+      const dwellBar = document.getElementById('dwell-bar-fill');
+      dwellBar.style.transition = 'none';
+      dwellBar.style.transform = 'scaleX(0)';
+
+      // 3. 开始执行由左至右擦除入场 (Left-to-Right Wipe In)
+      startWipeIn();
+    }
+
+    // 执行由左至右擦除入场
+    function startWipeIn() {
+      transitionState = 'WIPING_IN';
+      updateStatusBadge('WIPING_IN');
+
+      const layerMode = document.getElementById('layer-mode-view');
+      const lightBlade = document.getElementById('light-blade');
+
+      // 开启光刃，初始位于左外侧
+      lightBlade.style.opacity = '1';
+
+      // 通知 Android 端：擦除动效正式点亮
+      try {
+        if (window.DriveBridge && window.DriveBridge.onWipeStarted) {
+          window.DriveBridge.onWipeStarted();
+        }
+      } catch (e) {
+        console.warn('DriveBridge.onWipeStarted 通知异常:', e);
+      }
+
+      const duration = 480; // 擦除入场耗时 480ms (高帧率黄金手感)
+      const startTime = performance.now();
+      const startX = -60;
+      const targetX = 1960;
+
+      function renderFrame(now) {
+        const elapsed = now - startTime;
+        const progress = Math.min(1, elapsed / duration);
+        const ease = easeOutCubic(progress);
+        const currentX = startX + (targetX - startX) * ease;
+
+        // 严格倾斜角度擦除切线 (与 -6deg 光刃数学 100% 对齐)
+        const topCutX = Math.round(currentX + 40);
+        const btmCutX = Math.round(currentX);
+
+        layerMode.style.clipPath = `polygon(0 0, ${topCutX}px 0, ${btmCutX}px 100%, 0 100%)`;
+        lightBlade.style.left = `${btmCutX}px`;
+
+        if (progress < 1) {
+          wipeAnimFrameId = requestAnimationFrame(renderFrame);
+        } else {
+          // 入场擦除完成
+          wipeAnimFrameId = null;
+          layerMode.style.clipPath = 'none';
+          lightBlade.style.opacity = '0';
+          // 隐藏上一个模式的垫底层
+          document.getElementById('layer-prev-mode').style.display = 'none';
+          startDwellCountdown();
+        }
+      }
+
+      wipeAnimFrameId = requestAnimationFrame(renderFrame);
+    }
+
+    // 2.0 秒驻留期
+    function startDwellCountdown() {
+      transitionState = 'DWELLING';
+      updateStatusBadge('DWELLING (2.0s)');
+
+      const dwellBar = document.getElementById('dwell-bar-fill');
+      if (dwellBar) {
+        dwellBar.style.transition = 'none';
+        dwellBar.style.transform = 'scaleX(1)';
+        void dwellBar.offsetWidth;
+        dwellBar.style.transition = 'transform 2000ms linear';
+        dwellBar.style.transform = 'scaleX(0)';
+      }
+
+      if (dwellTimerId) {
+        clearTimeout(dwellTimerId);
+      }
+      dwellTimerId = setTimeout(() => {
+        dwellTimerId = null;
+        startWipeOut();
+      }, 2000);
+    }
+
+    // 执行由左至右擦除退场 (方案 A: 原主页面快照从最左侧向右平滑擦除覆盖模式页)
+    function startWipeOut() {
+      transitionState = 'WIPING_OUT';
+      updateStatusBadge('WIPING_OUT (Scheme A)');
+
+      const layerReturn = document.getElementById('layer-return-snapshot');
+      const lightBlade = document.getElementById('light-blade');
+
+      // 确保垫底层隐藏
+      document.getElementById('layer-prev-mode').style.display = 'none';
+
+      layerReturn.style.display = 'flex';
+      lightBlade.style.opacity = '1';
+
+      const duration = 480; // 擦除退场耗时 480ms
+      const startTime = performance.now();
+      const startX = -60;
+      const targetX = 1960;
+
+      function renderFrame(now) {
+        const elapsed = now - startTime;
+        const progress = Math.min(1, elapsed / duration);
+        const ease = easeOutCubic(progress);
+        const currentX = startX + (targetX - startX) * ease;
+
+        const topCutX = Math.round(currentX + 40);
+        const btmCutX = Math.round(currentX);
+
+        layerReturn.style.clipPath = `polygon(0 0, ${topCutX}px 0, ${btmCutX}px 100%, 0 100%)`;
+        lightBlade.style.left = `${btmCutX}px`;
+
+        if (progress < 1) {
+          wipeAnimFrameId = requestAnimationFrame(renderFrame);
+        } else {
+          // 擦除退场完成
+          wipeAnimFrameId = null;
+          lightBlade.style.opacity = '0';
+          transitionState = 'IDLE';
+          updateStatusBadge('IDLE');
+
+          // 通知 Android 端：完全回退至主显示界面
+          try {
+            if (window.DriveBridge && window.DriveBridge.onWipeOutComplete) {
+              window.DriveBridge.onWipeOutComplete();
+            }
+          } catch (e) {
+            console.warn('DriveBridge.onWipeOutComplete 通知异常:', e);
+          }
+        }
+      }
+
+      wipeAnimFrameId = requestAnimationFrame(renderFrame);
+    }
+
+    // 档位打断模式时调用：冻结模式倒计时与退场动画，保持模式完全可见不早退
+    window.pauseDriveModeDwell = function() {
+      if (dwellTimerId) {
+        clearTimeout(dwellTimerId);
+        dwellTimerId = null;
+      }
+      if (wipeAnimFrameId) {
+        cancelAnimationFrame(wipeAnimFrameId);
+        wipeAnimFrameId = null;
+      }
+      const dwellBar = document.getElementById('dwell-bar-fill');
+      if (dwellBar) {
+        dwellBar.style.transition = 'none';
+      }
+      const layerMode = document.getElementById('layer-mode-view');
+      if (layerMode) {
+        layerMode.style.display = 'flex';
+        layerMode.style.clipPath = 'none';
+      }
+      const lightBlade = document.getElementById('light-blade');
+      if (lightBlade) {
+        lightBlade.style.opacity = '0';
+      }
+      const layerReturn = document.getElementById('layer-return-snapshot');
+      if (layerReturn) {
+        layerReturn.style.display = 'none';
+      }
+      const layerPrev = document.getElementById('layer-prev-mode');
+      if (layerPrev) {
+        layerPrev.style.display = 'none';
+      }
+      transitionState = 'DWELLING';
+      updateStatusBadge('PAUSED_BY_GEAR');
+    };
+
+    /**
+     * 先档位后模式场景：模式在档位下方静默就绪为“已经完成出现动画的模式页面”，跳过入场擦除，等档位翻出后直接展现
+     */
+    window.prepareModeInstant = function(modeKey, snapshotBase64) {
+      const validMode = (modeKey || '').toUpperCase().trim();
+      if (!DRIVE_MODES[validMode]) return;
+
+      if (wipeAnimFrameId) {
+        cancelAnimationFrame(wipeAnimFrameId);
+        wipeAnimFrameId = null;
+      }
+      if (dwellTimerId) {
+        clearTimeout(dwellTimerId);
+        dwellTimerId = null;
+      }
+
+      if (snapshotBase64 && snapshotBase64.length > 50) {
+        activeSnapshotUrl = snapshotBase64;
+      }
+      if (activeSnapshotUrl) {
+        const imgMain = document.getElementById('img-main-snapshot');
+        const imgRet = document.getElementById('img-return-snapshot');
+        if (imgMain) imgMain.src = activeSnapshotUrl;
+        if (imgRet) imgRet.src = activeSnapshotUrl;
+      }
+
+      applyModeContent(validMode);
+
+      const layerReturn = document.getElementById('layer-return-snapshot');
+      if (layerReturn) {
+        layerReturn.style.display = 'none';
+      }
+      const layerPrev = document.getElementById('layer-prev-mode');
+      if (layerPrev) {
+        layerPrev.style.display = 'none';
+      }
+      const layerMode = document.getElementById('layer-mode-view');
+      if (layerMode) {
+        layerMode.style.display = 'flex';
+        layerMode.style.clipPath = 'none';
+      }
+      const lightBlade = document.getElementById('light-blade');
+      if (lightBlade) {
+        lightBlade.style.opacity = '0';
+      }
+
+      const dwellBar = document.getElementById('dwell-bar-fill');
+      if (dwellBar) {
+        dwellBar.style.transition = 'none';
+        dwellBar.style.transform = 'scaleX(1)';
+      }
+
+      transitionState = 'DWELLING';
+      updateStatusBadge('READY_UNDER_GEAR');
+    };
+
+    // 档位退出后恢复模式驻留 2.0 秒，然后光刃退场
+    window.resumeDriveModeDwell = function() {
+      const layerMode = document.getElementById('layer-mode-view');
+      if (layerMode) {
+        layerMode.style.display = 'flex';
+        layerMode.style.clipPath = 'none';
+      }
+      const lightBlade = document.getElementById('light-blade');
+      if (lightBlade) {
+        lightBlade.style.opacity = '0';
+      }
+      startDwellCountdown();
+    };
+
+    // =========================================================================
+    // 缩放适配与视口自适应 (完美适配实车 1920×384 以及各类高分测试 Pad)
+    // =========================================================================
+    function applyScale() {
+      const stage = document.getElementById('drive-stage');
+      const scaleLabel = document.getElementById('scale-label');
+      if (!stage) return;
+
+      const vw = window.innerWidth || document.documentElement.clientWidth;
+      const vh = window.innerHeight || document.documentElement.clientHeight;
+
+      if (isOverlayMode) {
+        // 悬浮窗或全屏模式下，精准贴合原生 1920×384 视口比例
+        const targetAspect = 1920 / 384;
+        const currentAspect = vw / vh;
+        let scale;
+        if (currentAspect > targetAspect) {
+          scale = vh / 384;
+        } else {
+          scale = vw / 1920;
+        }
+        stage.style.transform = `translate(-50%, -50%) scale(${scale})`;
+        return;
+      }
+
+      if (!autoScale) {
+        stage.style.transform = 'translate(-50%, -50%) scale(1)';
+        if (scaleLabel) scaleLabel.textContent = '1:1 原生';
+        return;
+      }
+
+      const availWidth = vw - 32;
+      const availHeight = vh - 100;
+      const scaleW = availWidth / 1920;
+      const scaleH = availHeight / 384;
+      const scale = Math.min(1, Math.min(scaleW, scaleH));
+
+      stage.style.transform = `translate(-50%, -50%) scale(${scale})`;
+      if (scaleLabel) scaleLabel.textContent = `缩放: ${Math.round(scale * 100)}%`;
+    }
+
+    function setOverlayMode(enabled) {
+      isOverlayMode = !!enabled;
+      document.body.classList.toggle('overlay-mode', isOverlayMode);
+      applyScale();
+    }
+
+    function updateStatusBadge(text) {
+      const badge = document.getElementById('state-badge');
+      if (badge) badge.textContent = `STATUS: ${text}`;
+    }
+
+    // 暴露给 Android WebView / 控制台调用的全局接口
+    window.triggerDriveModeSwitch = triggerDriveModeSwitch;
+    window.setOverlayMode = setOverlayMode;
+
+    // =========================================================================
+    // DOM 初始化与交互监听
+    // =========================================================================
+    window.addEventListener('DOMContentLoaded', () => {
+      applyModeContent(currentMode);
+      applyScale();
+
+      // 顶部模式切换按钮
+      document.querySelectorAll('.btn-mode').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const m = btn.getAttribute('data-mode');
+          triggerDriveModeSwitch(m);
+        });
+      });
+
+      // 缩放切换按钮
+      const btnScale = document.getElementById('btn-scale-toggle');
+      if (btnScale) {
+        btnScale.addEventListener('click', () => {
+          autoScale = !autoScale;
+          applyScale();
+        });
+      }
+
+      // 键盘 1-5 模拟快捷键
+      window.addEventListener('keydown', (e) => {
+        if (['1', '2', '3', '4', '5'].includes(e.key)) {
+          const idx = parseInt(e.key, 10) - 1;
+          if (MODE_KEYS[idx]) triggerDriveModeSwitch(MODE_KEYS[idx]);
+        } else if (e.key === 'ArrowRight') {
+          const curIdx = MODE_KEYS.indexOf(currentMode);
+          const nextMode = MODE_KEYS[(curIdx + 1) % MODE_KEYS.length];
+          triggerDriveModeSwitch(nextMode);
+        } else if (e.key === 'ArrowLeft') {
+          const curIdx = MODE_KEYS.indexOf(currentMode);
+          const prevMode = MODE_KEYS[(curIdx - 1 + MODE_KEYS.length) % MODE_KEYS.length];
+          triggerDriveModeSwitch(prevMode);
+        }
+      });
+
+      window.addEventListener('resize', applyScale);
+
+      // 通知 Android 页面准备就绪
+      setTimeout(() => {
+        try {
+          if (window.DriveBridge && window.DriveBridge.onPageReady) {
+            window.DriveBridge.onPageReady();
+          }
+        } catch (_) {}
+      }, 50);
+    });
+  </script>
+</body>
+</html>

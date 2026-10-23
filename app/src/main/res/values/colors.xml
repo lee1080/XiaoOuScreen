@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="panel">#1E293B</color>
+    <color name="panel_light">#334155</color>
+    <color name="accent">#38BDF8</color>
+    <color name="text_primary">#F8FAFC</color>
+    <color name="text_secondary">#94A3B8</color>
+    <color name="background_dark">#FF000000</color>
+    <color name="accent_orange">#FFFF6900</color>
+    <color name="lyric_current">#FFFFD700</color>
+</resources>

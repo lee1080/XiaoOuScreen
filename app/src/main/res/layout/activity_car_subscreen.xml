@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/rootContainer"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000000">
+
+    <!-- 页面 1：1920 × 384 车载超宽副屏核心画布 View (写实多图层 + 居中时钟) -->
+    <com.car.xiaoouscreen.ui.CarWeatherCanvasView
+        android:id="@+id/carWeatherCanvasView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_gravity="center"
+        android:visibility="visible" />
+
+    <!-- 页面 2：车载歌词全屏展示视图 (Density 归一化自适应，初始隐藏) -->
+    <com.carlyrics.display.LyricsNormalizedContainerView
+        android:id="@+id/lyricsContainerView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_gravity="center"
+        android:visibility="gone"
+        android:alpha="0" />
+
+    <!-- 页面 3：1920×384 3D 正方体档位翻转视图 (初始隐藏，切档时浮现执行翻转) -->
+    <WebView
+        android:id="@+id/gearCubeWebView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_gravity="center"
+        android:visibility="gone" />
+
+    <!-- 自动消失的退出关闭按钮 -->
+    <FrameLayout
+        android:id="@+id/closeButtonContainer"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|start"
+        android:layout_marginStart="16dp"
+        android:layout_marginTop="12dp"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/tvCloseButton"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:background="@drawable/bg_close_button"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center"
+            android:text="\u2715"
+            android:textColor="#FFFFFF"
+            android:textSize="20sp"
+            android:textStyle="bold" />
+
+    </FrameLayout>
+
+</FrameLayout>

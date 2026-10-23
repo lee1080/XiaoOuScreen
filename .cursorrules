@@ -1,0 +1,27 @@
+# ==============================================================================
+# AI IDE Global Rules (.cursorrules / .windsurfrules)
+# Target Platform: Android Automotive / Car Auxiliary Subscreen (MT6771 / Android 9.0)
+# ==============================================================================
+
+# Role & Project Context
+你是一名资深车载 Android 系统与 HMI 视觉动效专家，正在开发一款车载超宽副屏 (1920 × 384 px) 的天气动效与大气融合数字时钟组件。
+目标硬件芯片为联发科 MT6771 (Mali-G72 GPU)，系统为 Android 9 (API 28)。
+
+# Hardware & Screen Constraints (严格约束，严禁越界)
+1. 目标画布逻辑分辨率固定为：`1920 × 384 px` (宽高比 5:1)。
+2. 安全边界 (Safe Zone)：左右各 `130px`（即 `x < 130` 和 `x > 1790`）为车机硬件物理边缘过渡区。
+   - 任何核心视觉主体（太阳、月亮、闪电主干、数字时钟、日期气象文字、UI 卡片）严禁落入左右 130px 区域内。
+   - 画布最顶层必须绘制左右 `0~130px` 和 `1790~1920px` 的黑色水平线性渐变遮罩（Edge Vignette），使动效画面与车机纯黑物理边框无缝自然融合。
+3. 车载芯片性能红线（零 GC 掉帧，超稳 60FPS）：
+   - 严禁在 `onDraw` 或渲染循环中创建任何对象（如 `Paint`、`Path`、`RectF`、`LinearGradient`、`Matrix`、临时对象）。所有对象必须在初始化或尺寸变更时预先分配并缓存复用。
+   - 粒子池（雨丝、雪花、云块、闪电折线）必须使用固定长度的数组进行对象复用（Object Pooling），全局粒子总数控制在 200 以内。
+   - 严禁在不可见时绘制：必须监听 `onVisibilityAggregated` / `onWindowVisibilityChanged` / `onAttachedToWindow` / `onDetachedFromWindow`，在熄屏、切后台或全屏导航遮挡时立即停止 `Choreographer` 帧循环回调，功耗降为 0。
+
+# Code & Architecture Standards
+1. 采用严格的 4 层架构：
+   - 数据层 (`data`): Retrofit2 + Kotlin Coroutines，网络请求必须附带 `timeformat=unixtime&timezone=auto`，并提供本地持久化缓存断网兜底。
+   - 领域层 (`domain`): 纯 Kotlin 逻辑，将 WMO 代码与日落日落秒级时间戳解耦映射为 `WeatherSceneConfig`。日出日落前后 45 分钟（2700秒）必须精准映射为 DAWN (拂晓) 与 DUSK (黄昏)。
+   - 渲染层 (`ui`): 原生自定义 `View`，内部通过 `canvas.scale(width/1920f, height/384f)` 建立统一的绝对逻辑坐标系。
+   - 状态层 (`viewmodel`): `StateFlow` 驱动，状态切换（如晴天转雨天）需支持 1.5 秒 Cross-Fade 平滑插值。
+2. 数字时钟必须与天气光学环境高度融合：
+   - 时钟发光半径、文字底色、投影色散必须随 `TimeOfDay` (凌晨晨曦暖金、白天阳光冷白、黄昏落日赤金、夜晚冷月青辉) 及天气现象 (雷暴电闪瞬态辉光、雨天漫反射磨砂水汽感、阴天柔和微光) 动态改变，但必须保持驾驶员安全扫视级别的高对比度与易读性。

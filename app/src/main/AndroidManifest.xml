@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- 网络请求 Open-Meteo 气象接口与第三方歌词源 API -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- 获取车载 GPS 定位以检索当地经纬度 -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
+    <!-- 小欧屏 / 多屏投屏与悬浮窗权限 -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- 长安欧尚 Z6 车机 Automotive 底层信号读取权限 (纯 App 顶层接入) -->
+    <uses-permission android:name="android.car.permission.CAR_CABIN" />
+    <uses-permission android:name="android.car.permission.CAR_POWERTRAIN" />
+    <uses-permission android:name="android.car.permission.CAR_VENDOR_EXTENSION" />
+    <uses-permission android:name="android.car.permission.CAR_SPEED" />
+    <uses-permission android:name="android.car.permission.CAR_INFO" />
+
+    <queries>
+        <intent>
+            <action android:name="android.media.browse.MediaBrowserService" />
+        </intent>
+    </queries>
+
+    <application
+        android:name=".XiaoOuApplication"
+        android:allowBackup="true"
+        android:icon="@android:drawable/sym_def_app_icon"
+        android:label="@string/app_name"
+        android:hardwareAccelerated="true"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:theme="@style/Theme.CarWeather">
+
+        <!-- 主屏控制台与效果模拟调试 Activity -->
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- 车载歌词二级设置 Activity -->
+        <activity
+            android:name=".ui.LyricsSettingsActivity"
+            android:exported="true"
+            android:screenOrientation="sensorLandscape"
+            android:theme="@style/Theme.CarLyrics"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize" />
+
+        <!-- 副屏全屏独立预览 Activity (可由控制台打开或 ADB 启动) -->
+        <activity
+            android:name=".ui.CarSubscreenActivity"
+            android:exported="true"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize" />
+
+        <!-- 1920×384 3D 正方体档位向上翻转展示与模拟 Activity (支持 ADB 启动) -->
+        <activity
+            android:name=".ui.GearFlipActivity"
+            android:exported="true"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize">
+            <intent-filter>
+                <action android:name="com.car.action.GEAR_FLIP_VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <!-- ADB 命令行与系统级外部指令广播接收器 -->
+        <receiver
+            android:name=".receiver.XiaoOuCommandReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.car.gear.SWITCH" />
+                <action android:name="com.car.xiaoouscreen.SWITCH_GEAR" />
+                <action android:name="com.car.xiaoouscreen.SHOW_TOP" />
+                <action android:name="com.car.xiaoouscreen.SHOW_FITNESS" />
+                <action android:name="com.car.xiaoouscreen.HIDE" />
+                <action android:name="com.car.xiaoouscreen.TRIGGER_LIGHTNING" />
+                <action android:name="com.car.xiaoouscreen.SIMULATE_PRESET" />
+                <action android:name="com.car.xiaoouscreen.RESET_LIVE" />
+            </intent-filter>
+        </receiver>
+
+        <!-- 小欧屏 Presentation / Overlay 前台投屏服务 (支持 ADB 与外部调度) -->
+        <service
+            android:name=".service.WeatherOverlayService"
+            android:exported="true" />
+
+        <!-- 通知监听服务 (用于兜底媒体识别与广播捕获) -->
+        <service
+            android:name="com.carlyrics.recognition.NotificationListenerService"
+            android:exported="true"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+        <!-- 媒体控制器服务 -->
+        <service
+            android:name="com.carlyrics.recognition.MediaControllerService"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.media.browse.MediaBrowserService" />
+            </intent-filter>
+        </service>
+
+    </application>
+
+</manifest>

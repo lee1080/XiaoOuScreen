@@ -1,0 +1,733 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#121214"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <!-- 标题栏 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="小欧屏 · 控制台与气象模拟"
+                android:textColor="#FFFFFF"
+                android:textSize="22sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tvStatusBadge"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:background="@drawable/bg_close_button"
+                android:paddingStart="12dp"
+                android:paddingTop="6dp"
+                android:paddingEnd="12dp"
+                android:paddingBottom="6dp"
+                android:text="副屏: 未启动"
+                android:textColor="#94A3B8"
+                android:textSize="13sp" />
+        </LinearLayout>
+
+        <!-- 卡片：车载歌词与双态融合 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:background="@drawable/bg_close_button"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="🎵 车载歌词与无缝切换"
+                android:textColor="#38BDF8"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="开启后播放音乐全屏显示独立车载歌词与皮肤；关闭后在小欧屏天气界面中央展示五行居中歌词"
+                android:textColor="#94A3B8"
+                android:textSize="12sp" />
+
+            <!-- 独立歌词开关与设置入口 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <androidx.appcompat.widget.SwitchCompat
+                    android:id="@+id/switchStandaloneLyrics"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="开启独立车载歌词"
+                    android:textColor="#F8FAFC"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
+
+                <Button
+                    android:id="@+id/btnLyricsSettings"
+                    android:layout_width="wrap_content"
+                    android:layout_height="44dp"
+                    android:layout_marginStart="12dp"
+                    android:background="@drawable/bg_button"
+                    android:paddingStart="16dp"
+                    android:paddingEnd="16dp"
+                    android:text="⚙️ 车载歌词设置"
+                    android:textColor="#38BDF8"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/tvLyricsStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:background="#1E293B"
+                android:fontFamily="monospace"
+                android:padding="8dp"
+                android:text="🎵 当前音轨: 等待识别音乐..."
+                android:textColor="#CBD5E1"
+                android:textSize="12sp" />
+
+        </LinearLayout>
+
+        <!-- 卡片 1：小欧屏投屏与多显控制 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:background="@drawable/bg_close_button"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="📺 小欧副屏投屏调度 (AR_XIAOOU / 1920×384)"
+                android:textColor="#38BDF8"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tvDisplayInfo"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:background="#1E293B"
+                android:fontFamily="monospace"
+                android:padding="10dp"
+                android:text="正在探测车机/平板可用屏幕..."
+                android:textColor="#CBD5E1"
+                android:textSize="12sp" />
+
+            <!-- 操作按钮行 1 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnShowTop"
+                    android:layout_width="0dp"
+                    android:layout_height="48dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_button"
+                    android:text="🚀 小欧上方 (2038)"
+                    android:textColor="#FFFFFF"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/btnShowFitness"
+                    android:layout_width="0dp"
+                    android:layout_height="48dp"
+                    android:layout_marginStart="10dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_button"
+                    android:text="🌱 小欧下方 (2037)"
+                    android:textColor="#FFFFFF"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/btnHide"
+                    android:layout_width="0dp"
+                    android:layout_height="48dp"
+                    android:layout_marginStart="10dp"
+                    android:layout_weight="0.8"
+                    android:background="@drawable/bg_button"
+                    android:text="⏹️ 停止投屏"
+                    android:textColor="#EF4444"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
+            <!-- 操作按钮行 2 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnSwitchDisplay"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_button"
+                    android:text="🔄 切换目标屏幕"
+                    android:textColor="#38BDF8"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/btnPreviewFullscreen"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_marginStart="10dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_button"
+                    android:text="🖥️ 主屏全屏预览"
+                    android:textColor="#A78BFA"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/btnOpenGearFlip"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_marginStart="10dp"
+                    android:layout_weight="1.2"
+                    android:background="@drawable/bg_button"
+                    android:text="🏎️ 3D档位翻转模拟"
+                    android:textColor="#F59E0B"
+                    android:textStyle="bold"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/tvPermissionNotice"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:background="#7F1D1D"
+                android:padding="8dp"
+                android:text="⚠️ 提示：小欧上方 (2038) 模式需要【悬浮窗/显示在其他应用上层】权限，点击此处授予"
+                android:textColor="#FCA5A5"
+                android:textSize="12sp"
+                android:visibility="gone" />
+        </LinearLayout>
+
+        <!-- 卡片 1.5：🏎️ 车载档位模拟与小欧屏 3D 翻转测试 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:background="@drawable/bg_close_button"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="🏎️ 车载档位模拟与小欧屏 3D 翻转测试"
+                    android:textColor="#10B981"
+                    android:textSize="16sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/tvCurrentGearBadge"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:background="#1E293B"
+                    android:paddingStart="10dp"
+                    android:paddingTop="4dp"
+                    android:paddingEnd="10dp"
+                    android:paddingBottom="4dp"
+                    android:text="当前: P 档"
+                    android:textColor="#F59E0B"
+                    android:textStyle="bold"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="点击下方档位直接驱动小欧副屏/悬浮窗正方体向上翻转；实车驾驶时随挡把变动全自动触发"
+                android:textColor="#94A3B8"
+                android:textSize="12sp" />
+
+            <!-- P / R / N / D 四档选择 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnSimGearP"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_button"
+                    android:text="P 驻车档"
+                    android:textColor="#F59E0B"
+                    android:textStyle="bold"
+                    android:textSize="14sp" />
+
+                <Button
+                    android:id="@+id/btnSimGearR"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_marginStart="8dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_button"
+                    android:text="R 倒车档"
+                    android:textColor="#F43F5E"
+                    android:textStyle="bold"
+                    android:textSize="14sp" />
+
+                <Button
+                    android:id="@+id/btnSimGearN"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_marginStart="8dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_button"
+                    android:text="N 空档"
+                    android:textColor="#CBD5E1"
+                    android:textStyle="bold"
+                    android:textSize="14sp" />
+
+                <Button
+                    android:id="@+id/btnSimGearD"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_marginStart="8dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_button"
+                    android:text="D 行进档"
+                    android:textColor="#10B981"
+                    android:textStyle="bold"
+                    android:textSize="14sp" />
+            </LinearLayout>
+
+            <!-- 连切测试与快捷按钮 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnSimGearCombo"
+                    android:layout_width="0dp"
+                    android:layout_height="40dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_button"
+                    android:text="⚡ 模拟连切测试 (P→R→N→D 验证就地平滑刷新)"
+                    android:textColor="#38BDF8"
+                    android:textSize="12sp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- 卡片：车辆驾驶模式切换 (ECO / NORMAL / SPORT / RACE / CUSTOM) -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:background="@drawable/bg_close_button"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="🏎️ 车辆驾驶模式切换 (由左至右擦除转场)"
+                    android:textColor="#FB923C"
+                    android:textSize="16sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/tvCurrentDriveModeBadge"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/bg_button"
+                    android:paddingStart="10dp"
+                    android:paddingTop="4dp"
+                    android:paddingEnd="10dp"
+                    android:paddingBottom="4dp"
+                    android:text="当前: SPORT"
+                    android:textColor="#FB923C"
+                    android:textStyle="bold"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="由左至右擦除展现对应模式，专属动效停留 2 秒后由左至右擦除回退主页面；实车联动方向盘/中控驾驶模式"
+                android:textColor="#94A3B8"
+                android:textSize="12sp" />
+
+            <!-- 5 大模式按钮 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnModeECO"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_button"
+                    android:text="ECO\n经济"
+                    android:textColor="#10B981"
+                    android:textStyle="bold"
+                    android:textSize="12sp" />
+
+                <Button
+                    android:id="@+id/btnModeNORMAL"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_marginStart="6dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_button"
+                    android:text="NORMAL\n舒适"
+                    android:textColor="#0EA5E9"
+                    android:textStyle="bold"
+                    android:textSize="12sp" />
+
+                <Button
+                    android:id="@+id/btnModeSPORT"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_marginStart="6dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_button"
+                    android:text="SPORT\n运动"
+                    android:textColor="#F97316"
+                    android:textStyle="bold"
+                    android:textSize="12sp" />
+
+                <Button
+                    android:id="@+id/btnModeRACE"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_marginStart="6dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_button"
+                    android:text="RACE\n赛道"
+                    android:textColor="#EF4444"
+                    android:textStyle="bold"
+                    android:textSize="12sp" />
+
+                <Button
+                    android:id="@+id/btnModeCUSTOM"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_marginStart="6dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_button"
+                    android:text="CUSTOM\n自定义"
+                    android:textColor="#CBD5E1"
+                    android:textStyle="bold"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <!-- 模式连切测试 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnModeCombo"
+                    android:layout_width="0dp"
+                    android:layout_height="40dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_button"
+                    android:text="⚡ 模式连续切换测试 (验证左至右擦除与2秒驻留防打断)"
+                    android:textColor="#FB923C"
+                    android:textSize="12sp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- 卡片 2：4 时段 × 6 天气 = 24 状态气象矩阵控制台 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:background="@drawable/bg_close_button"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="🧪 4 时段 × 6 天气 = 24 状态模拟矩阵"
+                    android:textColor="#F59E0B"
+                    android:textSize="16sp"
+                    android:textStyle="bold" />
+
+                <Button
+                    android:id="@+id/btnResetLive"
+                    android:layout_width="wrap_content"
+                    android:layout_height="36dp"
+                    android:background="@drawable/bg_button"
+                    android:text="🌐 恢复实时联网"
+                    android:textColor="#34D399"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <!-- 1. 时段选择栏 (4 选 1) -->
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="① 选择昼夜时段 (Time of Day):"
+                android:textColor="#CBD5E1"
+                android:textSize="13sp"
+                android:textStyle="bold" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnTimeDawn"
+                    android:layout_width="0dp"
+                    android:layout_height="42dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_button"
+                    android:text="🌅 清晨"
+                    android:textColor="#FED7AA"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/btnTimeDay"
+                    android:layout_width="0dp"
+                    android:layout_height="42dp"
+                    android:layout_marginStart="6dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_button"
+                    android:text="☀️ 白天"
+                    android:textColor="#BAE6FD"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/btnTimeDusk"
+                    android:layout_width="0dp"
+                    android:layout_height="42dp"
+                    android:layout_marginStart="6dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_button"
+                    android:text="🌇 傍晚"
+                    android:textColor="#FDBA74"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/btnTimeNight"
+                    android:layout_width="0dp"
+                    android:layout_height="42dp"
+                    android:layout_marginStart="6dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_button"
+                    android:text="🌙 夜晚"
+                    android:textColor="#93C5FD"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
+            <!-- 2. 天气选择栏 (7 选 1，构成 4×7=28 矩阵) -->
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="② 选择天气类型 (4×7=28 全场景矩阵):"
+                android:textColor="#CBD5E1"
+                android:textSize="13sp"
+                android:textStyle="bold" />
+
+            <GridLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:columnCount="4">
+
+                <Button
+                    android:id="@+id/btnWeatherClear"
+                    android:layout_width="0dp"
+                    android:layout_height="42dp"
+                    android:layout_columnWeight="1"
+                    android:layout_margin="3dp"
+                    android:background="@drawable/bg_button"
+                    android:text="☀️ 晴朗"
+                    android:textColor="#FDE047"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/btnWeatherCloudy"
+                    android:layout_width="0dp"
+                    android:layout_height="42dp"
+                    android:layout_columnWeight="1"
+                    android:layout_margin="3dp"
+                    android:background="@drawable/bg_button"
+                    android:text="⛅ 多云"
+                    android:textColor="#E2E8F0"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/btnWeatherOvercast"
+                    android:layout_width="0dp"
+                    android:layout_height="42dp"
+                    android:layout_columnWeight="1"
+                    android:layout_margin="3dp"
+                    android:background="@drawable/bg_button"
+                    android:text="🌫️ 阴天/雾"
+                    android:textColor="#94A3B8"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/btnWeatherRain"
+                    android:layout_width="0dp"
+                    android:layout_height="42dp"
+                    android:layout_columnWeight="1"
+                    android:layout_margin="3dp"
+                    android:background="@drawable/bg_button"
+                    android:text="🌧️ 降雨"
+                    android:textColor="#60A5FA"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/btnWeatherSnow"
+                    android:layout_width="0dp"
+                    android:layout_height="42dp"
+                    android:layout_columnWeight="1"
+                    android:layout_margin="3dp"
+                    android:background="@drawable/bg_button"
+                    android:text="❄️ 降雪"
+                    android:textColor="#CBD5E1"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/btnWeatherStorm"
+                    android:layout_width="0dp"
+                    android:layout_height="42dp"
+                    android:layout_columnWeight="1"
+                    android:layout_margin="3dp"
+                    android:background="@drawable/bg_button"
+                    android:text="⛈️ 雷暴"
+                    android:textColor="#C084FC"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/btnWeatherSleet"
+                    android:layout_width="0dp"
+                    android:layout_height="42dp"
+                    android:layout_columnWeight="1"
+                    android:layout_margin="3dp"
+                    android:background="@drawable/bg_button"
+                    android:text="🌧️❄️ 雨夹雪"
+                    android:textColor="#67E8F9"
+                    android:textSize="13sp" />
+            </GridLayout>
+
+            <!-- 3. 特色气象与闪电触发 -->
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="③ 电闪特效激发 (Special FX):"
+                android:textColor="#CBD5E1"
+                android:textSize="13sp"
+                android:textStyle="bold" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnTriggerLightning"
+                    android:layout_width="match_parent"
+                    android:layout_height="44dp"
+                    android:background="@drawable/bg_button"
+                    android:text="⚡ 即时激发分支闪电与时钟电感脉冲"
+                    android:textColor="#F472B6"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
+            <!-- 当前气象状态显示 -->
+            <TextView
+                android:id="@+id/tvCurrentSceneInfo"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:background="#1E293B"
+                android:fontFamily="monospace"
+                android:padding="10dp"
+                android:text="当前场景: 实时联网模式"
+                android:textColor="#38BDF8"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <!-- 软件设置页面最底边版本号 -->
+        <TextView
+            android:id="@+id/tvAppVersion"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="28dp"
+            android:layout_marginBottom="24dp"
+            android:gravity="center"
+            android:text="小欧屏 v1.0.0"
+            android:textColor="#64748B"
+            android:textSize="13sp"
+            android:fontFamily="monospace" />
+
+    </LinearLayout>
+</ScrollView>

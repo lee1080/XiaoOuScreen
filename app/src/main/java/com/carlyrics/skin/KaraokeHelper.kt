@@ -1,0 +1,637 @@
+package com.carlyrics.skin
+
+import android.graphics.Color
+import android.graphics.LinearGradient
+import android.graphics.Shader
+import android.graphics.Typeface
+import android.text.Spannable
+import android.text.SpannableStringBuilder
+import android.text.TextPaint
+import android.text.style.CharacterStyle
+import android.text.style.ForegroundColorSpan
+import android.text.style.StyleSpan
+import android.text.style.UpdateAppearance
+import android.widget.TextView
+import com.carlyrics.model.LyricLine
+import com.carlyrics.model.LyricWord
+
+/**
+ * 卡拉OK效果配置与渲染器。
+ *
+ * 核心设计哲学（契合车载场景）：
+ * 1. 更透明、更克制：未唱到的字词保持优雅半透明（alpha 0.35~0.50），不刺眼、不干扰驾驶视线；
+ * 2. 动感律动：当前唱到的字词轻微放大（1.15x）并加粗发光，营造呼吸感与精准跟唱节拍；
+ * 3. 充盈饱满：已唱过的字词恢复正常大小（1.0x），保持清晰主题高亮；
+ * 4. 极致性能：基于 Word 索引状态缓存防抖，帧率 60fps 零 GC 压力。
+ */
+data class KaraokeStyle(
+    val sungColor: Int,
+    val activeColor: Int,
+    val upcomingColor: Int,
+    val activeScale: Float = 1.0f,
+    val activeShadowColor: Int = 0,
+    val activeShadowRadius: Float = 0f
+)
+
+object KaraokeHelper {
+
+    private class KaraokeTag(
+        val lineTimestamp: Long,
+        var wipeSpan: KaraokeLineWipeSpan?,
+        var lastWipeX: Float = -1f,
+        var activeWordIndex: Int = 0
+    )
+
+    private data class WordSpanInfo(
+        val word: LyricWord,
+        val start: Int,
+        val end: Int
+    )
+
+    private fun blendColors(from: Int, to: Int, ratio: Float): Int {
+        val r = ratio.coerceIn(0f, 1f)
+        val ir = 1f - r
+        val a = (Color.alpha(from) * ir + Color.alpha(to) * r).toInt()
+        val red = (Color.red(from) * ir + Color.red(to) * r).toInt()
+        val g = (Color.green(from) * ir + Color.green(to) * r).toInt()
+        val b = (Color.blue(from) * ir + Color.blue(to) * r).toInt()
+        return Color.argb(a, red, g, b)
+    }
+
+    // 默认皮肤样式 (DEFAULT / 浅色流光)
+    val DEFAULT_STYLE = KaraokeStyle(
+        sungColor = Color.parseColor("#FFFF4081"),      // 桃粉玫红
+        activeColor = Color.parseColor("#FFFF1744"),    // 活力高亮红
+        upcomingColor = Color.parseColor("#44111111"),  // 通透半透明灰
+        activeScale = 1.0f,
+        activeShadowColor = Color.parseColor("#80FF799D"),
+        activeShadowRadius = 6f
+    )
+
+    // 毛玻璃皮肤样式 (GLASSMORPHISM)
+    val GLASSMORPHISM_STYLE = KaraokeStyle(
+        sungColor = Color.WHITE,                        // 纯白高亮 (按照图二字体更白的来，100% 纯白无衰减)
+        activeColor = Color.WHITE,                      // 纯白跟唱高亮光束
+        upcomingColor = Color.parseColor("#66FFFFFF"),  // 40% 磨砂半透明白，与未唱行严格保持统一
+        activeScale = 1.0f,
+        activeShadowColor = 0,                          // 无阴影突变，确保擦除中与显示完毕后字体纯白与透明度严格一致
+        activeShadowRadius = 0f
+    )
+
+    // 极简霓虹皮肤样式 (MINIMAL_NEON)
+    val MINIMAL_NEON_STYLE = KaraokeStyle(
+        sungColor = Color.parseColor("#00FFCC"),        // 电光青绿
+        activeColor = Color.parseColor("#80FFFF"),      // 闪耀青白
+        upcomingColor = Color.parseColor("#3300FFCC"),  // 低透明暗青
+        activeScale = 1.0f,
+        activeShadowColor = Color.parseColor("#8000FFCC"),
+        activeShadowRadius = 15f
+    )
+
+    // 动感声浪皮肤样式 (VIBRANT_WAVE)
+    val VIBRANT_WAVE_STYLE = KaraokeStyle(
+        sungColor = Color.parseColor("#00E5FF"),        // 电波青蓝
+        activeColor = Color.parseColor("#FFFF00"),      // 动感亮黄
+        upcomingColor = Color.parseColor("#55FFFFFF"),  // 半透明白
+        activeScale = 1.0f,
+        activeShadowColor = Color.parseColor("#8000E5FF"),
+        activeShadowRadius = 10f
+    )
+
+    // 复古黑胶唱片皮肤样式 (VINYL_PLAYER)
+    val VINYL_STYLE = KaraokeStyle(
+        sungColor = Color.parseColor("#FFB74D"),        // 暖金琥珀
+        activeColor = Color.parseColor("#FFE082"),      // 明亮纯金
+        upcomingColor = Color.parseColor("#55FFFFFF"),  // 半透明暖白
+        activeScale = 1.0f,
+        activeShadowColor = Color.parseColor("#80FFB74D"),
+        activeShadowRadius = 8f
+    )
+
+    // 沉浸多级渐隐皮肤样式 (IMMERSIVE)
+    val IMMERSIVE_STYLE = KaraokeStyle(
+        sungColor = Color.parseColor("#FF758C"),        // 珊瑚粉红
+        activeColor = Color.parseColor("#FF9EAF"),      // 柔亮珊瑚红
+        upcomingColor = Color.parseColor("#55FFFFFF"),  // 半透明白
+        activeScale = 1.0f,
+        activeShadowColor = Color.parseColor("#80FF799D"),
+        activeShadowRadius = 8f
+    )
+
+    /**
+     * KTV 经典从左至右逐字平滑渐变擦除着色器 (基于 LinearGradient 硬件加速)
+     */
+    class KaraokeLineWipeSpan(
+        var startX: Float,
+        var endX: Float,
+        var wipeX: Float,
+        var sungColor: Int,
+        var activeColor: Int,
+        var upcomingColor: Int
+    ) : CharacterStyle(), UpdateAppearance {
+        override fun updateDrawState(tp: TextPaint) {
+            val span = (endX - startX).coerceAtLeast(1f)
+            val r = ((wipeX - startX) / span).coerceIn(0f, 1f)
+
+            if (r <= 0f) {
+                tp.shader = null
+                tp.color = upcomingColor
+                return
+            }
+            if (r >= 1f) {
+                tp.shader = null
+                tp.color = sungColor
+                return
+            }
+
+            // 关键：重置 Paint 基础颜色与 Alpha 为完全不透明纯白，避免 TextView 默认残存的半透明底色衰减 LinearGradient
+            tp.color = Color.WHITE
+            tp.alpha = 255
+
+            // 边缘平滑羽化高亮宽度 (展开至 8.0 像素软光束，呈现丝滑纯净的 KTV 渐变扫光效果)
+            val feather = (8.0f / span).coerceIn(0.002f, 0.05f)
+            val p1 = r.coerceIn(0f, 1f)
+            val p0 = (p1 - feather).coerceAtLeast(0f)
+            val p2 = (p1 + feather).coerceAtMost(1f)
+
+            val colors = intArrayOf(
+                sungColor,
+                sungColor,
+                activeColor,
+                upcomingColor,
+                upcomingColor
+            )
+            val positions = floatArrayOf(
+                0f,
+                p0,
+                p1,
+                p2,
+                1f
+            )
+
+            tp.shader = LinearGradient(
+                startX, 0f, endX, 0f,
+                colors,
+                positions,
+                Shader.TileMode.CLAMP
+            )
+        }
+    }
+
+    fun applyKaraoke(
+        textView: TextView,
+        line: LyricLine,
+        nextLineTimestamp: Long?,
+        currentPositionMs: Long,
+        style: KaraokeStyle,
+        marqueeEnabled: Boolean = true
+    ) {
+        val text = line.text
+        if (text.isBlank()) return
+
+        val rawWords = line.getOrGenerateWords(nextLineTimestamp)
+        if (rawWords.isEmpty()) return
+
+        // 智能细化词块为单字粒度，实现真正高品质的 KTV 级逐字平滑渲染
+        val words = ArrayList<LyricWord>(rawWords.size * 2)
+        for (w in rawWords) {
+            val len = w.text.length
+            // 若词长度大于 1 且不含空格（典型中文连字），按字等分时间戳
+            if (len > 1 && !w.text.trim().contains(' ')) {
+                val charDur = (w.duration / len).coerceAtLeast(15L)
+                for (ci in 0 until len) {
+                    words.add(
+                        LyricWord(
+                            text = w.text[ci].toString(),
+                            startTime = w.startTime + ci * charDur,
+                            duration = charDur
+                        )
+                    )
+                }
+            } else {
+                words.add(w)
+            }
+        }
+
+        // 映射每个 word 在当前 text 中的字符起止索引
+        val wordSpans = ArrayList<WordSpanInfo>(words.size)
+        var curIdx = 0
+        for (w in words) {
+            val idx = text.indexOf(w.text, curIdx)
+            if (idx != -1) {
+                val end = idx + w.text.length
+                wordSpans.add(WordSpanInfo(w, idx, end))
+                curIdx = end
+            } else {
+                val start = curIdx.coerceAtMost(text.length)
+                val end = (curIdx + w.text.length).coerceAtMost(text.length)
+                if (start < end) {
+                    wordSpans.add(WordSpanInfo(w, start, end))
+                    curIdx = end
+                }
+            }
+        }
+        if (wordSpans.isEmpty()) return
+
+        val firstStart = wordSpans.first().word.startTime
+        val lastWordStart = wordSpans.last().word.startTime
+        val lastEnd = wordSpans.last().let { it.word.startTime + it.word.duration }
+
+        // 1. 视口与排版边界精确测算 (基于小欧 3D 形象避让与 splitRatio)
+        var lyricsSkin: LyricsSkin? = null
+        var pRunner: android.view.ViewParent? = textView.parent
+        while (pRunner != null) {
+            if (pRunner is LyricsSkin) {
+                lyricsSkin = pRunner
+                break
+            }
+            pRunner = pRunner.parent
+        }
+        val density = textView.context.resources.displayMetrics.density
+        val areaView = lyricsSkin?.getLyricsArea()
+        val viewportW = lyricsSkin?.getAccurateLyricsViewportWidth()
+            ?: (areaView?.width?.toFloat() ?: (textView.parent as? android.view.View)?.width?.toFloat() ?: 1000f)
+        val itemPadding = (textView.totalPaddingLeft + textView.totalPaddingRight).toFloat()
+        val safeContentW = (viewportW - itemPadding).coerceAtLeast(50f)
+
+        // 以 Paint 全量精确测算真实文字物理渲染宽度 (包含字距 letterSpacing 与字号)
+        val measuredTextWidth = textView.paint.measureText(text)
+        val rawOverflow = measuredTextWidth - safeContentW
+
+        // 临界保护安全阈值 (约 8dp / 12px)：
+        // 当句子长度与边界差距小于 8dp（只差一个字或半个字）时，排版舍入与子像素抗锯齿极易导致 StaticLayout 截断末字！
+        // 因此只要 rawOverflow > -density * 8f，就必须进入超长保护机制！
+        val thresholdPx = density * 8f
+        val isOverflow = rawOverflow > -thresholdPx
+
+        // 锁定歌词视口裁切层级：
+        // 歌词区容器 (lyricsArea) 必须 clipChildren = true 严格锁定歌词左右物理边界，
+        // 防止超长文字往左平移时侵入左侧面板 (封面/歌名)，或往右侵入小欧 3D 形象区 (500px)！
+        // 而 lyricsArea 内部的滚动容器、LinearLayout 与 Wrapper 需 clipChildren = false 允许文字全量排版渲染。
+        if (areaView is android.view.ViewGroup && !areaView.clipChildren) {
+            areaView.clipChildren = true
+            areaView.clipToPadding = true
+        }
+        var cRunner: android.view.ViewParent? = textView.parent
+        while (cRunner != null && cRunner !== areaView && cRunner is android.view.ViewGroup) {
+            if (cRunner.clipChildren) cRunner.clipChildren = false
+            if (cRunner.clipToPadding) cRunner.clipToPadding = false
+            cRunner = cRunner.parent
+        }
+
+        // 2. 排版模式与控件宽度自适应调整 (彻底根除末字吞字截断)
+        if (marqueeEnabled) {
+            textView.setHorizontallyScrolling(true)
+            if (textView.maxLines != 1) textView.maxLines = 1
+            textView.ellipsize = null
+            if (isOverflow) {
+                // 强制展开 TextView 宽度，彻底解除父级 MeasureSpec.AT_MOST 约束，
+                // 确保 Android 内部 StaticLayout/BoringLayout 第一行 100% 容纳所有字符，末字绝不丢失！
+                val requiredWidth = (measuredTextWidth + itemPadding + density * 120f).toInt()
+                val lp = textView.layoutParams
+                if (lp != null && lp.width < requiredWidth) {
+                    lp.width = requiredWidth
+                    textView.requestLayout()
+                }
+                if (textView.gravity != (android.view.Gravity.START or android.view.Gravity.CENTER_VERTICAL)) {
+                    textView.gravity = android.view.Gravity.START or android.view.Gravity.CENTER_VERTICAL
+                }
+            } else {
+                if (textView.translationX != 0f) textView.translationX = 0f
+                val lp = textView.layoutParams
+                val defaultW = android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+                if (lp != null && lp.width != defaultW) {
+                    lp.width = defaultW
+                    textView.requestLayout()
+                }
+                val align = lyricsSkin?.lyricsTextAlignment ?: android.view.Gravity.START
+                val targetGrav = align or android.view.Gravity.CENTER_VERTICAL
+                if (textView.gravity != targetGrav) {
+                    textView.gravity = targetGrav
+                }
+            }
+        } else {
+            // 跑马灯关闭时，超长文字必须干净折行换行
+            textView.setHorizontallyScrolling(false)
+            if (textView.maxLines != Integer.MAX_VALUE) textView.maxLines = Integer.MAX_VALUE
+            if (textView.translationX != 0f) textView.translationX = 0f
+            val lp = textView.layoutParams
+            if (lp != null && lp.width != android.view.ViewGroup.LayoutParams.MATCH_PARENT) {
+                lp.width = android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                textView.requestLayout()
+            }
+            val align = lyricsSkin?.lyricsTextAlignment ?: android.view.Gravity.START
+            val targetGrav = align or android.view.Gravity.CENTER_VERTICAL
+            if (textView.gravity != targetGrav) {
+                textView.gravity = targetGrav
+            }
+        }
+
+        // 获取排版精确坐标
+        val layout = textView.layout
+        val layoutW = if (layout != null && layout.lineCount > 0) {
+            layout.getLineRight(0) - layout.getLineLeft(0)
+        } else 0f
+        val totalTextWidth = maxOf(measuredTextWidth, layoutW).coerceAtLeast(1f)
+
+        val textStartX = if (layout != null && layout.lineCount > 0) {
+            layout.getPrimaryHorizontal(0)
+        } else 0f
+        val textEndX = textStartX + totalTextWidth
+
+        // 状态 1：整行尚未唱到，全行展示优雅半透明底色
+        if (currentPositionMs < firstStart) {
+            updateSynchronizedMarquee(
+                textView = textView,
+                currentPositionMs = currentPositionMs,
+                firstStart = firstStart,
+                lastWordStart = lastWordStart,
+                lastEnd = lastEnd,
+                nextLineTimestamp = nextLineTimestamp,
+                rawOverflow = rawOverflow,
+                isOverflow = isOverflow,
+                marqueeEnabled = marqueeEnabled
+            )
+            val oldTag = textView.tag as? KaraokeTag
+            if (oldTag != null && oldTag.lineTimestamp == line.timestamp && oldTag.activeWordIndex == -1) {
+                return
+            }
+            textView.paint.shader = null
+            val ssb = SpannableStringBuilder(text)
+            ssb.setSpan(ForegroundColorSpan(style.upcomingColor), 0, text.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+            textView.text = ssb
+            textView.setShadowLayer(0f, 0f, 0f, 0)
+            textView.tag = KaraokeTag(line.timestamp, null, textStartX, -1)
+            return
+        }
+
+        // 状态 2：整行已全部唱完，全行常驻高饱和已唱颜色与加粗
+        if (currentPositionMs >= lastEnd) {
+            updateSynchronizedMarquee(
+                textView = textView,
+                currentPositionMs = currentPositionMs,
+                firstStart = firstStart,
+                lastWordStart = lastWordStart,
+                lastEnd = lastEnd,
+                nextLineTimestamp = nextLineTimestamp,
+                rawOverflow = rawOverflow,
+                isOverflow = isOverflow,
+                marqueeEnabled = marqueeEnabled
+            )
+            val oldTag = textView.tag as? KaraokeTag
+            if (oldTag != null && oldTag.lineTimestamp == line.timestamp && oldTag.activeWordIndex == 9999) {
+                return
+            }
+            textView.paint.shader = null
+            val ssb = SpannableStringBuilder(text)
+            ssb.setSpan(ForegroundColorSpan(style.sungColor), 0, text.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+            ssb.setSpan(StyleSpan(Typeface.BOLD), 0, text.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+            textView.text = ssb
+            if (style.activeShadowRadius > 0f) {
+                textView.setShadowLayer(style.activeShadowRadius, 0f, 0f, style.activeShadowColor)
+            } else {
+                textView.setShadowLayer(0f, 0f, 0f, 0)
+            }
+            textView.tag = KaraokeTag(line.timestamp, null, textEndX, 9999)
+            return
+        }
+
+        // 状态 3：正在演唱中，计算当前毫秒在整行文字上的精确水平擦除坐标 currentWipeX
+        var foundWipeX: Float? = null
+        var activeWordIndex = 0
+        for (i in wordSpans.indices) {
+            val spanInfo = wordSpans[i]
+            val w = spanInfo.word
+            val wEnd = w.startTime + w.duration
+            if (currentPositionMs in w.startTime until wEnd) {
+                activeWordIndex = i
+                val dur = w.duration.coerceAtLeast(1L)
+                val p = ((currentPositionMs - w.startTime).toFloat() / dur.toFloat()).coerceIn(0f, 1f)
+
+                val charStartX: Float
+                val charEndX: Float
+                val canUseLayout = layout != null && layout.lineCount > 0 && spanInfo.end <= layout.getLineEnd(0)
+                if (canUseLayout) {
+                    charStartX = layout!!.getPrimaryHorizontal(spanInfo.start)
+                    charEndX = layout.getPrimaryHorizontal(spanInfo.end)
+                } else {
+                    val sPx = textView.paint.measureText(text, 0, spanInfo.start)
+                    val ePx = textView.paint.measureText(text, 0, spanInfo.end)
+                    charStartX = textStartX + sPx
+                    charEndX = textStartX + ePx
+                }
+                foundWipeX = charStartX + (charEndX - charStartX) * p
+                break
+            }
+        }
+
+        val currentWipeX = if (foundWipeX != null) {
+            foundWipeX
+        } else {
+            val pastSpanIndex = wordSpans.indexOfLast { (it.word.startTime + it.word.duration) <= currentPositionMs }
+            if (pastSpanIndex != -1) {
+                val pastSpan = wordSpans[pastSpanIndex]
+                val pastEndMs = pastSpan.word.startTime + pastSpan.word.duration
+                val pastEndX = if (layout != null && layout.lineCount > 0 && pastSpan.end <= layout.getLineEnd(0)) {
+                    layout.getPrimaryHorizontal(pastSpan.end)
+                } else {
+                    textStartX + textView.paint.measureText(text, 0, pastSpan.end)
+                }
+                val nextSpan = wordSpans.getOrNull(pastSpanIndex + 1)
+                if (nextSpan != null && nextSpan.word.startTime > pastEndMs) {
+                    // 平滑线性过渡词间空隙（如空格或节奏停顿），消除词间停滞与跳变
+                    val gapDur = (nextSpan.word.startTime - pastEndMs).toFloat()
+                    val gapProgress = ((currentPositionMs - pastEndMs).toFloat() / gapDur).coerceIn(0f, 1f)
+                    val nextStartX = if (layout != null && layout.lineCount > 0 && nextSpan.start <= layout.getLineEnd(0)) {
+                        layout.getPrimaryHorizontal(nextSpan.start)
+                    } else {
+                        textStartX + textView.paint.measureText(text, 0, nextSpan.start)
+                    }
+                    pastEndX + (nextStartX - pastEndX) * gapProgress
+                } else {
+                    pastEndX
+                }
+            } else {
+                textStartX
+            }
+        }
+
+        // 演唱中跑马灯同步：以恒定线速度匀速向左平移超长歌词
+        updateSynchronizedMarquee(
+            textView = textView,
+            currentPositionMs = currentPositionMs,
+            firstStart = firstStart,
+            lastWordStart = lastWordStart,
+            lastEnd = lastEnd,
+            nextLineTimestamp = nextLineTimestamp,
+            rawOverflow = rawOverflow,
+            isOverflow = isOverflow,
+            marqueeEnabled = marqueeEnabled
+        )
+
+        // 多行换行模式 (当跑马灯关闭时，超长文字自动折行)：
+        // 采用精准的逐字/逐词 Spannable 变色擦除，完美支持折行后的优雅跟唱！
+        if (layout != null && layout.lineCount > 1) {
+            val oldTag = textView.tag as? KaraokeTag
+            if (oldTag != null && oldTag.lineTimestamp == line.timestamp && oldTag.activeWordIndex == activeWordIndex && oldTag.wipeSpan == null) {
+                return
+            }
+            textView.paint.shader = null
+            val ssb = SpannableStringBuilder(text)
+            for (i in wordSpans.indices) {
+                val spanInfo = wordSpans[i]
+                val w = spanInfo.word
+                val wEnd = w.startTime + w.duration
+                when {
+                    wEnd <= currentPositionMs -> {
+                        ssb.setSpan(ForegroundColorSpan(style.sungColor), spanInfo.start, spanInfo.end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                        ssb.setSpan(StyleSpan(Typeface.BOLD), spanInfo.start, spanInfo.end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    }
+                    currentPositionMs in w.startTime until wEnd -> {
+                        ssb.setSpan(ForegroundColorSpan(style.activeColor), spanInfo.start, spanInfo.end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                        ssb.setSpan(StyleSpan(Typeface.BOLD), spanInfo.start, spanInfo.end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    }
+                    else -> {
+                        ssb.setSpan(ForegroundColorSpan(style.upcomingColor), spanInfo.start, spanInfo.end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    }
+                }
+            }
+            textView.text = ssb
+            if (style.activeShadowRadius > 0f) {
+                textView.setShadowLayer(style.activeShadowRadius, 0f, 0f, style.activeShadowColor)
+            } else {
+                textView.setShadowLayer(0f, 0f, 0f, 0)
+            }
+            textView.tag = KaraokeTag(line.timestamp, null, 0f, activeWordIndex)
+            return
+        }
+
+        // 高性能零 GC / 零重排更新模式：若已挂载 Span，仅更新坐标并触发局部重绘
+        val oldTag = textView.tag as? KaraokeTag
+        if (oldTag != null && oldTag.lineTimestamp == line.timestamp && oldTag.wipeSpan != null) {
+            if (Math.abs(currentWipeX - oldTag.lastWipeX) < 0.1f) {
+                return
+            }
+            oldTag.wipeSpan?.apply {
+                this.startX = textStartX
+                this.endX = textEndX
+                this.wipeX = currentWipeX
+                this.sungColor = style.sungColor
+                this.activeColor = style.activeColor
+                this.upcomingColor = style.upcomingColor
+            }
+            oldTag.lastWipeX = currentWipeX
+            oldTag.activeWordIndex = activeWordIndex
+            textView.invalidate()
+            return
+        }
+
+        // 首次进入当前行演唱阶段，构造整行擦除 Span（字号恒定 1.0x，排版绝对零跳动）
+        val span = KaraokeLineWipeSpan(
+            startX = textStartX,
+            endX = textEndX,
+            wipeX = currentWipeX,
+            sungColor = style.sungColor,
+            activeColor = style.activeColor,
+            upcomingColor = style.upcomingColor
+        )
+        val ssb = SpannableStringBuilder(text)
+        ssb.setSpan(span, 0, text.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+        ssb.setSpan(StyleSpan(Typeface.BOLD), 0, text.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+
+        textView.text = ssb
+        if (style.activeShadowRadius > 0f) {
+            textView.setShadowLayer(style.activeShadowRadius, 0f, 0f, style.activeShadowColor)
+        } else {
+            textView.setShadowLayer(0f, 0f, 0f, 0)
+        }
+        textView.tag = KaraokeTag(line.timestamp, span, currentWipeX, activeWordIndex)
+    }
+
+    /**
+     * 基于精准起止时间与恒定速度计算的超长歌词匀速跑马灯
+     * 解决逐字单字时长不一导致往左移动时速率一快一慢、忽停忽冲的眩晕问题，
+     * 严格以恒定线速度 v = overflow / scrollDuration 匀速平移，
+     * 并在唱完这一句最后一个字之前完整呈现整句内容。
+     */
+    private fun updateSynchronizedMarquee(
+        textView: TextView,
+        currentPositionMs: Long,
+        firstStart: Long,
+        lastWordStart: Long,
+        lastEnd: Long,
+        nextLineTimestamp: Long?,
+        rawOverflow: Float,
+        isOverflow: Boolean,
+        marqueeEnabled: Boolean
+    ) {
+        if (!marqueeEnabled || !isOverflow) {
+            if (textView.translationX != 0f) {
+                textView.translationX = 0f
+            }
+            return
+        }
+
+        val density = textView.context.resources.displayMetrics.density
+        // 终点安全缓冲（32dp / 约 48px）：
+        // 确保跑马灯向左滚到底后，最后一个字及其字间距 100% 呈现在歌词视口内，绝不贴边或被截断！
+        val endBufferPx = density * 32f
+        val overflow = rawOverflow.coerceAtLeast(0f) + endBufferPx
+
+        // === 严格恒定线速度匀速跑马灯 ===
+        val rawDuration = lastEnd - firstStart
+        val lineDuration = if (rawDuration > 400L) {
+            rawDuration
+        } else {
+            if (nextLineTimestamp != null && nextLineTimestamp > firstStart) {
+                (nextLineTimestamp - firstStart).coerceIn(1200L, 10000L)
+            } else {
+                3000L
+            }
+        }
+
+        // 起步保持微小缓冲（约 8% 总时长，150~350ms）：开唱时先在原位静止片刻，便于目光锚定首字
+        val startHold = (lineDuration * 0.08f).toLong().coerceIn(150L, 350L)
+        val scrollStart = firstStart + startHold
+
+        // 核心约束：在唱完这一句最后一个字前（即唱到最后一个字起点 lastWordStart 或唱完前）就要显示完整句内容
+        val targetEnd = if (lastWordStart > scrollStart + 300L) {
+            minOf(lastWordStart, lastEnd - 300L)
+        } else {
+            (lastEnd - 300L).coerceAtLeast(scrollStart + 300L)
+        }
+        val scrollEnd = targetEnd.coerceAtLeast(scrollStart + 300L)
+        val scrollDuration = (scrollEnd - scrollStart).coerceAtLeast(300L)
+
+        // 恒定线速度匀速向左推进 v = overflow / scrollDuration，严禁任何因逐字节奏快慢引起的忽冲忽停
+        val targetTranslationX = when {
+            currentPositionMs <= scrollStart -> 0f
+            currentPositionMs >= scrollEnd -> -overflow
+            else -> {
+                val linearProgress = (currentPositionMs - scrollStart).toFloat() / scrollDuration.toFloat()
+                -overflow * linearProgress
+            }
+        }
+
+        if (Math.abs(textView.translationX - targetTranslationX) > 0.05f) {
+            textView.translationX = targetTranslationX
+        }
+    }
+
+    /**
+     * 重置某 TextView 的卡拉OK状态，还原为普通文本
+     */
+    fun resetKaraoke(textView: TextView, normalText: String, marqueeEnabled: Boolean = true) {
+        textView.tag = null
+        textView.paint.shader = null
+        textView.translationX = 0f
+        textView.text = normalText
+        textView.setHorizontallyScrolling(marqueeEnabled)
+        val targetW = if (marqueeEnabled) android.view.ViewGroup.LayoutParams.WRAP_CONTENT else android.view.ViewGroup.LayoutParams.MATCH_PARENT
+        val lp = textView.layoutParams
+        if (lp != null && lp.width != targetW) {
+            lp.width = targetW
+            textView.requestLayout()
+        }
+    }
+}

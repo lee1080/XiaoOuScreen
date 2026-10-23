@@ -1,0 +1,1214 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>1920×384 车机 3D 正方体档位翻转系统</title>
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;800;900&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * {
+      box-sizing: border-box;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+    }
+    body {
+      margin: 0;
+      padding: 0;
+      background: transparent;
+      color: #ffffff;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      min-height: 100vh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+
+    /* 顶部控制台栏 (悬浮窗模式或沉浸模式下完全隐藏) */
+    #debug-header {
+      width: 100%;
+      background: rgba(11, 15, 25, 0.95);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      backdrop-filter: blur(16px);
+      z-index: 50;
+      position: sticky;
+      top: 0;
+      transition: transform 0.3s ease;
+    }
+    body.overlay-mode #debug-header,
+    body.immersive-mode #debug-header,
+    body.overlay-mode #debug-tips,
+    body.immersive-mode #debug-tips {
+      display: none !important;
+    }
+
+    /* 3D 视口外层容器：100% 贴合宿主窗口并居中舞台 */
+    .viewport-outer,
+    body.overlay-mode .viewport-outer {
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      overflow: hidden;
+    }
+
+    /* 3D 正方体舞台视口 (Perspective Stage) */
+    .cube-stage {
+      width: 1920px;
+      height: 384px;
+      perspective: 1600px;
+      perspective-origin: 50% 50%;
+      position: relative;
+      transform-origin: center center;
+      border-radius: 14px;
+      box-shadow: 0 30px 80px rgba(0, 0, 0, 0.9), 0 0 0 1px rgba(255, 255, 255, 0.06);
+    }
+    body.overlay-mode .cube-stage {
+      box-shadow: none;
+      border-radius: 0;
+    }
+
+    /* 3D 翻转主体 (Cube Pivot) 
+       高度 H = 384px，正方形截面旋转中心在 Z = -192px 
+    */
+    .cube-pivot {
+      width: 100%;
+      height: 100%;
+      position: relative;
+      transform-style: preserve-3d;
+      transform-origin: 50% 50% -192px;
+      will-change: transform;
+    }
+
+    /* 3D 各个面统一样式 (Face Base) */
+    .cube-face {
+      position: absolute;
+      inset: 0;
+      width: 1920px;
+      height: 384px;
+      backface-visibility: hidden;
+      -webkit-backface-visibility: hidden;
+      border-radius: 14px;
+      overflow: hidden;
+      transform-origin: 50% 50% -192px;
+    }
+    body.overlay-mode .cube-face {
+      border-radius: 0;
+    }
+
+    /* 5 款驾驶模式背景渐变 (当档位在驾驶模式上方触发时完美咬合) */
+    .bg-mode-ECO {
+      background: radial-gradient(ellipse 1180px 420px at 50% 50%, #34d399 0%, #10b981 25%, #047857 54%, #064e3b 78%, #021610 100%);
+    }
+    .bg-mode-NORMAL {
+      background: radial-gradient(ellipse 1180px 420px at 50% 50%, #38bdf8 0%, #0ea5e9 25%, #0284c7 54%, #0c3b5e 78%, #030e1a 100%);
+    }
+    .bg-mode-SPORT {
+      background: radial-gradient(ellipse 1180px 420px at 50% 50%, #fbbf24 0%, #f97316 25%, #ea580c 52%, #7c2d12 78%, #180602 100%);
+    }
+    .bg-mode-RACE {
+      background: radial-gradient(ellipse 1180px 420px at 50% 50%, #fb7185 0%, #ef4444 24%, #dc2626 50%, #7f1d1d 76%, #190204 100%);
+    }
+    .bg-mode-CUSTOM {
+      background: radial-gradient(ellipse 1180px 420px at 50% 50%, #e2e8f0 0%, #94a3b8 24%, #475569 52%, #1e293b 78%, #070a10 100%);
+    }
+
+    /* 正面 (Front Face, 0deg) */
+    .face-front {
+      transform: rotateX(0deg) translateZ(0px);
+    }
+
+    /* 底面 (Bottom Face, -90deg, 位于下方，向上翻时顺滑翻上来) */
+    .face-bottom {
+      transform: rotateX(-90deg) translateZ(0px);
+    }
+
+    /* 背面 (Back Face, -180deg, 位于后方，翻回时顺滑从底翻到眼前) */
+    .face-back {
+      transform: rotateX(-180deg) translateZ(0px);
+    }
+
+    /* 外环顺时针与逆时针科技旋转动画 (围绕圆心 160px 160px) */
+    @keyframes gearRingSpinCW {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    @keyframes gearRingSpinCCW {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(-360deg); }
+    }
+    .gear-ring-rot-cw {
+      transform-origin: 160px 160px;
+      animation: gearRingSpinCW 24s linear infinite;
+    }
+    .gear-ring-rot-ccw {
+      transform-origin: 160px 160px;
+      animation: gearRingSpinCCW 16s linear infinite;
+    }
+
+    /* 3D 动态物理环境阴影遮罩 (Dynamic Ambient Shading) */
+    .face-shadow-overlay {
+      position: absolute;
+      inset: 0;
+      background: #000000;
+      opacity: 0;
+      pointer-events: none;
+      z-index: 40;
+      transition: opacity 0.6s cubic-bezier(0.2, 0.8, 0.25, 1);
+    }
+
+    /* ---------------------------------------------
+       档位页面 (P / R / N / D) 视觉定义
+       --------------------------------------------- */
+    .gear-canvas {
+      width: 100%;
+      height: 100%;
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.35s ease;
+    }
+
+    .bg-gear-P {
+      background: radial-gradient(ellipse 1100px 480px at 50% 50%, #f59e0b 0%, #b45309 30%, #5a2003 60%, #170701 100%);
+    }
+    .bg-gear-R {
+      background: radial-gradient(ellipse 1100px 480px at 50% 50%, #f43f5e 0%, #be123c 30%, #5c071d 60%, #190207 100%);
+    }
+    .bg-gear-N {
+      background: radial-gradient(ellipse 1100px 480px at 50% 50%, #cbd5e1 0%, #64748b 30%, #293548 60%, #0a0e17 100%);
+    }
+    .bg-gear-D {
+      background: radial-gradient(ellipse 1100px 480px at 50% 50%, #10b981 0%, #059669 30%, #064e3b 60%, #021a14 100%);
+    }
+
+    /* 左右两侧 130px 物理安全暗角渐变 (与原生时钟/歌词画布绝对 1:1 对齐：0px 纯黑线性过渡至 130px 纯透明) */
+    .vignette-sides {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      z-index: 30;
+      background: linear-gradient(90deg, 
+        #000000 0px, 
+        rgba(0, 0, 0, 0) 130px, 
+        rgba(0, 0, 0, 0) 1790px, 
+        #000000 1920px);
+    }
+
+    /* 中央徽章容器 (320px x 320px) */
+    .gear-emblem-wrap {
+      width: 320px;
+      height: 320px;
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+    }
+
+    /* 连环切档方式 B：就地平滑微缩放与光效刷新动效 */
+    .pop-refresh {
+      animation: popRefreshAnim 0.35s cubic-bezier(0.2, 0.8, 0.25, 1);
+    }
+    @keyframes popRefreshAnim {
+      0% { transform: scale(0.92); filter: brightness(1.7); }
+      50% { transform: scale(1.07); filter: brightness(1.3); }
+      100% { transform: scale(1); filter: brightness(1); }
+    }
+
+    /* SVG 精密科技圆环 */
+    .gear-svg-ring {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+
+    /* 200px 巨幅档位字母 */
+    .gear-letter-massive {
+      font-family: 'Orbitron', 'DIN Alternate', 'SF Pro Display', -apple-system, sans-serif;
+      font-size: 200px;
+      font-weight: 900;
+      line-height: 1;
+      letter-spacing: -0.04em;
+      position: relative;
+      z-index: 10;
+      background: linear-gradient(180deg, #ffffff 35%, #e2e8f0 75%, #94a3b8 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      filter: drop-shadow(0 0 32px var(--glow-color, rgba(255, 255, 255, 0.7)))
+              drop-shadow(0 14px 24px rgba(0, 0, 0, 0.85));
+      transform: translateY(-4px);
+      transition: filter 0.3s ease;
+    }
+
+    /* 外环呼吸脉冲 */
+    @keyframes pulseSoft {
+      0%, 100% { transform: scale(1); opacity: 0.9; }
+      50% { transform: scale(1.025); opacity: 1; }
+    }
+    .gear-pulse {
+      animation: pulseSoft 3s ease-in-out infinite;
+    }
+
+    /* 2秒倒计时微型进度条 */
+    .gear-countdown-bar-wrap {
+      position: absolute;
+      bottom: 24px;
+      width: 200px;
+      height: 3px;
+      background: rgba(255, 255, 255, 0.15);
+      border-radius: 2px;
+      overflow: hidden;
+      z-index: 20;
+    }
+    .gear-countdown-bar {
+      height: 100%;
+      width: 100%;
+      background: var(--accent-color, #10b981);
+      box-shadow: 0 0 10px var(--accent-color, #10b981);
+      transform-origin: left center;
+      transition: transform 2s linear;
+    }
+
+    /* ---------------------------------------------
+       车机默认主页面 (Base Screen) 拟真设计与快照容器
+       --------------------------------------------- */
+    .base-screen {
+      width: 100%;
+      height: 100%;
+      background: transparent;
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 160px;
+      box-sizing: border-box;
+      background-size: cover;
+      background-position: center;
+    }
+    body:not(.overlay-mode) .base-screen:not(.snapshot-mode) {
+      background: radial-gradient(ellipse 1300px 500px at 50% 120%, #17223b 0%, #0c1220 50%, #050811 100%);
+    }
+
+    /* 快照模式：完美承载原生活动画面 (普通快照透明，模式快照显现专属渐变色) */
+    .base-screen.snapshot-mode {
+      padding: 0;
+    }
+    .base-screen.snapshot-mode:not([class*="bg-mode-"]) {
+      background: transparent !important;
+    }
+    .snapshot-img {
+      width: 100%;
+      height: 100%;
+      object-fit: fill;
+      display: block;
+    }
+
+    /* 原生默认主屏小部件 */
+    .widget-time {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .widget-clock-text {
+      font-family: 'Orbitron', 'DIN Alternate', 'SF Pro Display', sans-serif;
+      font-size: 58px;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      color: #ffffff;
+      line-height: 1;
+      text-shadow: 0 0 20px rgba(56, 189, 248, 0.4);
+    }
+    .widget-date-text {
+      font-size: 13px;
+      color: #94a3b8;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 4px;
+    }
+
+    .widget-center-cluster {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+    }
+    .car-speed-num {
+      font-family: 'Orbitron', 'DIN Alternate', 'SF Pro Display', -apple-system, sans-serif;
+      font-size: 68px;
+      font-weight: 900;
+      line-height: 0.95;
+      background: linear-gradient(180deg, #ffffff 40%, #cbd5e1 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .car-speed-unit {
+      font-size: 11px;
+      color: #64748b;
+      letter-spacing: 0.15em;
+      font-weight: 700;
+      margin-top: 2px;
+    }
+    .car-mode-badge {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 14px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 999px;
+      font-size: 12px;
+      color: #38bdf8;
+      font-weight: 600;
+    }
+
+    .widget-media {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      padding: 12px 20px;
+      border-radius: 16px;
+      backdrop-filter: blur(10px);
+    }
+    .media-cover-disc {
+      width: 52px;
+      height: 52px;
+      border-radius: 50%;
+      background: conic-gradient(#1e293b, #0f172a, #1e293b, #334155, #1e293b);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+      animation: spinCover 12s linear infinite;
+    }
+    @keyframes spinCover {
+      100% { transform: rotate(360deg); }
+    }
+    .media-cover-dot {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #38bdf8;
+      box-shadow: 0 0 10px #38bdf8;
+    }
+    .media-track-title {
+      font-size: 14px;
+      font-weight: 700;
+      color: #f8fafc;
+      max-width: 180px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .media-track-artist {
+      font-size: 12px;
+      color: #94a3b8;
+    }
+    .audio-wave {
+      display: flex;
+      align-items: flex-end;
+      gap: 3px;
+      height: 18px;
+    }
+    .audio-bar {
+      width: 3px;
+      background: #38bdf8;
+      border-radius: 2px;
+      animation: waveDance 1s ease-in-out infinite alternate;
+    }
+    .audio-bar:nth-child(1) { height: 8px; animation-delay: 0.1s; }
+    .audio-bar:nth-child(2) { height: 16px; animation-delay: 0.25s; }
+    .audio-bar:nth-child(3) { height: 12px; animation-delay: 0.4s; }
+    .audio-bar:nth-child(4) { height: 18px; animation-delay: 0.15s; }
+    @keyframes waveDance {
+      0% { height: 4px; }
+      100% { height: 18px; }
+    }
+  </style>
+</head>
+<body class="bg-transparent text-white">
+
+  <!-- 顶部控制台栏 (仅在模拟调试或控制台模式下显示) -->
+  <header id="debug-header" class="w-full">
+    <div class="max-w-[1920px] mx-auto px-4 py-2 flex flex-wrap items-center justify-between gap-3 text-xs">
+      
+      <!-- 状态标识 -->
+      <div class="flex items-center gap-3">
+        <div id="status-led" class="w-2.5 h-2.5 rounded-full bg-emerald-400 shadow-[0_0_8px_#10b981]"></div>
+        <div>
+          <span class="font-bold text-sm tracking-wide">3D 正方体向上翻转档位系统</span>
+          <span id="car-connection-badge" class="ml-2 px-2 py-0.5 font-mono rounded bg-white/10 text-slate-300">车机反射：就绪</span>
+        </div>
+      </div>
+
+      <!-- 切档触发按钮 -->
+      <div class="flex items-center gap-2">
+        <span class="text-slate-400 font-semibold">模拟切档：</span>
+        <div class="flex items-center gap-1.5 bg-slate-900/90 p-1 rounded-xl border border-slate-800">
+          <button type="button" class="btn-gear px-3.5 py-1 rounded-lg text-sm font-black transition-all bg-amber-500 text-black shadow-[0_0_12px_#f59e0b]" data-gear="P">P</button>
+          <button type="button" class="btn-gear px-3.5 py-1 rounded-lg text-sm font-black transition-all text-slate-400 hover:text-white" data-gear="R">R</button>
+          <button type="button" class="btn-gear px-3.5 py-1 rounded-lg text-sm font-black transition-all text-slate-400 hover:text-white" data-gear="N">N</button>
+          <button type="button" class="btn-gear px-3.5 py-1 rounded-lg text-sm font-black transition-all text-slate-400 hover:text-white" data-gear="D">D</button>
+        </div>
+      </div>
+
+      <!-- 快速连环切档 (测试方式 B) -->
+      <div class="flex items-center gap-2">
+        <button type="button" id="btn-test-combo" class="px-3 py-1.5 rounded-xl font-bold bg-indigo-600 hover:bg-indigo-500 text-white shadow-[0_0_12px_rgba(99,102,241,0.5)] transition-all">
+          ⚡ 模拟连切 (P→R→N→D)
+        </button>
+        <button type="button" id="btn-scale-toggle" class="px-3 py-1.5 rounded-xl font-semibold bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 transition-all">
+          <span id="scale-label">缩放: 自适应</span>
+        </button>
+        <button type="button" id="btn-toggle-fullscreen" class="px-3 py-1.5 rounded-xl font-semibold bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 transition-all">
+          📺 全屏沉浸
+        </button>
+      </div>
+
+    </div>
+  </header>
+
+  <!-- 3D 舞台与正方体视口 -->
+  <main class="viewport-outer">
+    <div id="cube-stage" class="cube-stage">
+      
+      <!-- 左右两侧 130px 物理安全暗角渐变 -->
+      <div class="vignette-sides"></div>
+
+      <!-- 3D 棱柱旋转核心 (围绕 Z = -192px 轴心向上翻转) -->
+      <div id="cube-pivot" class="cube-pivot">
+        
+        <!-- 面 1：初始正面 (Face 1 - Front, 0deg, 展示原生主页) -->
+        <div id="face-front" class="cube-face face-front">
+          <div id="front-content" class="w-full h-full"></div>
+          <div id="front-shadow" class="face-shadow-overlay"></div>
+        </div>
+
+        <!-- 面 2：待翻入底面 (Face 2 - Bottom, -90deg, 呈现档位页面) -->
+        <div id="face-bottom" class="cube-face face-bottom">
+          <div id="bottom-content" class="w-full h-full"></div>
+          <div id="bottom-shadow" class="face-shadow-overlay"></div>
+        </div>
+
+        <!-- 面 3：翻回背面 (Face 3 - Back, -180deg, 预载原生主页快照) -->
+        <div id="face-back" class="cube-face face-back">
+          <div id="back-content" class="w-full h-full"></div>
+          <div id="back-shadow" class="face-shadow-overlay"></div>
+        </div>
+
+      </div>
+
+    </div>
+
+    <!-- 底部简要提示 (非悬浮窗模式显示) -->
+    <div id="debug-tips" class="mt-4 text-xs text-slate-500 flex items-center gap-4">
+      <span>键盘快捷键：<kbd class="px-1.5 py-0.5 rounded bg-white/10 text-slate-300 font-mono">P</kbd> <kbd class="px-1.5 py-0.5 rounded bg-white/10 text-slate-300 font-mono">R</kbd> <kbd class="px-1.5 py-0.5 rounded bg-white/10 text-slate-300 font-mono">N</kbd> <kbd class="px-1.5 py-0.5 rounded bg-white/10 text-slate-300 font-mono">D</kbd> 切档</span>
+      <span>•</span>
+      <span>翻转时长：<strong class="text-slate-300">600ms</strong></span>
+      <span>•</span>
+      <span>停留时长：<strong class="text-slate-300">2000ms</strong></span>
+      <span>•</span>
+      <span>路径方向：<strong class="text-emerald-400">持续向上翻转</strong></span>
+      <span>•</span>
+      <span>连环切档：<strong class="text-sky-400">方式 B 就地平滑刷新</strong></span>
+    </div>
+  </main>
+
+  <script>
+    // -------------------------------------------------------------
+    // 1. 档位视觉规范定义 (P / R / N / D)
+    // -------------------------------------------------------------
+    const GEARS = {
+      P: {
+        code: 'P',
+        name: 'P 档 (驻车档)',
+        bgClass: 'bg-gear-P',
+        btnBg: '#f59e0b',
+        glowColor: 'rgba(245, 158, 11, 0.75)',
+        accent: '#f59e0b',
+        accentSec: '#fbbf24',
+        desc: '琥珀金橙径向流光'
+      },
+      R: {
+        code: 'R',
+        name: 'R 档 (倒车档)',
+        bgClass: 'bg-gear-R',
+        btnBg: '#f43f5e',
+        glowColor: 'rgba(244, 63, 94, 0.75)',
+        accent: '#f43f5e',
+        accentSec: '#fb7185',
+        desc: '珊瑚红宝石径向流光'
+      },
+      N: {
+        code: 'N',
+        name: 'N 档 (空档)',
+        bgClass: 'bg-gear-N',
+        btnBg: '#94a3b8',
+        glowColor: 'rgba(203, 213, 225, 0.7)',
+        accent: '#cbd5e1',
+        accentSec: '#ffffff',
+        desc: '钛银星空径向流光'
+      },
+      D: {
+        code: 'D',
+        name: 'D 档 (行进档)',
+        bgClass: 'bg-gear-D',
+        btnBg: '#10b981',
+        glowColor: 'rgba(16, 185, 129, 0.75)',
+        accent: '#10b981',
+        accentSec: '#34d399',
+        desc: '翡翠电光青径向流光'
+      }
+    };
+
+    // -------------------------------------------------------------
+    // 2. 状态机与全局变量
+    // -------------------------------------------------------------
+    let animState = 'IDLE'; // 'IDLE' | 'FLIPPING_IN' | 'HOLDING' | 'FLIPPING_OUT'
+    let currentActiveGear = 'P';
+    let lastKnownGear = null;
+    let holdTimer = null;
+    let fitScale = true;
+    let currentSnapshotUrl = null; // 外部注入的真实屏幕快照
+
+    // 动效配置
+    const DURATION_FLIP_MS = 600;  // 严格 600ms 翻转
+    const DURATION_HOLD_MS = 2000; // 停留 2000ms
+
+    // -------------------------------------------------------------
+    // 3. SVG 精密多层科技圆环生成器
+    // -------------------------------------------------------------
+    function renderStyledCircleSVG(gearKey) {
+      const g = GEARS[gearKey];
+      return `
+        <svg viewBox="0 0 320 320" class="gear-svg-ring">
+          <defs>
+            <filter id="glow-${g.code}" x="-20%" y="-20%" width="140%" height="140%">
+              <feGaussianBlur stdDeviation="6" result="blur" />
+              <feComposite in="SourceGraphic" in2="blur" operator="over" />
+            </filter>
+            <linearGradient id="ringGrad-${g.code}" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#ffffff" stop-opacity="0.95"/>
+              <stop offset="30%" stop-color="${g.accentSec}" stop-opacity="0.85"/>
+              <stop offset="70%" stop-color="${g.accent}" stop-opacity="0.5"/>
+              <stop offset="100%" stop-color="#ffffff" stop-opacity="0.9"/>
+            </linearGradient>
+            <radialGradient id="innerGlass-${g.code}" cx="50%" cy="50%" r="50%">
+              <stop offset="0%" stop-color="#000000" stop-opacity="0.3"/>
+              <stop offset="85%" stop-color="#000000" stop-opacity="0.55"/>
+              <stop offset="100%" stop-color="${g.accent}" stop-opacity="0.2"/>
+            </radialGradient>
+          </defs>
+
+          <!-- 1. 暗色内嵌磨砂玻璃衬底 -->
+          <circle cx="160" cy="160" r="142" fill="url(#innerGlass-${g.code})" />
+
+          <!-- 2. 最外层精密科技刻度规 (顺时针优雅旋转) -->
+          <g class="gear-ring-rot-cw">
+            <circle cx="160" cy="160" r="152" fill="none" stroke="rgba(255, 255, 255, 0.22)" stroke-width="1.5" stroke-dasharray="3 9" />
+            <rect x="157" y="2" width="6" height="12" rx="3" fill="#ffffff" filter="url(#glow-${g.code})" />
+            <rect x="157" y="306" width="6" height="12" rx="3" fill="#ffffff" filter="url(#glow-${g.code})" />
+            <rect x="2" y="157" width="12" height="6" rx="3" fill="#ffffff" filter="url(#glow-${g.code})" />
+            <rect x="306" y="157" width="12" height="6" rx="3" fill="#ffffff" filter="url(#glow-${g.code})" />
+          </g>
+
+          <!-- 3. 核心高光雕刻圆环 (半径 142) -->
+          <circle cx="160" cy="160" r="142" fill="none" stroke="url(#ringGrad-${g.code})" stroke-width="5.5"
+                  stroke-linecap="round" stroke-dasharray="210 24 210 24" filter="url(#glow-${g.code})" />
+
+          <!-- 4. 次级纤细辅助环与浮动星光点 (逆时针优雅旋转) -->
+          <g class="gear-ring-rot-ccw">
+            <circle cx="160" cy="160" r="130" fill="none" stroke="${g.accentSec}" stroke-opacity="0.5" stroke-width="1.8" stroke-dasharray="8 12" />
+            <circle cx="266" cy="54" r="3.5" fill="#ffffff" opacity="0.9" filter="url(#glow-${g.code})" />
+            <circle cx="54" cy="266" r="3.5" fill="#ffffff" opacity="0.9" filter="url(#glow-${g.code})" />
+            <circle cx="266" cy="266" r="3.5" fill="#ffffff" opacity="0.9" filter="url(#glow-${g.code})" />
+            <circle cx="54" cy="54" r="3.5" fill="#ffffff" opacity="0.9" filter="url(#glow-${g.code})" />
+          </g>
+        </svg>
+      `;
+    }
+
+    // -------------------------------------------------------------
+    // 4. 生成档位页面 HTML (1920 × 384)
+    // -------------------------------------------------------------
+    function renderGearPageHTML(gearKey, withCountdown = true) {
+      const g = GEARS[gearKey];
+      return `
+        <div class="gear-canvas ${g.bgClass}" id="gear-canvas-view">
+          <div class="gear-emblem-wrap gear-pulse" id="gear-emblem-node" style="--glow-color: ${g.glowColor};">
+            ${renderStyledCircleSVG(gearKey)}
+            <span class="gear-letter-massive" id="gear-letter-node">${g.code}</span>
+          </div>
+          ${withCountdown ? `
+            <div class="gear-countdown-bar-wrap">
+              <div class="gear-countdown-bar" id="gear-countdown-progress" style="--accent-color: ${g.accent};"></div>
+            </div>
+          ` : ''}
+        </div>
+      `;
+    }
+
+    // 5 款车辆模式样式定义 (与档位形成层级咬合)
+    const DRIVE_MODE_STYLES = {
+      ECO: { key: 'ECO', bgClass: 'bg-mode-ECO', glowColor: 'rgba(52, 211, 153, 0.85)' },
+      NORMAL: { key: 'NORMAL', bgClass: 'bg-mode-NORMAL', glowColor: 'rgba(56, 189, 248, 0.85)' },
+      SPORT: { key: 'SPORT', bgClass: 'bg-mode-SPORT', glowColor: 'rgba(251, 146, 60, 0.90)' },
+      RACE: { key: 'RACE', bgClass: 'bg-mode-RACE', glowColor: 'rgba(248, 113, 113, 0.92)' },
+      CUSTOM: { key: 'CUSTOM', bgClass: 'bg-mode-CUSTOM', glowColor: 'rgba(226, 232, 240, 0.80)' }
+    };
+
+    let currentUnderlyingMode = '';
+
+    // -------------------------------------------------------------
+    // 5. 生成车机原页面 HTML (有快照优先用真实快照，悬浮窗模式无快照全透明)
+    // -------------------------------------------------------------
+    function renderBasePageHTML() {
+      // 若当前底层有处于激活态的车辆模式，底层 driveModeWebView 已经在真实渲染 148px 大字与 SVG 装饰，
+      // 此处必须完全透明！直接透显底层真实模式页面，绝对杜绝任何双重文字错位重影与跳变！
+      if (currentUnderlyingMode) {
+        return `<div class="base-screen snapshot-mode" style="background: transparent !important;"></div>`;
+      }
+
+      if (currentSnapshotUrl) {
+        return `
+          <div class="base-screen snapshot-mode">
+            <img src="${currentSnapshotUrl}" class="snapshot-img" alt="Screen Snapshot" />
+          </div>
+        `;
+      }
+
+      if (document.body.classList.contains('overlay-mode')) {
+        return `<div class="base-screen snapshot-mode" style="background: radial-gradient(ellipse 1300px 500px at 50% 120%, #17223b 0%, #0c1220 50%, #050811 100%);"></div>`;
+      }
+
+      const now = new Date();
+      const hours = String(now.getHours()).padStart(2, '0');
+      const minutes = String(now.getMinutes()).padStart(2, '0');
+      const dateStr = `${now.getMonth() + 1}月${now.getDate()}日 星期${['日','一','二','三','四','五','六'][now.getDay()]}`;
+
+      return `
+        <div class="base-screen">
+          <div class="widget-time">
+            <div class="widget-clock-text">${hours}:${minutes}</div>
+            <div class="widget-date-text">
+              <span>${dateStr}</span>
+              <span>•</span>
+              <span class="text-sky-400 font-semibold">晴 22℃ 优</span>
+            </div>
+          </div>
+
+          <div class="widget-center-cluster">
+            <div class="car-speed-num">0</div>
+            <div class="car-speed-unit">KM/H</div>
+            <div class="car-mode-badge mt-1.5">
+              <span class="w-1.5 h-1.5 rounded-full bg-sky-400"></span>
+              <span>COMFORT · 舒适模式</span>
+              <span class="text-slate-400 text-[11px] ml-1">续航 680km</span>
+            </div>
+          </div>
+
+          <div class="widget-media">
+            <div class="media-cover-disc">
+              <div class="media-cover-dot"></div>
+            </div>
+            <div>
+              <div class="media-track-title">Cyber City Drive</div>
+              <div class="media-track-artist">Neon Horizon · 智能座舱</div>
+            </div>
+            <div class="audio-wave ml-2">
+              <div class="audio-bar"></div>
+              <div class="audio-bar"></div>
+              <div class="audio-bar"></div>
+              <div class="audio-bar"></div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    // -------------------------------------------------------------
+    // 6. 核心 3D 三面同向连续向上翻转物理引擎 (绝不闪黑 · 纹理预热 0 延迟)
+    // -------------------------------------------------------------
+    const cubePivot = document.getElementById('cube-pivot');
+    const faceFront = document.getElementById('face-front');
+    const faceBottom = document.getElementById('face-bottom');
+    const faceBack = document.getElementById('face-back');
+    const frontContent = document.getElementById('front-content');
+    const bottomContent = document.getElementById('bottom-content');
+    const backContent = document.getElementById('back-content');
+    const frontShadow = document.getElementById('front-shadow');
+    const bottomShadow = document.getElementById('bottom-shadow');
+    const backShadow = document.getElementById('back-shadow');
+
+    // 初始状态：正面与背面均提前预热原生主页
+    frontContent.innerHTML = renderBasePageHTML();
+    backContent.innerHTML = renderBasePageHTML();
+
+    /**
+     * 外部更新当前宿主屏幕真实快照 (正面与背面同步预热)
+     */
+    window.updateBaseScreenSnapshot = function(dataUrl) {
+      currentSnapshotUrl = dataUrl;
+      if (animState === 'IDLE') {
+        frontContent.innerHTML = renderBasePageHTML();
+        backContent.innerHTML = renderBasePageHTML();
+      }
+    };
+
+    /**
+     * 外部更新底层正在激活的车辆模式 (咬合正面与背面透显，实现 0 重影无缝咬合)
+     */
+    window.updateUnderlyingMode = function(modeKey) {
+      currentUnderlyingMode = modeKey || '';
+      backContent.innerHTML = renderBasePageHTML();
+      if (animState === 'IDLE') {
+        frontContent.innerHTML = renderBasePageHTML();
+      }
+    };
+
+    let pendingNextGear = null;
+
+    /**
+     * 核心切档入口 (支持外部单次调用与原子快照驱动、支持关联底层驾驶模式)
+     */
+    window.triggerCubeFlip = function(gearKey, snapshotBase64, activeMode) {
+      const g = String(gearKey).toUpperCase().trim();
+      if (!GEARS[g]) return;
+
+      document.body.style.opacity = '1';
+      currentUnderlyingMode = activeMode || '';
+
+      if (snapshotBase64 && snapshotBase64.length > 50) {
+        currentSnapshotUrl = snapshotBase64;
+      }
+      // 预热背面快照纹理，为后续 2 秒后的翻回做好 100% 准备
+      backContent.innerHTML = renderBasePageHTML();
+
+      updateButtonUI(g);
+
+      // 情况 1：HOLDING 或 FLIPPING_IN 途中再次切档 (同档刷新 / 换档刷新) -> 方式 B 就地平滑刷新
+      if (animState === 'HOLDING' || animState === 'FLIPPING_IN') {
+        currentActiveGear = g;
+        lastKnownGear = g;
+        applyWayBRefresh(g);
+        startHoldCountdown();
+        // 关键：通知 Native 端确保处于可见状态，杜绝连续切档黑屏 Bug！
+        if (window.GearBridge && typeof window.GearBridge.onFlipStarted === 'function') {
+          window.GearBridge.onFlipStarted();
+        }
+        return;
+      }
+
+      // 情况 2：FLIPPING_OUT (翻回途中再次切档) -> 中止翻出，重置到底面并就地刷新展现新档位！
+      if (animState === 'FLIPPING_OUT') {
+        cubePivot.style.transition = 'none';
+        cubePivot.style.transform = 'rotateX(90deg)';
+        faceBottom.style.opacity = '1';
+        faceBack.style.opacity = '0';
+        animState = 'HOLDING';
+        currentActiveGear = g;
+        lastKnownGear = g;
+        applyWayBRefresh(g);
+        startHoldCountdown();
+        if (window.GearBridge && typeof window.GearBridge.onFlipStarted === 'function') {
+          window.GearBridge.onFlipStarted();
+        }
+        return;
+      }
+
+      // 情况 3：IDLE 常态 (包含同一档位再次切入) -> 向上翻入
+      currentActiveGear = g;
+      lastKnownGear = g;
+      executeRollIn(g);
+    };
+
+    /**
+     * 触发切档核心入口
+     */
+    function triggerGearSwitch(gearKey, isInitialSync = false) {
+      if (!GEARS[gearKey]) return;
+
+      if (isInitialSync) {
+        lastKnownGear = gearKey;
+        currentActiveGear = gearKey;
+        updateButtonUI(gearKey);
+        return;
+      }
+
+      window.triggerCubeFlip(gearKey, currentSnapshotUrl);
+    }
+
+    /**
+     * 阶段 1：向上翻入档位页 (0deg -> 90deg, 600ms)
+     * 利用 img.decode() 保证快照纹理 100% 解码上屏后再通知原生显示，彻底根除翻转前闪黑
+     */
+    function executeRollIn(gearKey) {
+      animState = 'FLIPPING_IN';
+      currentActiveGear = gearKey;
+      lastKnownGear = gearKey;
+
+      // 1. 正面：当前原生宿主快照
+      frontContent.innerHTML = renderBasePageHTML();
+      // 2. 底面：目标档位页 (带外围旋转科技圆环与倒计时条)
+      bottomContent.innerHTML = renderGearPageHTML(gearKey, true);
+      // 3. 背面：提前预载原生宿主快照 (使 Chromium 在这 2.6 秒内充分解码并缓存 GPU 纹理)
+      backContent.innerHTML = renderBasePageHTML();
+
+      const startRollIn = () => {
+        // 归零状态 (无过渡)
+        cubePivot.style.transition = 'none';
+        cubePivot.style.transform = 'rotateX(0deg)';
+        faceFront.style.transition = 'none';
+        faceFront.style.opacity = '1';
+        faceBottom.style.transition = 'none';
+        faceBottom.style.opacity = '1';
+        faceBack.style.transition = 'none';
+        faceBack.style.opacity = '1';
+        frontShadow.style.transition = 'none';
+        frontShadow.style.opacity = '0';
+        bottomShadow.style.transition = 'none';
+        bottomShadow.style.opacity = '0.75';
+        backShadow.style.transition = 'none';
+        backShadow.style.opacity = currentUnderlyingMode ? '0' : '0.75';
+
+        void cubePivot.offsetHeight;
+
+        // 快照图片已由 GPU 完成解码准备就绪！通知 Native 端展现 WebView 并冻结底层原生 View
+        if (window.GearBridge && typeof window.GearBridge.onFlipStarted === 'function') {
+          window.GearBridge.onFlipStarted();
+        }
+
+        // 下一帧执行 600ms 向上翻入动画 (0deg -> 90deg)
+        requestAnimationFrame(() => {
+          cubePivot.style.transition = `transform ${DURATION_FLIP_MS}ms cubic-bezier(0.22, 1, 0.36, 1)`;
+          frontShadow.style.transition = `opacity ${DURATION_FLIP_MS}ms cubic-bezier(0.22, 1, 0.36, 1)`;
+          bottomShadow.style.transition = `opacity ${DURATION_FLIP_MS}ms cubic-bezier(0.22, 1, 0.36, 1)`;
+          // 正面翻入天花板时在前 280ms 顺滑渐隐，彻底消除天花板投影残留
+          faceFront.style.transition = `opacity 280ms cubic-bezier(0.3, 0, 0.8, 0.15)`;
+
+          cubePivot.style.transform = 'rotateX(90deg)';
+          frontShadow.style.opacity = '0.75';
+          faceFront.style.opacity = '0';
+          bottomShadow.style.opacity = '0';
+
+          setTimeout(() => {
+            if (animState === 'FLIPPING_IN') {
+              animState = 'HOLDING';
+              // 【关键物理设计】：保持在 90deg！绝对不归零！绝对不修改 DOM！
+              // 底面档位稳稳正对着用户，外环科技圆环持续旋转，进度条平滑缩短
+              // 彻底杜绝停稳瞬间的 DOM 重建闪黑 Bug！
+              startHoldCountdown();
+            }
+          }, DURATION_FLIP_MS);
+        });
+      };
+
+      if (currentSnapshotUrl && window.Image) {
+        const img = new Image();
+        img.src = currentSnapshotUrl;
+        if (img.decode) {
+          img.decode().then(startRollIn).catch(startRollIn);
+        } else {
+          img.onload = startRollIn;
+          img.onerror = startRollIn;
+        }
+      } else {
+        startRollIn();
+      }
+    }
+
+    /**
+     * 阶段 2：档位高亮停留 2.0 秒 (底面在 90deg 保持正对着用户)
+     */
+    function startHoldCountdown() {
+      resetHoldTimer();
+
+      const bar = bottomContent.querySelector('#gear-countdown-progress');
+      if (bar) {
+        bar.style.transition = 'none';
+        bar.style.transform = 'scaleX(1)';
+        void bar.offsetWidth;
+        bar.style.transition = `transform ${DURATION_HOLD_MS}ms linear`;
+        bar.style.transform = 'scaleX(0)';
+      }
+
+      holdTimer = setTimeout(() => {
+        executeRollOut();
+      }, DURATION_HOLD_MS);
+    }
+
+    function resetHoldTimer() {
+      if (holdTimer) {
+        clearTimeout(holdTimer);
+        holdTimer = null;
+      }
+    }
+
+    /**
+     * 连环快速切档【方式 B】：就地平滑微缩放与流光刷新 (在底面进行就地刷新)
+     */
+    function applyWayBRefresh(gearKey) {
+      const g = GEARS[gearKey];
+      const canvasView = bottomContent.querySelector('#gear-canvas-view');
+      const emblemNode = bottomContent.querySelector('#gear-emblem-node');
+      const bar = bottomContent.querySelector('#gear-countdown-progress');
+
+      if (canvasView) {
+        canvasView.className = `gear-canvas ${g.bgClass}`;
+      }
+      if (emblemNode) {
+        emblemNode.style.setProperty('--glow-color', g.glowColor);
+        emblemNode.innerHTML = renderStyledCircleSVG(gearKey) + `<span class="gear-letter-massive" id="gear-letter-node">${g.code}</span>`;
+        emblemNode.classList.remove('pop-refresh');
+        void emblemNode.offsetWidth;
+        emblemNode.classList.add('pop-refresh');
+      }
+      if (bar) {
+        bar.style.setProperty('--accent-color', g.accent);
+        bar.style.boxShadow = `0 0 10px ${g.accent}`;
+      }
+
+      flashLed();
+    }
+
+    /**
+     * 阶段 3：继续同向往上翻，翻回原主页面 (90deg -> 180deg, 600ms)
+     */
+    function executeRollOut() {
+      if (animState === 'FLIPPING_OUT') return;
+      animState = 'FLIPPING_OUT';
+
+      // 背面 (backContent) 早在 2.6 秒前就已经装好原生快照，且完成图片解码与 GPU 纹理上传！
+      // 此时从 90deg 继续向上翻转到 180deg，背面将顺滑翻至正前方，时钟、天气或底层模式页面在 3D 旋转全程清晰可见！
+      backShadow.style.transition = 'none';
+      backShadow.style.opacity = currentUnderlyingMode ? '0' : '0.75';
+      faceBack.style.transition = 'none';
+      faceBack.style.opacity = '1';
+      void cubePivot.offsetHeight;
+
+      requestAnimationFrame(() => {
+        cubePivot.style.transition = `transform ${DURATION_FLIP_MS}ms cubic-bezier(0.22, 1, 0.36, 1)`;
+        bottomShadow.style.transition = `opacity ${DURATION_FLIP_MS}ms cubic-bezier(0.22, 1, 0.36, 1)`;
+        backShadow.style.transition = `opacity ${DURATION_FLIP_MS}ms cubic-bezier(0.22, 1, 0.36, 1)`;
+        // 【关键物理优化】：底面档位翻出天花板时在前 280ms 内迅速渐隐为 0
+        // 彻底根除透视投影在天花板 (Y=0, Z=-384) 残留的 37.2px 尾巴水平切线分割屏幕的瑕疵！
+        faceBottom.style.transition = `opacity 280ms cubic-bezier(0.3, 0, 0.8, 0.15)`;
+
+        cubePivot.style.transform = 'rotateX(180deg)';
+        bottomShadow.style.opacity = '0.75';
+        faceBottom.style.opacity = '0';
+        backShadow.style.opacity = '0';
+
+        setTimeout(() => {
+          animState = 'IDLE';
+          lastKnownGear = null; // 重置！消除连续切同档位卡住的 Bug！
+          currentActiveGear = null;
+          currentUnderlyingMode = '';
+
+          // 翻回完成，通知原生宿主隐藏 WebView 图层
+          if (window.GearBridge && typeof window.GearBridge.onRollOutComplete === 'function') {
+            window.GearBridge.onRollOutComplete();
+          }
+
+          // 关键优化：先将 WebView 画面透明，彻底杜绝后续重置 pivot 时原生线程与 JS 线程时间差带来的微秒级跳闪
+          document.body.style.opacity = '0';
+
+          setTimeout(() => {
+            // 后台静默重置 pivot 到 0deg 并恢复各面初始透明度
+            cubePivot.style.transition = 'none';
+            cubePivot.style.transform = 'rotateX(0deg)';
+            faceFront.style.transition = 'none';
+            faceFront.style.opacity = '1';
+            faceBottom.style.transition = 'none';
+            faceBottom.style.opacity = '1';
+            faceBack.style.transition = 'none';
+            faceBack.style.opacity = '1';
+            frontShadow.style.opacity = '0';
+            bottomShadow.style.opacity = '0.75';
+            backShadow.style.opacity = '0.75';
+            document.body.style.opacity = '1';
+          }, 60);
+
+          // 如果在翻出期间有新档位请求，立即重新向上翻入
+          if (pendingNextGear) {
+            const next = pendingNextGear;
+            pendingNextGear = null;
+            setTimeout(() => {
+              window.triggerCubeFlip(next, currentSnapshotUrl);
+            }, 80);
+          }
+        }, DURATION_FLIP_MS);
+      });
+    }
+
+    // -------------------------------------------------------------
+    // 7. UI 控制与键盘/触控交互
+    // -------------------------------------------------------------
+    function updateButtonUI(gearKey) {
+      document.querySelectorAll('.btn-gear').forEach(btn => {
+        const code = btn.getAttribute('data-gear');
+        if (code === gearKey) {
+          btn.style.backgroundColor = GEARS[code].btnBg;
+          btn.style.color = '#000000';
+          btn.style.boxShadow = `0 0 14px ${GEARS[code].btnBg}`;
+        } else {
+          btn.style.backgroundColor = 'transparent';
+          btn.style.color = '#94a3b8';
+          btn.style.boxShadow = 'none';
+        }
+      });
+    }
+
+    function flashLed() {
+      const led = document.getElementById('status-led');
+      if (led) {
+        led.style.transform = 'scale(1.5)';
+        led.style.filter = 'brightness(1.8)';
+        setTimeout(() => {
+          led.style.transform = 'scale(1)';
+          led.style.filter = 'none';
+        }, 300);
+      }
+    }
+
+    // 自适应缩放
+    function applyScale() {
+      const stage = document.getElementById('cube-stage');
+      const scaleLabel = document.getElementById('scale-label');
+      if (!stage) return;
+
+      const vw = window.innerWidth || document.documentElement.clientWidth;
+      const vh = window.innerHeight || document.documentElement.clientHeight;
+
+      if (document.body.classList.contains('overlay-mode')) {
+        const scale = Math.min(vw / 1920, vh / 384);
+        stage.style.transform = `scale(${scale})`;
+        stage.style.transformOrigin = 'center center';
+        stage.style.marginBottom = '0px';
+        return;
+      }
+      if (!fitScale) {
+        stage.style.transform = 'scale(1)';
+        stage.style.transformOrigin = 'center center';
+        stage.style.marginBottom = '0px';
+        if (scaleLabel) scaleLabel.textContent = '缩放: 1:1';
+        return;
+      }
+      const availWidth = vw - (document.body.classList.contains('immersive-mode') ? 0 : 32);
+      const availHeight = vh - (document.body.classList.contains('immersive-mode') ? 0 : 80);
+      
+      const scaleW = availWidth / 1920;
+      const scaleH = availHeight / 384;
+      const scale = Math.min(scaleW, scaleH);
+
+      stage.style.transform = `scale(${scale})`;
+      stage.style.transformOrigin = 'center center';
+      stage.style.marginBottom = `${Math.round(384 * scale - 384)}px`;
+      if (scaleLabel) scaleLabel.textContent = `缩放: ${Math.round(scale * 100)}%`;
+    }
+
+    // -------------------------------------------------------------
+    // 8. 车机系统接口桥接 (Android <-> JavaScript Bridge)
+    // -------------------------------------------------------------
+    let hasReceivedInitialCarGear = false;
+
+    window.onCarGearChange = function(gear) {
+      const g = String(gear).toUpperCase().trim();
+      if (GEARS[g]) {
+        hasReceivedInitialCarGear = true;
+        const badge = document.getElementById('car-connection-badge');
+        if (badge) {
+          badge.textContent = `车机档位：${g} 档 (${GEARS[g].name})`;
+          badge.className = 'ml-2 px-2 py-0.5 font-mono rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40';
+        }
+        window.triggerCubeFlip(g, currentSnapshotUrl);
+      }
+    };
+
+    /**
+     * 设置悬浮窗模式 (隐藏顶栏与底栏)
+     */
+    window.setOverlayMode = function(isOverlay) {
+      if (isOverlay) {
+        document.body.classList.add('overlay-mode');
+      } else {
+        document.body.classList.remove('overlay-mode');
+      }
+      applyScale();
+    };
+
+    // -------------------------------------------------------------
+    // 9. 事件绑定与初始化
+    // -------------------------------------------------------------
+    window.addEventListener('DOMContentLoaded', () => {
+      document.querySelectorAll('.btn-gear').forEach(btn => {
+        btn.addEventListener('click', () => {
+          hasReceivedInitialCarGear = true;
+          const g = btn.getAttribute('data-gear');
+          triggerGearSwitch(g, false);
+        });
+      });
+
+      const btnCombo = document.getElementById('btn-test-combo');
+      if (btnCombo) {
+        btnCombo.addEventListener('click', () => {
+          hasReceivedInitialCarGear = true;
+          const combo = ['P', 'R', 'N', 'D'];
+          combo.forEach((g, idx) => {
+            setTimeout(() => {
+              triggerGearSwitch(g, false);
+            }, idx * 450);
+          });
+        });
+      }
+
+      const btnScale = document.getElementById('btn-scale-toggle');
+      if (btnScale) {
+        btnScale.addEventListener('click', () => {
+          fitScale = !fitScale;
+          applyScale();
+        });
+      }
+
+      const btnFs = document.getElementById('btn-toggle-fullscreen');
+      if (btnFs) {
+        btnFs.addEventListener('click', () => {
+          document.body.classList.toggle('immersive-mode');
+          applyScale();
+        });
+      }
+
+      window.addEventListener('keydown', (e) => {
+        const k = e.key.toUpperCase();
+        if (GEARS[k]) {
+          hasReceivedInitialCarGear = true;
+          triggerGearSwitch(k, false);
+        }
+      });
+
+      window.addEventListener('resize', applyScale);
+      applyScale();
+
+      if (window.GearBridge && typeof window.GearBridge.onPageReady === 'function') {
+        window.GearBridge.onPageReady();
+      }
+    });
+  </script>
+</body>
+</html>

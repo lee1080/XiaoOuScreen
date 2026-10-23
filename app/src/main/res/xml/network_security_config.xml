@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- 允许所有 HTTP (Cleartext) 网络请求，确保能连接本地 IP (如 192.168.x.x)、局域网服务与第三方开源音源 -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

@@ -37,6 +37,7 @@ import java.util.Random
 import kotlin.math.abs
 import kotlin.math.min
 import kotlin.math.sin
+import kotlin.math.sqrt
 
 /**
  * 车载超宽副屏 (1920 × 384 px) iOS 天气风格拟真多图层气象动态背景 + 巨幕数字时钟与左置精致 HUD
@@ -174,9 +175,9 @@ class CarWeatherCanvasView @JvmOverloads constructor(
     private val vignetteLeftRect = RectF(0f, 0f, SAFE_MARGIN_PX, LOGICAL_HEIGHT)
     private val vignetteRightRect = RectF(SAFE_RIGHT_START_PX, 0f, LOGICAL_WIDTH, LOGICAL_HEIGHT)
 
-    // 左侧 HUD 与中央巨幕数字时钟画笔 (字号 226px，并在绘制时显著纵向拉高)
+    // 左侧 HUD 与中央巨幕数字时钟画笔 (字号设为 298px，等效原拉伸高度，恢复 1:1 正常字体比例)
     private val clockTimePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        textSize = 226f
+        textSize = 298f
         typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
         textAlign = Paint.Align.CENTER
     }
@@ -532,12 +533,18 @@ class CarWeatherCanvasView @JvmOverloads constructor(
 
     fun resumeAnimation() {
         isPausedManually = false
-        evaluateRenderState()
+        if (visibility == VISIBLE) {
+            if (!isRenderingActive) {
+                startAnimation()
+            }
+            invalidate()
+        }
     }
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         evaluateRenderState()
+        invalidate()
     }
 
     override fun onDetachedFromWindow() {
@@ -555,14 +562,23 @@ class CarWeatherCanvasView @JvmOverloads constructor(
         evaluateRenderState()
     }
 
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        evaluateRenderState()
+        invalidate()
+    }
+
     private fun evaluateRenderState() {
         if (isPausedManually) {
             if (isRenderingActive) stopAnimation()
             return
         }
-        val shouldRender = isShown && (windowVisibility == VISIBLE)
+        // 在车载副屏 / WindowManager 悬浮窗中，windowVisibility 与 isShown 易在特定 ROM 下被误判为非 VISIBLE
+        // 只要当前 View 自身为 VISIBLE 且未手动暂停，即稳稳开启 60FPS Choreographer 循环，杜绝 ADB 启动黑屏
+        val shouldRender = (visibility == VISIBLE)
         if (shouldRender && !isRenderingActive) {
             startAnimation()
+            invalidate()
         } else if (!shouldRender && isRenderingActive) {
             stopAnimation()
         }
@@ -608,13 +624,19 @@ class CarWeatherCanvasView @JvmOverloads constructor(
             cachedDateStr = dateFormat.format(dateReusable)
         }
 
-        // 2. iOS 风格 5 层视差体积云横向物理漂移
-        val windFactor = (currentConfig.windSpeedKmh / 12f).coerceIn(0.35f, 2.5f)
-        scrollCirrusX += 6f * windFactor * dt
-        scrollCumulusBackX += 13f * windFactor * dt
-        scrollCumulusFrontX += 24f * windFactor * dt
-        scrollMistX += 8f * windFactor * dt
-        scrollOvercastX += 16f * windFactor * dt
+        // 2. iOS 风格 5 层视差体积云：拟真风速驱动与防眩晕视差漂移
+        // 优化：重塑微风呼吸感，大幅降低基础怠速，低风速段强化线性反差 (3km/h 与 13km/h 达到 3 倍真实反差)，高风速段平滑收敛防眩晕
+        val windSpeedSafe = currentConfig.windSpeedKmh.coerceAtLeast(0f)
+        val windFactor = when {
+            windSpeedSafe <= 15f -> 0.6f + windSpeedSafe * 0.30f
+            else -> 5.1f + sqrt(windSpeedSafe - 15f) * 1.8f
+        }.coerceIn(0.5f, 15.0f)
+
+        scrollCirrusX += 1.2f * windFactor * dt
+        scrollCumulusBackX += 2.2f * windFactor * dt
+        scrollCumulusFrontX += 4.0f * windFactor * dt
+        scrollMistX += 1.6f * windFactor * dt
+        scrollOvercastX += 3.0f * windFactor * dt
 
         // 3. 雨滴推进 (支持雨夹雪同时运行)
         val rainCount = currentConfig.rainParticleCount
@@ -756,6 +778,16 @@ class CarWeatherCanvasView @JvmOverloads constructor(
      * 将写实天气与时钟绘制到指定的严格 1920×384 Canvas 上 (用于高精度快照合成)
      */
     fun drawStrict1920(c: Canvas) {
+        c.save()
+        // 确保时钟字符串为当前系统真实最新时间，即使在能耗暂停期间截图也能即时反映当前时刻
+        val nowUnixSeconds = System.currentTimeMillis() / 1000L
+        if (nowUnixSeconds != lastClockSecond) {
+            lastClockSecond = nowUnixSeconds
+            dateReusable.time = System.currentTimeMillis()
+            cachedTimeStr = timeFormat.format(dateReusable)
+            cachedDateStr = dateFormat.format(dateReusable)
+        }
+
         c.clipRect(0f, 0f, LOGICAL_WIDTH, LOGICAL_HEIGHT)
         drawPhotorealisticSky(c)
         drawPhotorealisticCelestial(c)
@@ -764,6 +796,7 @@ class CarWeatherCanvasView @JvmOverloads constructor(
         drawLeftHudCluster(c)
         drawHugeAtmosphericClock(c, 1f - lyricsModeProgress)
         drawFiveLineLyrics(c, lyricsModeProgress)
+        c.restore()
     }
 
     /**
@@ -1117,9 +1150,31 @@ class CarWeatherCanvasView @JvmOverloads constructor(
         val dateBaselineY = lerp(220f, 257f, lyricsModeProgress)
         val noteBaselineY = lerp(254f, 289f, lyricsModeProgress)
 
-        // 0. 大气小时间 (加大至 76px，粗体质感，平滑淡入淡出)
+        // 0. 大气小时间 (加大至 76px，粗体质感，平滑淡入淡出，沿用主场景大时钟字色与发光)
         if (lyricsModeProgress > 0.005f) {
-            smallTimePaint.alpha = (lyricsModeProgress.coerceIn(0f, 1f) * 255f).toInt()
+            val targetTextColor = currentConfig.clockTextColor
+            val targetGlowColor = currentConfig.clockGlowColor
+            val targetGlowRadius = currentConfig.clockGlowRadius
+            val textColor = lerpColor(previousConfig.clockTextColor, targetTextColor, transitionProgress)
+            val glowColor = lerpColor(previousConfig.clockGlowColor, targetGlowColor, transitionProgress)
+            val finalTextColor = if (lightningActive && lightningIntensity > 0.35f) Color.WHITE else textColor
+            val finalGlowColor = if (lightningActive) Color.parseColor("#F0ABFC") else glowColor
+
+            val alphaInt = (lyricsModeProgress.coerceIn(0f, 1f) * 255f).toInt()
+            smallTimePaint.color = finalTextColor
+            smallTimePaint.alpha = alphaInt
+
+            val glowAlphaInt = (Color.alpha(finalGlowColor) * lyricsModeProgress).toInt().coerceIn(0, 255)
+            if (glowAlphaInt > 0 && targetGlowRadius > 0.5f) {
+                smallTimePaint.setShadowLayer(
+                    targetGlowRadius * 0.7f,
+                    0f,
+                    2f,
+                    ColorUtils.setAlphaComponent(finalGlowColor, glowAlphaInt)
+                )
+            } else {
+                smallTimePaint.clearShadowLayer()
+            }
             canvas.drawText(cachedTimeStr, hudStartX, timeBaselineY, smallTimePaint)
         }
 
@@ -1198,11 +1253,11 @@ class CarWeatherCanvasView @JvmOverloads constructor(
             clockTimePaint.clearShadowLayer()
         }
 
-        // 彻底根除残影 3：转场退出时附带极其自然的纵深收敛微缩放 (0.94 -> 1.0)，消除静态残像
+        // 彻底根除残影 3：转场退出时附带极其自然的纵深收敛微缩放 (0.94 -> 1.0)，消除静态残像，保持 1:1 完美字体比例
         val scaleAnim = lerp(0.94f, 1.0f, smoothAlpha)
 
         canvas.save()
-        canvas.scale(0.96f * scaleAnim, 1.32f * scaleAnim, CLOCK_CENTER_X, LOGICAL_HEIGHT / 2f)
+        canvas.scale(scaleAnim, scaleAnim, CLOCK_CENTER_X, LOGICAL_HEIGHT / 2f)
         canvas.drawText(cachedTimeStr, CLOCK_CENTER_X, clockBaselineY, clockTimePaint)
         canvas.restore()
     }

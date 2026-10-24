@@ -65,18 +65,6 @@
             android:screenOrientation="sensorLandscape"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize" />
 
-        <!-- 1920×384 3D 正方体档位向上翻转展示与模拟 Activity (支持 ADB 启动) -->
-        <activity
-            android:name=".ui.GearFlipActivity"
-            android:exported="true"
-            android:screenOrientation="sensorLandscape"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize">
-            <intent-filter>
-                <action android:name="com.car.action.GEAR_FLIP_VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-            </intent-filter>
-        </activity>
-
         <!-- ADB 命令行与系统级外部指令广播接收器 -->
         <receiver
             android:name=".receiver.XiaoOuCommandReceiver"

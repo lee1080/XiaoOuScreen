@@ -98,9 +98,26 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
         }
     }
 
+    private var isFirstGearEvent = true
+    private var isFirstDriveModeEvent = true
+    private var lastReportedGear: String? = null
+    private var lastReportedDriveMode: String? = null
+
     private val gearListener = object : CarGearManager.GearListener {
         override fun onGearChanged(gear: String, rawValue: Int) {
-            Log.i(TAG, "🚗 监听到档位变动: $gear (raw=$rawValue)，立即驱动小欧屏悬浮窗执行 3D 翻转")
+            // 过滤首次启动/注册时的初始回调，仅同步状态，杜绝启动软件时自动弹出档位翻转动画！
+            if (isFirstGearEvent) {
+                isFirstGearEvent = false
+                lastReportedGear = gear
+                serviceCallback?.onGearChanged(gear)
+                Log.i(TAG, "🚗 初始档位静默就绪: $gear (首次启动不触发动画)")
+                return
+            }
+            if (lastReportedGear == gear) {
+                return
+            }
+            lastReportedGear = gear
+            Log.i(TAG, "🚗 监听到实际档位变动: $gear (raw=$rawValue)，立即驱动小欧屏悬浮窗执行 3D 翻转")
             mainHandler.post {
                 if (overlayWindow == null) {
                     showOverlay(WeatherOverlayWindow.Mode.TOP)
@@ -113,7 +130,19 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
 
     private val driveModeListener = object : CarGearManager.DriveModeListener {
         override fun onDriveModeChanged(mode: String, rawValue: Int) {
-            Log.i(TAG, "🏎️ 监听到驾驶模式变动: $mode (raw=$rawValue)，立即驱动小欧屏悬浮窗执行左至右擦除转场")
+            // 过滤首次启动/注册时的初始回调，静默同步状态，杜绝启动软件时自动弹出模式擦除动画！
+            if (isFirstDriveModeEvent) {
+                isFirstDriveModeEvent = false
+                lastReportedDriveMode = mode
+                serviceCallback?.onDriveModeChanged(mode)
+                Log.i(TAG, "🏎️ 初始驾驶模式静默就绪: $mode (首次启动不触发动画)")
+                return
+            }
+            if (lastReportedDriveMode == mode) {
+                return
+            }
+            lastReportedDriveMode = mode
+            Log.i(TAG, "🏎️ 监听到实际驾驶模式变动: $mode (raw=$rawValue)，立即驱动小欧屏悬浮窗执行左至右擦除转场")
             mainHandler.post {
                 if (overlayWindow == null) {
                     showOverlay(WeatherOverlayWindow.Mode.TOP)
@@ -133,7 +162,10 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
                     val gear = intent.getStringExtra(EXTRA_GEAR_LEGACY)
                         ?: intent.getStringExtra(EXTRA_TARGET_GEAR)
                         ?: "P"
-                    Log.i(TAG, "📡 广播触发切档: $gear")
+                    Log.i(TAG, "📡 广播显式触发切档模拟: $gear")
+                    // 用户显式广播或按钮切档，确保触发动画
+                    isFirstGearEvent = false
+                    lastReportedGear = null
                     if (overlayWindow == null) {
                         showOverlay(WeatherOverlayWindow.Mode.TOP)
                     }
@@ -145,7 +177,9 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
                 ACTION_TRIGGER_LIGHTNING -> overlayWindow?.triggerInstantLightning()
                 ACTION_SWITCH_DRIVE_MODE -> {
                     val mode = intent.getStringExtra(EXTRA_DRIVE_MODE) ?: "SPORT"
-                    Log.i(TAG, "📡 广播触发驾驶模式切换: $mode")
+                    Log.i(TAG, "📡 广播显式触发驾驶模式切换: $mode")
+                    isFirstDriveModeEvent = false
+                    lastReportedDriveMode = null
                     if (overlayWindow == null) {
                         showOverlay(WeatherOverlayWindow.Mode.TOP)
                     }
@@ -154,6 +188,13 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
                 ACTION_SIMULATE_PRESET -> {
                     val preset = intent.getStringExtra(EXTRA_PRESET_KEY)
                     applySimulationPreset(preset)
+                }
+                ACTION_SIMULATE_CUSTOM -> {
+                    val timeIdx = intent.getIntExtra(EXTRA_TIME_OF_DAY, 1)
+                    val weatherIdx = intent.getIntExtra(EXTRA_WEATHER_STATE, 0)
+                    val windSpeed = intent.getFloatExtra(EXTRA_WIND_SPEED, 10f)
+                    val isSleet = intent.getBooleanExtra(EXTRA_IS_SLEET, false)
+                    applyCustomSimulation(timeIdx, weatherIdx, windSpeed, isSleet)
                 }
                 ACTION_RESET_LIVE -> {
                     isSimulating = false
@@ -190,6 +231,7 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
             addAction(ACTION_HIDE)
             addAction(ACTION_TRIGGER_LIGHTNING)
             addAction(ACTION_SIMULATE_PRESET)
+            addAction(ACTION_SIMULATE_CUSTOM)
             addAction(ACTION_RESET_LIVE)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -227,6 +269,8 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
                         ?: intent.getStringExtra(EXTRA_GEAR_LEGACY)
                         ?: "P"
                     Log.i(TAG, "收到档位模拟切换指令: $targetGear")
+                    isFirstGearEvent = false
+                    lastReportedGear = null
                     if (overlayWindow == null) {
                         showOverlay(WeatherOverlayWindow.Mode.TOP)
                     }
@@ -235,6 +279,8 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
                 ACTION_SWITCH_DRIVE_MODE -> {
                     val targetMode = intent.getStringExtra(EXTRA_DRIVE_MODE) ?: "SPORT"
                     Log.i(TAG, "收到驾驶模式模拟切换指令: $targetMode")
+                    isFirstDriveModeEvent = false
+                    lastReportedDriveMode = null
                     if (overlayWindow == null) {
                         showOverlay(WeatherOverlayWindow.Mode.TOP)
                     }

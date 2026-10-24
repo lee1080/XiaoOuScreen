@@ -170,10 +170,6 @@ class MainActivity : AppCompatActivity(), WeatherOverlayService.ServiceCallback 
             startActivity(Intent(this, CarSubscreenActivity::class.java))
         }
 
-        findViewById<Button>(R.id.btnOpenGearFlip).setOnClickListener {
-            startActivity(Intent(this, GearFlipActivity::class.java))
-        }
-
         tvPermissionNotice.setOnClickListener {
             requestOverlayPermission()
         }

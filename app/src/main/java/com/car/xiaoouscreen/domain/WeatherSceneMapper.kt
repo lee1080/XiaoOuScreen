@@ -449,44 +449,48 @@ object WeatherSceneMapper {
     }
 
     /**
-     * 大气时钟色温与发光晕影
+     * 大气时钟色温与发光晕影 (4 时段 × 7 天气 = 28 种精细专属光学调优)
+     * 解决恶劣天气/阴雨天在拂晓或黄昏时，文字发光与冷色背景剧烈冲突的突兀问题
+     * 严格遵循 WCAG 车机对比度规范，确保高亮天空不被冲淡、暗夜不刺眼眩光
      */
     private fun resolveClockAtmosphere(timeOfDay: TimeOfDay, state: WeatherState): Triple<Int, Int, Float> {
-        val textColor: Int
-        val glowColor: Int
-        val glowRadius: Float
-
-        when (timeOfDay) {
-            TimeOfDay.DAWN -> {
-                textColor = Color.parseColor("#FFF7ED") // 晨曦玫瑰金白
-                glowColor = Color.parseColor("#FB923C") // 温暖朝霞漫射
-                glowRadius = 24.0f
+        return when (timeOfDay) {
+            TimeOfDay.DAWN -> when (state) {
+                WeatherState.CLEAR -> Triple(Color.parseColor("#FFF7ED"), Color.parseColor("#FB923C"), 24.0f) // 晨曦玫瑰金白 + 朝霞金橙漫射
+                WeatherState.CLOUDY -> Triple(Color.parseColor("#FFF7ED"), Color.parseColor("#FB923C"), 22.0f) // 晨曦玫瑰白 + 柔和朝霞粉橘
+                WeatherState.OVERCAST -> Triple(Color.parseColor("#FFFFFF"), Color.parseColor("#475569"), 14.0f) // 纯净白 + 晨雾深板岩灰微光 (彻底去除违和橙光)
+                WeatherState.RAIN -> Triple(Color.parseColor("#F8FAFC"), Color.parseColor("#334155"), 14.0f) // 晨雨纯白 + 湿冷暗灰微光
+                WeatherState.SNOW -> Triple(Color.parseColor("#FFFFFF"), Color.parseColor("#64748B"), 16.0f) // 晨雪纯白 + 冰川板岩灰微光 (提升雪地对比度)
+                WeatherState.STORM -> Triple(Color.parseColor("#FFFFFF"), Color.parseColor("#A855F7"), 20.0f) // 晨雷电弧亮紫
+                WeatherState.SLEET -> Triple(Color.parseColor("#F8FAFC"), Color.parseColor("#475569"), 14.0f) // 晨冷雨雪青暗灰微光
             }
-            TimeOfDay.DAY -> {
-                textColor = Color.parseColor("#FFFFFF") // 强光直射纯白
-                glowColor = Color.parseColor("#38BDF8") // 蔚蓝天空散射
-                glowRadius = 16.0f
+            TimeOfDay.DAY -> when (state) {
+                WeatherState.CLEAR -> Triple(Color.parseColor("#FFFFFF"), Color.parseColor("#0284C7"), 18.0f) // 纯白 + 蔚蓝深天青散射 (告别浅蓝冲淡对比度)
+                WeatherState.CLOUDY -> Triple(Color.parseColor("#FFFFFF"), Color.parseColor("#0369A1"), 16.0f) // 纯白 + 晴空深海天蓝散射
+                WeatherState.OVERCAST -> Triple(Color.parseColor("#FFFFFF"), Color.parseColor("#334155"), 12.0f) // 纯白 + 铅灰阴霾暗石板沉稳微光
+                WeatherState.RAIN -> Triple(Color.parseColor("#FFFFFF"), Color.parseColor("#1E293B"), 12.0f) // 纯白 + 雨幕深冷灰微光
+                WeatherState.SNOW -> Triple(Color.parseColor("#FFFFFF"), Color.parseColor("#475569"), 14.0f) // 纯白 + 雪原深板岩灰微光 (雪景字迹分明)
+                WeatherState.STORM -> Triple(Color.parseColor("#FFFFFF"), Color.parseColor("#818CF8"), 20.0f) // 纯白 + 昼雷电光青紫
+                WeatherState.SLEET -> Triple(Color.parseColor("#FFFFFF"), Color.parseColor("#334155"), 13.0f) // 纯白 + 冰水深灰微光
             }
-            TimeOfDay.DUSK -> {
-                textColor = Color.parseColor("#FFFBEB") // 暖金白
-                glowColor = Color.parseColor("#F97316") // 落日赤金光晕
-                glowRadius = 26.0f
+            TimeOfDay.DUSK -> when (state) {
+                WeatherState.CLEAR -> Triple(Color.parseColor("#FFFBEB"), Color.parseColor("#F97316"), 26.0f) // 暖金白 + 落日赤金光晕
+                WeatherState.CLOUDY -> Triple(Color.parseColor("#FFFBEB"), Color.parseColor("#EA580C"), 24.0f) // 暖金白 + 晚霞火烧云金红
+                WeatherState.OVERCAST -> Triple(Color.parseColor("#FFFFFF"), Color.parseColor("#3F3F46"), 13.0f) // 纯亮白 + 暮色暗炭灰微光 (根除实拍图中突兀橙光，与铜灰云海绝配)
+                WeatherState.RAIN -> Triple(Color.parseColor("#F8FAFC"), Color.parseColor("#1E1B4B"), 13.0f) // 纯净白 + 暮雨深紫黑微光
+                WeatherState.SNOW -> Triple(Color.parseColor("#FFFFFF"), Color.parseColor("#4C1D95"), 16.0f) // 纯白 + 暮雪暗紫暮霜微光
+                WeatherState.STORM -> Triple(Color.parseColor("#FFFFFF"), Color.parseColor("#E11D48"), 22.0f) // 纯白 + 暮色血雷炽红微光
+                WeatherState.SLEET -> Triple(Color.parseColor("#F8FAFC"), Color.parseColor("#1E293B"), 14.0f) // 纯净白 + 暮冷黑蓝灰微光
             }
-            TimeOfDay.NIGHT -> {
-                textColor = Color.parseColor("#E0F2FE") // 冷银青月光色，夜间驾驶柔和不刺眼
-                glowColor = Color.parseColor("#0284C7") // 幽蓝暗夜光晕
-                glowRadius = 20.0f
+            TimeOfDay.NIGHT -> when (state) {
+                WeatherState.CLEAR -> Triple(Color.parseColor("#E0F2FE"), Color.parseColor("#0284C7"), 20.0f) // 冷银青月光白 + 幽蓝深空暗夜微光
+                WeatherState.CLOUDY -> Triple(Color.parseColor("#E0F2FE"), Color.parseColor("#0369A1"), 18.0f) // 冷银青 + 夜空深蓝云隙微光
+                WeatherState.OVERCAST -> Triple(Color.parseColor("#F1F5F9"), Color.parseColor("#334155"), 12.0f) // 纯净微冷白 + 夜雾碳黑沉稳灰光
+                WeatherState.RAIN -> Triple(Color.parseColor("#E2E8F0"), Color.parseColor("#1E293B"), 12.0f) // 柔和银白 + 暗夜冷雨黑蓝微光
+                WeatherState.SNOW -> Triple(Color.parseColor("#FFFFFF"), Color.parseColor("#475569"), 16.0f) // 纯白 + 静谧夜雪霜华微光
+                WeatherState.STORM -> Triple(Color.parseColor("#FFFFFF"), Color.parseColor("#9333EA"), 24.0f) // 纯白 + 极夜高能紫雷电弧
+                WeatherState.SLEET -> Triple(Color.parseColor("#E2E8F0"), Color.parseColor("#334155"), 13.0f) // 柔和银白 + 暗夜冰雪冷灰微光
             }
         }
-
-        val finalGlowColor = when (state) {
-            WeatherState.STORM -> Color.parseColor("#C084FC")
-            WeatherState.RAIN -> Color.parseColor("#38BDF8")
-            WeatherState.SNOW -> Color.parseColor("#E2E8F0")
-            WeatherState.SLEET -> Color.parseColor("#67E8F9") // 冰水交融青白微光
-            else -> glowColor
-        }
-
-        return Triple(textColor, finalGlowColor, glowRadius)
     }
 }

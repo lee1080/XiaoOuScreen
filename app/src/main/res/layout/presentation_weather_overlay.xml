@@ -3,7 +3,7 @@
     android:id="@+id/rootWeatherOverlay"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#000000">
+    android:background="@android:color/transparent">
 
     <!-- 页面 1：写实多图层天气动态背景 + 居中时钟核心画布 -->
     <com.car.xiaoouscreen.ui.CarWeatherCanvasView
@@ -22,17 +22,17 @@
         android:visibility="gone"
         android:alpha="0" />
 
-    <!-- 页面 3 (优先级 2)：1920×384 车辆模式切换由左至右擦除视图 (模式切换浮层，位于档位下方、歌词与天气上方) -->
-    <WebView
-        android:id="@+id/driveModeWebView"
+    <!-- 页面 3 (优先级 2)：1920×384 车辆模式切换由左至右纯原生光刃擦除视图 -->
+    <com.car.xiaoouscreen.ui.DriveModeWipeView
+        android:id="@+id/driveModeView"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:layout_gravity="center"
         android:visibility="gone" />
 
-    <!-- 页面 4 (优先级 1 - 最高优先级)：1920×384 3D 正方体档位翻转视图 (切档时置于顶层执行翻转) -->
-    <WebView
-        android:id="@+id/gearCubeWebView"
+    <!-- 页面 4 (优先级 1 - 最高优先级)：1920×384 纯原生 3D 正方体档位翻转视图 -->
+    <com.car.xiaoouscreen.ui.GearCubeFlipView
+        android:id="@+id/gearCubeView"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:layout_gravity="center"

@@ -204,20 +204,8 @@
                     android:layout_marginStart="10dp"
                     android:layout_weight="1"
                     android:background="@drawable/bg_button"
-                    android:text="🖥️ 主屏全屏预览"
+                    android:text="🖥️ 小欧副屏全屏预览 (时间天气 / 歌词 / 档位 / 模式)"
                     android:textColor="#A78BFA"
-                    android:textSize="13sp" />
-
-                <Button
-                    android:id="@+id/btnOpenGearFlip"
-                    android:layout_width="0dp"
-                    android:layout_height="44dp"
-                    android:layout_marginStart="10dp"
-                    android:layout_weight="1.2"
-                    android:background="@drawable/bg_button"
-                    android:text="🏎️ 3D档位翻转模拟"
-                    android:textColor="#F59E0B"
-                    android:textStyle="bold"
                     android:textSize="13sp" />
             </LinearLayout>
 

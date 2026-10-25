@@ -19,6 +19,18 @@ class OpenMeteoRepository(context: Context) {
         context.getSharedPreferences("car_weather_cache", Context.MODE_PRIVATE)
     private val gson = Gson()
 
+    /**
+     * 最新一次获取的未来数小时最大降水概率 (0-100)
+     */
+    var lastMaxPrecipProbability: Int = 0
+        private set
+
+    var lastSunriseUnix: Long = 0L
+        private set
+
+    var lastSunsetUnix: Long = 0L
+        private set
+
     private val api: OpenMeteoApi by lazy {
         val client = OkHttpClient.Builder()
             .connectTimeout(8, TimeUnit.SECONDS)
@@ -51,6 +63,11 @@ class OpenMeteoRepository(context: Context) {
                 // 寻找离当前最近的今天日出日落时间戳
                 val sunriseUnix = daily?.sunrise?.firstOrNull() ?: 0L
                 val sunsetUnix = daily?.sunset?.firstOrNull() ?: 0L
+                lastSunriseUnix = sunriseUnix
+                lastSunsetUnix = sunsetUnix
+
+                val probs = response.hourly?.precipitationProbability ?: emptyList()
+                lastMaxPrecipProbability = probs.take(6).maxOrNull() ?: 0
 
                 // 写入本地持久化缓存
                 saveToCache(response)
@@ -99,6 +116,9 @@ class OpenMeteoRepository(context: Context) {
             val current = cachedResponse.current ?: return null
             val sunriseUnix = cachedResponse.daily?.sunrise?.firstOrNull() ?: 0L
             val sunsetUnix = cachedResponse.daily?.sunset?.firstOrNull() ?: 0L
+            lastSunriseUnix = sunriseUnix
+            lastSunsetUnix = sunsetUnix
+            lastMaxPrecipProbability = cachedResponse.hourly?.precipitationProbability?.take(6)?.maxOrNull() ?: 0
 
             WeatherSceneMapper.mapToScene(
                 wmoCode = current.weatherCode,

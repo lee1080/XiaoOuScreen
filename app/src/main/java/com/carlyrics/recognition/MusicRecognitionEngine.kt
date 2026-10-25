@@ -440,6 +440,11 @@ class MusicRecognitionEngine(private val context: Context) {
     }
 
     fun startMediaSessionListening() {
+        if (pollingHandler != null) {
+            AppLogger.d(TAG, "MediaSession listening 处于活跃中，执行即时刷新")
+            forceRefresh()
+            return
+        }
         AppLogger.d(TAG, "=== startMediaSessionListening ===")
         val comp = ComponentName(context, NotificationListenerService::class.java)
 

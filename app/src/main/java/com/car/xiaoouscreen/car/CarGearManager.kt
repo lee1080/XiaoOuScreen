@@ -9,6 +9,7 @@ import android.os.Looper
 import android.util.Log
 import java.lang.reflect.Method
 import java.lang.reflect.Proxy
+import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * 长安欧尚 Z6 iDD / B561 智能座舱档位信号接入管理器
@@ -47,6 +48,10 @@ class CarGearManager private constructor(private val context: Context) {
         const val RAW_GEAR_R = 2
         const val RAW_GEAR_P = 4
         const val RAW_GEAR_D = 8
+
+        // 车规级过路档 (Transit Gear) 防抖时间窗口：250ms
+        // 揉库 (D <-> R) 或快速 P -> D 切档时，总线瞬态经过 N 档在此窗口内被暂扣，不打扰全屏 3D 翻转
+        const val TRANSIT_N_DEBOUNCE_MS = 250L
 
         @Volatile
         private var instance: CarGearManager? = null
@@ -92,8 +97,8 @@ class CarGearManager private constructor(private val context: Context) {
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val listeners = mutableListOf<GearListener>()
-    private val driveModeListeners = mutableListOf<DriveModeListener>()
+    private val listeners = CopyOnWriteArrayList<GearListener>()
+    private val driveModeListeners = CopyOnWriteArrayList<DriveModeListener>()
 
     private var carInstance: Any? = null
     private var cabinManager: Any? = null
@@ -104,6 +109,10 @@ class CarGearManager private constructor(private val context: Context) {
 
     private var currentGearLabel = "P"
     private var currentRawGear = RAW_GEAR_P
+
+    // N 档瞬态防抖计时器 (用于过路档抑制)
+    private var pendingNRunnable: Runnable? = null
+    private var pendingNRaw: Int = RAW_GEAR_N
 
     private var currentDriveMode = MODE_SPORT
     private var currentRawDriveMode = 3
@@ -237,7 +246,7 @@ class CarGearManager private constructor(private val context: Context) {
             if (isValidGear(raw)) {
                 val label = toGearLabel(raw)
                 Log.i(TAG, "🎉 实车初始档位主动查询成功: raw=$raw -> $label 档")
-                notifyGearInternal(label, raw)
+                notifyGearInternal(label, raw, debounceN = false)
             } else {
                 Log.d(TAG, "实车初始档位非白名单值: raw=$raw (有效值: 1=N, 2=R, 4=P, 8=D)")
             }
@@ -358,7 +367,7 @@ class CarGearManager private constructor(private val context: Context) {
                 if (isValidGear(rawValue)) {
                     val label = toGearLabel(rawValue)
                     Log.i(TAG, "🚘 实车档位总线变动触发: prop=0x${Integer.toHexString(propId)}, raw=$rawValue -> $label")
-                    notifyGearInternal(label, rawValue)
+                    notifyGearInternal(label, rawValue, debounceN = true)
                 } else {
                     Log.d(TAG, "忽略非标准档位过渡噪声: raw=$rawValue")
                 }
@@ -386,14 +395,14 @@ class CarGearManager private constructor(private val context: Context) {
             else -> return
         }
         Log.i(TAG, "🧪 模拟切档触发: $label (raw=$raw)")
-        notifyGearInternal(label, raw)
+        notifyGearInternal(label, raw, debounceN = true)
     }
 
     fun simulateRawGear(rawGear: Int) {
         if (isValidGear(rawGear)) {
             val label = toGearLabel(rawGear)
             Log.i(TAG, "🧪 模拟 Raw 档位触发: raw=$rawGear -> $label")
-            notifyGearInternal(label, rawGear)
+            notifyGearInternal(label, rawGear, debounceN = true)
         }
     }
 
@@ -425,7 +434,38 @@ class CarGearManager private constructor(private val context: Context) {
         notifyDriveModeInternal(mode, rawMode)
     }
 
-    private fun notifyGearInternal(label: String, raw: Int) {
+    /**
+     * 档位总线与模拟输入统一分发入口 (车规级过路档 Transit 抑制算法)
+     */
+    private fun notifyGearInternal(label: String, raw: Int, debounceN: Boolean = true) {
+        if (label == "N" && debounceN) {
+            // N 档意图确认窗口 (车规级过路档抑制算法: 250ms 防抖)
+            // 揉库 (D <-> R) 或快速 P -> D 切档时，总线瞬态经过 N 档在此窗口内被暂扣，不打扰全屏 3D 翻转
+            pendingNRunnable?.let { mainHandler.removeCallbacks(it) }
+            Log.d(TAG, "⏳ 收到 N 档信号，启动 ${TRANSIT_N_DEBOUNCE_MS}ms 意图确认窗口 (防揉库闪屏)...")
+            pendingNRaw = raw
+            val runnable = Runnable {
+                Log.i(TAG, "⏱️ N 档停留已达 ${TRANSIT_N_DEBOUNCE_MS}ms，确认为真实挂入空档，执行调度")
+                pendingNRunnable = null
+                notifyGearDirect("N", pendingNRaw)
+            }
+            pendingNRunnable = runnable
+            mainHandler.postDelayed(runnable, TRANSIT_N_DEBOUNCE_MS)
+            return
+        }
+
+        // 收到非 N 档 (P, R, D) 或免防抖 N 档:
+        // 如果此前有未到期的 N 档防抖计时器，证明 N 只是过路档，直接丢弃 N 档！
+        if (pendingNRunnable != null) {
+            mainHandler.removeCallbacks(pendingNRunnable!!)
+            pendingNRunnable = null
+            Log.i(TAG, "🚦 检测到快速切档到非 N 档 ($label)，成功抑制过路 N 档，直通调度: $label 档")
+        }
+
+        notifyGearDirect(label, raw)
+    }
+
+    private fun notifyGearDirect(label: String, raw: Int) {
         currentGearLabel = label
         currentRawGear = raw
         mainHandler.post {

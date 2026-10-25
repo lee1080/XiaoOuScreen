@@ -15,10 +15,13 @@ import android.os.IBinder
 import android.os.Looper
 import android.util.Log
 import com.car.xiaoouscreen.R
+import com.car.xiaoouscreen.car.CarCallManager
 import com.car.xiaoouscreen.car.CarGearManager
 import com.car.xiaoouscreen.data.OpenMeteoRepository
+import com.car.xiaoouscreen.data.QWeatherRepository
 import com.car.xiaoouscreen.domain.Intensity
 import com.car.xiaoouscreen.domain.TimeOfDay
+import com.car.xiaoouscreen.domain.WeatherFusionEngine
 import com.car.xiaoouscreen.domain.WeatherSceneConfig
 import com.car.xiaoouscreen.domain.WeatherSceneMapper
 import com.car.xiaoouscreen.domain.WeatherState
@@ -65,15 +68,13 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
 
     private var overlayWindow: WeatherOverlayWindow? = null
     private var threeScreenClient: ThreeScreenClient? = null
-    private var repository: OpenMeteoRepository? = null
+    private var fusionEngine: WeatherFusionEngine? = null
+    private var fusionJob: Job? = null
     private var gpsManager: CarGpsManager? = null
 
     private var currentMode: WeatherOverlayWindow.Mode = WeatherOverlayWindow.Mode.TOP
     private var currentScene: WeatherSceneConfig = WeatherSceneConfig.DEFAULT
     private var isSimulating = false
-
-    private var weatherPollJob: Job? = null
-    private var timeTickerJob: Job? = null
 
     // 歌词业务与 5s 延时回退
     private val lyricsApi = LyricsApiManager()
@@ -153,6 +154,17 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
         }
     }
 
+    private val callListener = object : CarCallManager.CallListener {
+        override fun onCallChanged(callInfo: CarCallManager.CallInfo) {
+            mainHandler.post {
+                if (callInfo.isCallActive && overlayWindow == null) {
+                    showOverlay(WeatherOverlayWindow.Mode.TOP)
+                }
+                overlayWindow?.setCallInfo(callInfo)
+            }
+        }
+    }
+
     private val commandReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val action = intent?.action ?: return
@@ -198,7 +210,42 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
                 }
                 ACTION_RESET_LIVE -> {
                     isSimulating = false
-                    startLiveWeatherEngine()
+                    startLiveWeatherEngine(force = true)
+                }
+                ACTION_UPDATE_LIQUID_GLASS -> {
+                    val enabled = intent.getBooleanExtra(EXTRA_LIQUID_GLASS_ENABLED, PrefsManager.isLiquidGlassClockEnabled())
+                    Log.i(TAG, "📡 接收到液态玻璃时钟状态更新广播: enabled=$enabled")
+                    overlayWindow?.setLiquidGlassEnabled(enabled)
+                }
+                ACTION_UPDATE_BOTTOM_LEFT_GEAR_HUD -> {
+                    val enabled = intent.getBooleanExtra(EXTRA_BOTTOM_LEFT_GEAR_HUD_ENABLED, PrefsManager.isBottomLeftGearHudEnabled())
+                    Log.i(TAG, "📡 接收到左下角档位HUD状态更新广播: enabled=$enabled")
+                    overlayWindow?.setBottomLeftGearHudEnabled(enabled)
+                }
+                ACTION_CALL_EVENT -> {
+                    val typeStr = intent.getStringExtra(EXTRA_CALL_TYPE) ?: "normal"
+                    val stateStr = intent.getStringExtra(EXTRA_CALL_STATE) ?: "ringing"
+                    val name = intent.getStringExtra(EXTRA_CALL_NAME) ?: "张总"
+                    val number = intent.getStringExtra(EXTRA_CALL_NUMBER) ?: "13800009527"
+                    val type = if (typeStr.equals("wechat", ignoreCase = true)) CarCallManager.CallType.WECHAT else CarCallManager.CallType.NORMAL
+                    val state = when (stateStr.lowercase()) {
+                        "ringing", "incoming" -> CarCallManager.CallState.RINGING
+                        "dialing", "outgoing" -> CarCallManager.CallState.DIALING
+                        "active", "connected" -> CarCallManager.CallState.ACTIVE
+                        "hangup", "terminated" -> CarCallManager.CallState.TERMINATED
+                        else -> CarCallManager.CallState.IDLE
+                    }
+                    Log.i(TAG, "📡 接收到通话模拟广播: type=$type, state=$state, name=$name, num=$number")
+                    if (state != CarCallManager.CallState.IDLE && overlayWindow == null) {
+                        showOverlay(WeatherOverlayWindow.Mode.TOP)
+                    }
+                    CarCallManager.getInstance(this@WeatherOverlayService).simulateCall(type, state, name, number)
+                }
+                ACTION_SIMULATE_MUSIC -> {
+                    val playing = intent.getBooleanExtra(EXTRA_MUSIC_PLAYING, true)
+                    val title = intent.getStringExtra(EXTRA_MUSIC_TITLE) ?: "See You Again (feat. Charlie Puth)"
+                    val artist = intent.getStringExtra(EXTRA_MUSIC_ARTIST) ?: "Wiz Khalifa / Charlie Puth"
+                    onTrackStateChanged(CurrentTrack(title = title, artist = artist, isPlaying = playing, position = 15000L, duration = 200000L))
                 }
             }
         }
@@ -211,14 +258,28 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
         startForeground(NOTIFICATION_ID, buildForegroundNotification("小欧屏服务运行中"))
 
         threeScreenClient = ThreeScreenClient(this, this).apply { bind() }
-        repository = OpenMeteoRepository(this)
         gpsManager = CarGpsManager(this)
+        val openMeteoRepo = OpenMeteoRepository(this)
+        val qWeatherRepo = QWeatherRepository(this)
+        fusionEngine = WeatherFusionEngine(
+            context = this,
+            scope = serviceScope,
+            openMeteoRepo = openMeteoRepo,
+            qWeatherRepo = qWeatherRepo,
+            gpsManager = gpsManager!!
+        )
 
         // 初始化欧尚 Z6 实车档位与驾驶模式总线信号监听
         CarGearManager.getInstance(this).apply {
             init()
             registerListener(gearListener)
             registerDriveModeListener(driveModeListener)
+        }
+
+        // 初始化车载通话监听
+        CarCallManager.getInstance(this).apply {
+            startListening()
+            addListener(callListener)
         }
 
         // 注册外部/ADB广播控制接收器 (支持 com.car.gear.SWITCH 等指令)
@@ -233,6 +294,10 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
             addAction(ACTION_SIMULATE_PRESET)
             addAction(ACTION_SIMULATE_CUSTOM)
             addAction(ACTION_RESET_LIVE)
+            addAction(ACTION_UPDATE_LIQUID_GLASS)
+            addAction(ACTION_UPDATE_BOTTOM_LEFT_GEAR_HUD)
+            addAction(ACTION_CALL_EVENT)
+            addAction(ACTION_SIMULATE_MUSIC)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(commandReceiver, filter, Context.RECEIVER_EXPORTED)
@@ -299,10 +364,45 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
                 }
                 ACTION_RESET_LIVE -> {
                     isSimulating = false
-                    startLiveWeatherEngine()
+                    startLiveWeatherEngine(force = true)
+                }
+                ACTION_UPDATE_LIQUID_GLASS -> {
+                    val enabled = intent.getBooleanExtra(EXTRA_LIQUID_GLASS_ENABLED, PrefsManager.isLiquidGlassClockEnabled())
+                    Log.i(TAG, "📡 接收到液态玻璃时钟状态更新广播: enabled=$enabled")
+                    overlayWindow?.setLiquidGlassEnabled(enabled)
+                }
+                ACTION_UPDATE_BOTTOM_LEFT_GEAR_HUD -> {
+                    val enabled = intent.getBooleanExtra(EXTRA_BOTTOM_LEFT_GEAR_HUD_ENABLED, PrefsManager.isBottomLeftGearHudEnabled())
+                    Log.i(TAG, "📡 接收到左下角档位HUD状态更新广播: enabled=$enabled")
+                    overlayWindow?.setBottomLeftGearHudEnabled(enabled)
+                }
+                ACTION_CALL_EVENT -> {
+                    val typeStr = intent.getStringExtra(EXTRA_CALL_TYPE) ?: "normal"
+                    val stateStr = intent.getStringExtra(EXTRA_CALL_STATE) ?: "ringing"
+                    val name = intent.getStringExtra(EXTRA_CALL_NAME) ?: "张总"
+                    val number = intent.getStringExtra(EXTRA_CALL_NUMBER) ?: "13800009527"
+                    val type = if (typeStr.equals("wechat", ignoreCase = true)) CarCallManager.CallType.WECHAT else CarCallManager.CallType.NORMAL
+                    val state = when (stateStr.lowercase()) {
+                        "ringing", "incoming" -> CarCallManager.CallState.RINGING
+                        "dialing", "outgoing" -> CarCallManager.CallState.DIALING
+                        "active", "connected" -> CarCallManager.CallState.ACTIVE
+                        "hangup", "terminated" -> CarCallManager.CallState.TERMINATED
+                        else -> CarCallManager.CallState.IDLE
+                    }
+                    Log.i(TAG, "📡 接收到通话模拟广播: type=$type, state=$state, name=$name, num=$number")
+                    if (state != CarCallManager.CallState.IDLE && overlayWindow == null) {
+                        showOverlay(WeatherOverlayWindow.Mode.TOP)
+                    }
+                    CarCallManager.getInstance(this@WeatherOverlayService).simulateCall(type, state, name, number)
                 }
                 ACTION_UPDATE_LYRICS_SETTINGS -> {
                     updateLyricsRuntimeSettings()
+                }
+                ACTION_SIMULATE_MUSIC -> {
+                    val playing = intent.getBooleanExtra(EXTRA_MUSIC_PLAYING, true)
+                    val title = intent.getStringExtra(EXTRA_MUSIC_TITLE) ?: "See You Again (feat. Charlie Puth)"
+                    val artist = intent.getStringExtra(EXTRA_MUSIC_ARTIST) ?: "Wiz Khalifa / Charlie Puth"
+                    onTrackStateChanged(CurrentTrack(title = title, artist = artist, isPlaying = playing, position = 15000L, duration = 200000L))
                 }
                 ACTION_CHECK_LYRICS_STATE -> {
                     evaluateLyricsStateTransition()
@@ -540,70 +640,39 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
      * 同步运行时二级设置至当前悬浮窗
      */
     fun updateLyricsRuntimeSettings() {
-        val w = overlayWindow ?: return
-        val shouldAvoid = (currentMode == WeatherOverlayWindow.Mode.FITNESS) && PrefsManager.isXiaoOuAvoidanceEnabled()
-        w.updateLyricsAvoidance(shouldAvoid)
-        w.updateCanvasAvoidance(shouldAvoid)
-        w.reloadLyricsSkin(PrefsManager.getSkinType())
-        w.updateLyricsFontSize(PrefsManager.getFontSizeSp())
-        w.updateLyricsSplitRatio(PrefsManager.getSplitRatio())
-        w.updateLyricsAlignment(PrefsManager.getLyricsAlignment())
-        w.updateLyricsMarquee(PrefsManager.isMarqueeEnabled())
-        w.updateLyricsScale(PrefsManager.getDpiScale())
-        w.updateLyricsInfoFontScale(PrefsManager.getInfoFontScale())
-        w.updateLyricsOffsetMs(PrefsManager.lyricsOffsetMs)
+        val shouldAvoid = (currentMode == WeatherOverlayWindow.Mode.FITNESS)
+        val targetSkin = PrefsManager.getSkinType()
+        overlayWindow?.let { w ->
+            w.updateLyricsAvoidance(shouldAvoid)
+            w.updateCanvasAvoidance(shouldAvoid)
+            w.reloadLyricsSkin(targetSkin)
+            w.updateLyricsFontSize(PrefsManager.getFontSizeSp())
+            w.updateLyricsSplitRatio(PrefsManager.getSplitRatio())
+            w.updateLyricsAlignment(PrefsManager.getLyricsAlignment())
+            w.updateLyricsMarquee(PrefsManager.isMarqueeEnabled())
+            w.updateLyricsScale(PrefsManager.getDpiScale())
+            w.updateLyricsInfoFontScale(PrefsManager.getInfoFontScale())
+            w.updateLyricsOffsetMs(PrefsManager.lyricsOffsetMs)
+        }
+        // 同时发送全局广播，让处于副屏预览的 CarSubscreenActivity 也同步更新！
+        sendBroadcast(Intent(ACTION_UPDATE_LYRICS_SETTINGS).apply {
+            setPackage(packageName)
+        })
     }
 
     // ==========================================
-    // 气象驱动引擎 (真实 GPS + 本地走时)
+    // 气象驱动引擎 (WeatherFusionEngine 双引擎融合)
     // ==========================================
-    private fun startLiveWeatherEngine() {
-        gpsManager?.startLocationUpdates { lat, lon ->
-            if (!isSimulating) {
-                fetchNetworkWeather(lat, lon)
+    private fun startLiveWeatherEngine(force: Boolean = false) {
+        fusionEngine?.start()
+        if (force) {
+            gpsManager?.let { gps ->
+                fusionEngine?.refreshWeather(gps.currentLatitude, gps.currentLongitude, force = true)
             }
         }
-
-        // 15分钟轮询
-        weatherPollJob?.cancel()
-        weatherPollJob = serviceScope.launch {
-            while (isActive) {
-                delay(15 * 60 * 1000L)
-                if (!isSimulating) {
-                    val lat = gpsManager?.currentLatitude ?: 31.2304
-                    val lon = gpsManager?.currentLongitude ?: 121.4737
-                    fetchNetworkWeather(lat, lon)
-                }
-            }
-        }
-
-        // 1分钟本地昼夜监测
-        timeTickerJob?.cancel()
-        timeTickerJob = serviceScope.launch {
-            while (isActive) {
-                delay(60 * 1000L)
-                if (!isSimulating) {
-                    val nowUnix = System.currentTimeMillis() / 1000L
-                    val mapped = WeatherSceneMapper.mapToScene(
-                        wmoCode = 0,
-                        nowUnix = nowUnix,
-                        sunriseUnix = currentScene.sunriseUnix,
-                        sunsetUnix = currentScene.sunsetUnix,
-                        windSpeed = currentScene.windSpeedKmh,
-                        temperature = currentScene.temperatureCelsius,
-                        windDirection = currentScene.windDirectionDegree
-                    )
-                    if (mapped.timeOfDay != currentScene.timeOfDay) {
-                        applyNewScene(mapped)
-                    }
-                }
-            }
-        }
-    }
-
-    private fun fetchNetworkWeather(lat: Double, lon: Double) {
-        serviceScope.launch {
-            repository?.getWeatherScene(lat, lon)?.onSuccess { newScene ->
+        fusionJob?.cancel()
+        fusionJob = serviceScope.launch {
+            fusionEngine?.sceneConfig?.collectLatest { newScene ->
                 if (!isSimulating) {
                     applyNewScene(newScene)
                 }
@@ -735,9 +804,12 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
         }
         CarGearManager.getInstance(this).unregisterListener(gearListener)
         CarGearManager.getInstance(this).unregisterDriveModeListener(driveModeListener)
+        CarCallManager.getInstance(this).removeListener(callListener)
         fallbackHandler.removeCallbacks(fallbackToWeatherRunnable)
         lyricsProgressJob?.cancel()
         lyricsFetchJob?.cancel()
+        fusionJob?.cancel()
+        fusionEngine?.stop()
         hideOverlay()
         threeScreenClient?.unbind()
         gpsManager?.stopLocationUpdates()
@@ -765,6 +837,14 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
         const val ACTION_RESET_LIVE = "com.car.xiaoouscreen.RESET_LIVE"
         const val ACTION_UPDATE_LYRICS_SETTINGS = "com.car.xiaoouscreen.UPDATE_LYRICS_SETTINGS"
         const val ACTION_CHECK_LYRICS_STATE = "com.car.xiaoouscreen.CHECK_LYRICS_STATE"
+        const val ACTION_UPDATE_LIQUID_GLASS = "com.car.xiaoouscreen.UPDATE_LIQUID_GLASS"
+        const val ACTION_UPDATE_BOTTOM_LEFT_GEAR_HUD = "com.car.xiaoouscreen.UPDATE_BOTTOM_LEFT_GEAR_HUD"
+        const val ACTION_CALL_EVENT = "com.car.xiaoouscreen.CALL_EVENT"
+        const val ACTION_SIMULATE_MUSIC = "com.car.xiaoouscreen.SIMULATE_MUSIC"
+
+        const val EXTRA_MUSIC_PLAYING = "extra_music_playing"
+        const val EXTRA_MUSIC_TITLE = "extra_music_title"
+        const val EXTRA_MUSIC_ARTIST = "extra_music_artist"
 
         const val EXTRA_TARGET_GEAR = "extra_target_gear"
         const val EXTRA_DRIVE_MODE = "mode"
@@ -773,10 +853,31 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
         const val EXTRA_WEATHER_STATE = "extra_weather_state"
         const val EXTRA_WIND_SPEED = "extra_wind_speed"
         const val EXTRA_IS_SLEET = "extra_is_sleet"
+        const val EXTRA_LIQUID_GLASS_ENABLED = "extra_liquid_glass_enabled"
+        const val EXTRA_BOTTOM_LEFT_GEAR_HUD_ENABLED = "extra_bottom_left_gear_hud_enabled"
+        const val EXTRA_CALL_TYPE = "type"
+        const val EXTRA_CALL_STATE = "state"
+        const val EXTRA_CALL_NAME = "name"
+        const val EXTRA_CALL_NUMBER = "number"
 
         var instance: WeatherOverlayService? = null
             private set
         var serviceCallback: ServiceCallback? = null
+
+        fun simulateCall(context: Context, type: String, state: String, name: String, number: String) {
+            val i = Intent(context, WeatherOverlayService::class.java).apply {
+                action = ACTION_CALL_EVENT
+                putExtra(EXTRA_CALL_TYPE, type)
+                putExtra(EXTRA_CALL_STATE, state)
+                putExtra(EXTRA_CALL_NAME, name)
+                putExtra(EXTRA_CALL_NUMBER, number)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(i)
+            } else {
+                context.startService(i)
+            }
+        }
 
         fun switchGear(context: Context, gear: String) {
             val i = Intent(context, WeatherOverlayService::class.java).apply {
@@ -829,6 +930,48 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
                 context.startForegroundService(i)
             } else {
                 context.startService(i)
+            }
+        }
+
+        fun updateLiquidGlassState(context: Context, enabled: Boolean) {
+            val i = Intent(context, WeatherOverlayService::class.java).apply {
+                action = ACTION_UPDATE_LIQUID_GLASS
+                putExtra(EXTRA_LIQUID_GLASS_ENABLED, enabled)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(i)
+            } else {
+                context.startService(i)
+            }
+            // 同时发送全局广播，通知 CarSubscreenActivity (副屏预览页面)
+            try {
+                context.sendBroadcast(Intent(ACTION_UPDATE_LIQUID_GLASS).apply {
+                    putExtra(EXTRA_LIQUID_GLASS_ENABLED, enabled)
+                    setPackage(context.packageName)
+                })
+            } catch (e: Exception) {
+                Log.w(TAG, "广播发送失败: ${e.message}")
+            }
+        }
+
+        fun updateBottomLeftGearHudState(context: Context, enabled: Boolean) {
+            val i = Intent(context, WeatherOverlayService::class.java).apply {
+                action = ACTION_UPDATE_BOTTOM_LEFT_GEAR_HUD
+                putExtra(EXTRA_BOTTOM_LEFT_GEAR_HUD_ENABLED, enabled)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(i)
+            } else {
+                context.startService(i)
+            }
+            // 同时发送全局广播，通知 CarSubscreenActivity (副屏预览页面)
+            try {
+                context.sendBroadcast(Intent(ACTION_UPDATE_BOTTOM_LEFT_GEAR_HUD).apply {
+                    putExtra(EXTRA_BOTTOM_LEFT_GEAR_HUD_ENABLED, enabled)
+                    setPackage(context.packageName)
+                })
+            } catch (e: Exception) {
+                Log.w(TAG, "广播发送失败: ${e.message}")
             }
         }
     }

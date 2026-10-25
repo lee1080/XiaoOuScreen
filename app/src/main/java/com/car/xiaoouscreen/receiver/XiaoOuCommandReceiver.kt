@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.util.Log
+import com.car.xiaoouscreen.car.CarCallManager
 import com.car.xiaoouscreen.car.CarGearManager
 import com.car.xiaoouscreen.service.WeatherOverlayService
 
@@ -64,6 +65,21 @@ class XiaoOuCommandReceiver : BroadcastReceiver() {
             }
             WeatherOverlayService.ACTION_RESET_LIVE -> {
                 WeatherOverlayService.send(context, WeatherOverlayService.ACTION_RESET_LIVE)
+            }
+            WeatherOverlayService.ACTION_CALL_EVENT -> {
+                val typeStr = intent.getStringExtra(WeatherOverlayService.EXTRA_CALL_TYPE) ?: "normal"
+                val stateStr = intent.getStringExtra(WeatherOverlayService.EXTRA_CALL_STATE) ?: "ringing"
+                val name = intent.getStringExtra(WeatherOverlayService.EXTRA_CALL_NAME) ?: "张总"
+                val number = intent.getStringExtra(WeatherOverlayService.EXTRA_CALL_NUMBER) ?: "13800009527"
+                val type = if (typeStr.equals("wechat", ignoreCase = true)) CarCallManager.CallType.WECHAT else CarCallManager.CallType.NORMAL
+                val state = when (stateStr.lowercase()) {
+                    "ringing", "incoming" -> CarCallManager.CallState.RINGING
+                    "dialing", "outgoing" -> CarCallManager.CallState.DIALING
+                    "active", "connected" -> CarCallManager.CallState.ACTIVE
+                    "hangup", "terminated" -> CarCallManager.CallState.TERMINATED
+                    else -> CarCallManager.CallState.IDLE
+                }
+                CarCallManager.getInstance(context).simulateCall(type, state, name, number)
             }
         }
     }

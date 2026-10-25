@@ -97,7 +97,11 @@ class LyricsSettingsActivity : AppCompatActivity() {
             addUpdateListener { anim ->
                 val progressMs = (anim.animatedValue as Float).toLong()
                 try {
-                    displayView.updateProgress(progressMs)
+                    if (::previewLyricsContainer.isInitialized) {
+                        previewLyricsContainer.updateProgress(progressMs)
+                    } else {
+                        displayView.updateProgress(progressMs)
+                    }
                 } catch (e: Exception) {
                     AppLogger.e(TAG, "demo updateProgress error: ${e.message}", e)
                 }
@@ -197,11 +201,19 @@ class LyricsSettingsActivity : AppCompatActivity() {
     private fun bindDemoDataToPreview() {
         try {
             ensureDemoCoverBitmap()
-            displayView.setTrackInfo(DEMO_TRACK_TITLE, DEMO_TRACK_ARTIST)
-            displayView.setCoverUrl(DEMO_COVER_URL)
-            displayView.setLyrics(demoLyricLines)
-            val currentMs = (demoAnimator?.animatedValue as? Float)?.toLong() ?: 0L
-            displayView.updateProgress(currentMs)
+            if (::previewLyricsContainer.isInitialized) {
+                previewLyricsContainer.setTrackInfo(DEMO_TRACK_TITLE, DEMO_TRACK_ARTIST)
+                previewLyricsContainer.setCoverUrl(DEMO_COVER_URL)
+                previewLyricsContainer.setLyrics(demoLyricLines)
+                val currentMs = (demoAnimator?.animatedValue as? Float)?.toLong() ?: 0L
+                previewLyricsContainer.updateProgress(currentMs)
+            } else {
+                displayView.setTrackInfo(DEMO_TRACK_TITLE, DEMO_TRACK_ARTIST)
+                displayView.setCoverUrl(DEMO_COVER_URL)
+                displayView.setLyrics(demoLyricLines)
+                val currentMs = (demoAnimator?.animatedValue as? Float)?.toLong() ?: 0L
+                displayView.updateProgress(currentMs)
+            }
             if (demoAnimator == null || !demoAnimator!!.isRunning) {
                 startDemoPlayback()
             }
@@ -218,6 +230,7 @@ class LyricsSettingsActivity : AppCompatActivity() {
 
     // UI
     private lateinit var displayView: LyricsSkin
+    private lateinit var previewLyricsContainer: com.carlyrics.display.LyricsNormalizedContainerView
     private var aspectPreviewFrame: com.carlyrics.display.AspectPreviewFrame? = null
     private lateinit var screenSpinner: Spinner
     private lateinit var skinSpinner: Spinner
@@ -572,7 +585,15 @@ class LyricsSettingsActivity : AppCompatActivity() {
             setPadding(dp(16), 0, dp(16), dp(10))
         }
 
-        val previewCard = FrameLayout(this).apply {
+        val previewCard = object : FrameLayout(this) {
+            override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+                val width = MeasureSpec.getSize(widthMeasureSpec)
+                // 严格锁定 1920:384 (5:1) 小欧副屏黄金物理比例，保证预览与真实副屏及悬浮窗绝对像素级 1:1 所见即所得
+                val desiredHeight = if (width > 0) (width / 5.0f).toInt() else dp(200)
+                val newHeightSpec = MeasureSpec.makeMeasureSpec(desiredHeight, MeasureSpec.EXACTLY)
+                super.onMeasure(widthMeasureSpec, newHeightSpec)
+            }
+        }.apply {
             background = GradientDrawable().apply {
                 setColor(0xFF161618.toInt()) // 哑光座舱黑
                 cornerRadius = dp(12).toFloat()
@@ -582,15 +603,16 @@ class LyricsSettingsActivity : AppCompatActivity() {
             elevation = dp(4).toFloat()
         }
 
-        aspectPreviewFrame = com.carlyrics.display.AspectPreviewFrame(this).apply { id = View.generateViewId() }
-        displayView = SkinFactory.create(currentSkinType, com.carlyrics.util.DensityNormalization.getNormalizedContext(this))
-        displayView.xiaoOuAvoidanceEnabled = currentXiaoOuAvoidanceEnabled
-        aspectPreviewFrame!!.setSkinView(displayView as View)
-        aspectPreviewFrame!!.setXiaoOuIndicatorVisible(currentXiaoOuAvoidanceEnabled)
+        previewLyricsContainer = com.carlyrics.display.LyricsNormalizedContainerView(this).apply {
+            id = View.generateViewId()
+            showAvatarIndicator = true // 仅在设置预览中开启形象示意图
+            xiaoOuAvoidanceEnabled = currentXiaoOuAvoidanceEnabled
+        }
+        displayView = previewLyricsContainer.getSkin()!!
 
-        // 保持 1920:384 等比自适应缩放，固定高度为 200dp 充满宽屏视野
-        previewCard.addView(aspectPreviewFrame!!, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT, dp(200)
+        // 充满 5:1 严格比例卡片，实现全分辨率完全等比自适应矩阵缩放
+        previewCard.addView(previewLyricsContainer, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
         ))
 
         previewCardWrapper.addView(previewCard)
@@ -729,8 +751,8 @@ class LyricsSettingsActivity : AppCompatActivity() {
                             if (fromUser) {
                                 currentSplitRatio = ratio
                                 PrefsManager.setSplitRatio(ratio)
+                                syncSettingsToService()
                             }
-                            syncSettingsToService()
                         }
                         override fun onStartTrackingTouch(sb: SeekBar?) {}
                         override fun onStopTrackingTouch(sb: SeekBar?) {}
@@ -855,8 +877,8 @@ class LyricsSettingsActivity : AppCompatActivity() {
                             if (fromUser) {
                                 currentFontSizeSp = sp
                                 PrefsManager.setFontSizeSp(sp)
+                                syncSettingsToService()
                             }
-                            syncSettingsToService()
                         }
                         override fun onStartTrackingTouch(sb: SeekBar?) {}
                         override fun onStopTrackingTouch(sb: SeekBar?) {}
@@ -996,14 +1018,18 @@ class LyricsSettingsActivity : AppCompatActivity() {
                     orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
                 }
                 val xiaoOuSwitch = Switch(this@LyricsSettingsActivity).apply {
-                    text = "投屏在小欧下方时自动避让 500px 3D 形象"
+                    text = "开启 500px 小欧 3D 形象避让 (全屏/悬浮窗同步)"
                     applyIosSwitchStyle(this)
                     isChecked = currentXiaoOuAvoidanceEnabled
                     setOnCheckedChangeListener { _, enabled ->
                         currentXiaoOuAvoidanceEnabled = enabled
                         PrefsManager.setXiaoOuAvoidanceEnabled(enabled)
-                        displayView.xiaoOuAvoidanceEnabled = enabled
-                        aspectPreviewFrame?.setXiaoOuIndicatorVisible(enabled)
+                        if (::previewLyricsContainer.isInitialized) {
+                            previewLyricsContainer.xiaoOuAvoidanceEnabled = enabled
+                            displayView = previewLyricsContainer.getSkin() ?: displayView
+                        } else {
+                            displayView.xiaoOuAvoidanceEnabled = enabled
+                        }
                         syncSettingsToService()
                     }
                 }
@@ -1123,8 +1149,8 @@ class LyricsSettingsActivity : AppCompatActivity() {
                             if (fromUser) {
                                 currentSplitRatio = ratio
                                 PrefsManager.setSplitRatio(ratio)
+                                syncSettingsToService()
                             }
-                            syncSettingsToService()
                         }
                         override fun onStartTrackingTouch(sb: SeekBar?) {}
                         override fun onStopTrackingTouch(sb: SeekBar?) {}
@@ -1249,8 +1275,8 @@ class LyricsSettingsActivity : AppCompatActivity() {
                             if (fromUser) {
                                 currentFontSizeSp = sp
                                 PrefsManager.setFontSizeSp(sp)
+                                syncSettingsToService()
                             }
-                            syncSettingsToService()
                         }
                         override fun onStartTrackingTouch(sb: SeekBar?) {}
                         override fun onStopTrackingTouch(sb: SeekBar?) {}
@@ -1389,14 +1415,18 @@ class LyricsSettingsActivity : AppCompatActivity() {
                     orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
                 }
                 val xiaoOuSwitch = Switch(this@LyricsSettingsActivity).apply {
-                    text = "投屏在小欧下方时自动避让 500px 3D 形象"
+                    text = "开启 500px 小欧 3D 形象避让 (全屏/悬浮窗同步)"
                     applyIosSwitchStyle(this)
                     isChecked = currentXiaoOuAvoidanceEnabled
                     setOnCheckedChangeListener { _, enabled ->
                         currentXiaoOuAvoidanceEnabled = enabled
                         PrefsManager.setXiaoOuAvoidanceEnabled(enabled)
-                        displayView.xiaoOuAvoidanceEnabled = enabled
-                        aspectPreviewFrame?.setXiaoOuIndicatorVisible(enabled)
+                        if (::previewLyricsContainer.isInitialized) {
+                            previewLyricsContainer.xiaoOuAvoidanceEnabled = enabled
+                            displayView = previewLyricsContainer.getSkin() ?: displayView
+                        } else {
+                            displayView.xiaoOuAvoidanceEnabled = enabled
+                        }
                         syncSettingsToService()
                     }
                 }
@@ -1552,9 +1582,13 @@ class LyricsSettingsActivity : AppCompatActivity() {
         coverUrl = cover
 
         // 1) 歌词与已知封面秒上屏
-        displayView.setCoverUrl(cover)
-        
-        displayView.setLyrics(lines)
+        if (::previewLyricsContainer.isInitialized) {
+            previewLyricsContainer.setCoverUrl(cover)
+            previewLyricsContainer.setLyrics(lines)
+        } else {
+            displayView.setCoverUrl(cover)
+            displayView.setLyrics(lines)
+        }
         
         
 
@@ -1568,7 +1602,11 @@ class LyricsSettingsActivity : AppCompatActivity() {
                     if (!fetchedCover.isNullOrEmpty() && lastTrackTitle == trackTitle && lastTrackArtist == trackArtist) {
                         withContext(Dispatchers.Main) {
                             coverUrl = fetchedCover
-                            displayView.setCoverUrl(fetchedCover)
+                            if (::previewLyricsContainer.isInitialized) {
+                                previewLyricsContainer.setCoverUrl(fetchedCover)
+                            } else {
+                                displayView.setCoverUrl(fetchedCover)
+                            }
                             
                         }
                     }
@@ -1647,8 +1685,13 @@ class LyricsSettingsActivity : AppCompatActivity() {
             displayView.infoFontScale = currentInfoFontScale
 
             // 6. 小欧避让
-            displayView.xiaoOuAvoidanceEnabled = currentXiaoOuAvoidanceEnabled
-            aspectPreviewFrame?.setXiaoOuIndicatorVisible(currentXiaoOuAvoidanceEnabled)
+            if (::previewLyricsContainer.isInitialized) {
+                previewLyricsContainer.showAvatarIndicator = true
+                previewLyricsContainer.xiaoOuAvoidanceEnabled = currentXiaoOuAvoidanceEnabled
+                displayView = previewLyricsContainer.getSkin() ?: displayView
+            } else {
+                displayView.xiaoOuAvoidanceEnabled = currentXiaoOuAvoidanceEnabled
+            }
 
             // 7. 歌词时间偏移
             displayView.lyricsOffsetMs = PrefsManager.lyricsOffsetMs
@@ -1684,13 +1727,15 @@ class LyricsSettingsActivity : AppCompatActivity() {
             // 彻底销毁旧皮肤的动画与资源，防内存/CPU 泄露
             try { (displayView as? LyricsSkin)?.onDestroy() } catch (_: Exception) {}
 
-            // 替换皮肤
-            val frame = aspectPreviewFrame ?: return
-            val newSkin = SkinFactory.create(newType, com.carlyrics.util.DensityNormalization.getNormalizedContext(this))
-            displayView = newSkin
-            displayView.xiaoOuAvoidanceEnabled = currentXiaoOuAvoidanceEnabled
-            frame.setSkinView(newSkin as View)
-            frame.setXiaoOuIndicatorVisible(currentXiaoOuAvoidanceEnabled)
+            // 替换皮肤 (所见即所得，与悬浮窗容器 100% 同构)
+            if (::previewLyricsContainer.isInitialized) {
+                previewLyricsContainer.reloadSkin(newType, force = true)
+                displayView = previewLyricsContainer.getSkin()!!
+            } else {
+                val newSkin = SkinFactory.create(newType, com.carlyrics.util.DensityNormalization.getNormalizedContext(this))
+                displayView = newSkin
+                displayView.xiaoOuAvoidanceEnabled = currentXiaoOuAvoidanceEnabled
+            }
             updatePreviewBounds()
 
             // 恢复状态并强行同步 UI 控件与面板参数
@@ -1723,8 +1768,9 @@ class LyricsSettingsActivity : AppCompatActivity() {
     }
 
     fun updatePreviewBounds() {
-        val (w, h) = calculateTargetOverlayBounds()
-        aspectPreviewFrame?.updateTargetResolution(w, h)
+        if (::previewLyricsContainer.isInitialized) {
+            previewLyricsContainer.requestLayout()
+        }
     }
 
     private fun calculateTargetOverlayBounds(): Pair<Int, Int> {
@@ -2330,6 +2376,10 @@ class LyricsSettingsActivity : AppCompatActivity() {
         buildUI()
         isUIInitializing = false
         displayView.lyricsOffsetMs = PrefsManager.lyricsOffsetMs
+
+        // 关键：重建 UI 后必须重新同步所有皮肤排版参数并刷新 Demo 播放动画，做到 100% 所见即所得！
+        syncSkinUIParams()
+        bindDemoDataToPreview()
 
         syncSettingsToService()
     }

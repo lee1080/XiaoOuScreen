@@ -44,6 +44,7 @@ object PresetManager {
           "cover_api_url": "",
           "api_key": "",
           "cache_max_size_mb": 10,
+          "xiaoou_avoidance_enabled": true,
           "display_area_top": 0,
           "display_area_left": 0,
           "display_area_right": 1920,
@@ -74,6 +75,7 @@ object PresetManager {
           "cover_api_url": "",
           "api_key": "",
           "cache_max_size_mb": 10,
+          "xiaoou_avoidance_enabled": true,
           "display_area_top": 0,
           "display_area_left": 131,
           "display_area_right": 1792,
@@ -170,6 +172,7 @@ object PresetManager {
             put("cover_api_url", PrefsManager.getCoverApiUrl())
             put("api_key", PrefsManager.getApiKey())
             put("cache_max_size_mb", PrefsManager.getCacheMaxSizeMb())
+            put("xiaoou_avoidance_enabled", PrefsManager.isXiaoOuAvoidanceEnabled())
             put("preferred_lyrics_source", PrefsManager.getPreferredLyricsSource())
             put("display_area_top", PrefsManager.getDisplayAreaTop())
             put("display_area_left", PrefsManager.getDisplayAreaLeft())
@@ -285,6 +288,9 @@ object PresetManager {
                 LyricsApiManager.API_KEY = k
             }
             if (settings.has("cache_max_size_mb")) PrefsManager.setCacheMaxSizeMb(settings.optInt("cache_max_size_mb", 10))
+            if (settings.has("xiaoou_avoidance_enabled")) {
+                PrefsManager.setXiaoOuAvoidanceEnabled(settings.optBoolean("xiaoou_avoidance_enabled", true))
+            }
             if (settings.has("preferred_lyrics_source")) {
                 PrefsManager.setPreferredLyricsSource(settings.optString("preferred_lyrics_source", "auto"))
             }

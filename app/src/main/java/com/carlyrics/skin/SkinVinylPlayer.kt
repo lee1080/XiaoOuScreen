@@ -264,8 +264,10 @@ class SkinVinylPlayer(context: Context) : LyricsSkin(context) {
         root.addView(leftPanel, LinearLayout.LayoutParams(leftW, LinearLayout.LayoutParams.MATCH_PARENT))
 
         // 分隔线
-        root.addView(sepLine, LinearLayout.LayoutParams(dp(2), LinearLayout.LayoutParams.MATCH_PARENT))
-        sepLine.translationX = 25f
+        root.addView(sepLine, LinearLayout.LayoutParams(dp(2), LinearLayout.LayoutParams.MATCH_PARENT).apply {
+            leftMargin = dp(16)
+            rightMargin = dp(16)
+        })
 
         // 歌词区
         val lyricsFrame = FrameLayout(context).apply {
@@ -290,7 +292,6 @@ class SkinVinylPlayer(context: Context) : LyricsSkin(context) {
             FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
         ))
         root.addView(lyricsArea, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f))
-        lyricsArea.translationX = 25f
 
         addView(root, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
         applyXiaoOuAvoidance(xiaoOuAvoidanceEnabled)
@@ -462,7 +463,7 @@ class SkinVinylPlayer(context: Context) : LyricsSkin(context) {
     }
 
     override fun onScaleChanged(scale: Float) {
-        val vinylSz = dp((baseVinylSizeDp * scale).toInt())
+        val vinylSz = dp((baseVinylSizeDp * scale).toInt()).coerceAtMost(360)
         (vinylDisc.layoutParams as FrameLayout.LayoutParams).apply {
             width = vinylSz
             height = vinylSz

@@ -30,13 +30,21 @@
         android:layout_gravity="center"
         android:visibility="gone" />
 
-    <!-- 页面 4 (优先级 1 - 最高优先级)：1920×384 纯原生 3D 正方体档位翻转视图 (初始隐藏，切档时浮现执行翻转) -->
+    <!-- 页面 4 (优先级 1)：1920×384 纯原生 3D 正方体档位翻转视图 (初始隐藏，切档时浮现执行翻转) -->
     <com.car.xiaoouscreen.ui.GearCubeFlipView
         android:id="@+id/gearCubeView"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:layout_gravity="center"
         android:visibility="gone" />
+
+    <!-- 页面 5 (绝对置顶最高优先级)：左下角常驻微型档位指示器 (液态玻璃 HUD) -->
+    <com.car.xiaoouscreen.ui.CarBottomLeftGearHudView
+        android:id="@+id/bottomLeftGearHudView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_gravity="center"
+        android:visibility="visible" />
 
     <!-- 自动消失的退出关闭按钮 -->
     <FrameLayout

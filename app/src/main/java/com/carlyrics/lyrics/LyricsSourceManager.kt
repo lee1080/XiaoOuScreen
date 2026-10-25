@@ -224,6 +224,33 @@ object LyricsSourceManager {
     }
 
     /**
+     * 对歌词源 ID 进行强制安全清洗，杜绝 ../ 等路径穿越字符
+     */
+    fun sanitizeSourceId(rawId: String): String {
+        val cleaned = rawId.replace(Regex("[^a-zA-Z0-9_-]"), "_").trim('_')
+        return if (cleaned.isBlank()) "source_${System.currentTimeMillis()}" else cleaned
+    }
+
+    /**
+     * 获取安全的歌词源目标文件，并强制验证规范化路径位于 sourcesDir 内部
+     */
+    private fun getSafeSourceFile(id: String): File? {
+        val safeId = sanitizeSourceId(id)
+        val file = File(sourcesDir, "$safeId.js")
+        return try {
+            if (file.canonicalPath.startsWith(sourcesDir.canonicalPath + File.separator)) {
+                file
+            } else {
+                AppLogger.e(TAG, "检测到路径穿越尝试，已拦截: id=$id")
+                null
+            }
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "解析安全路径异常: ${e.message}")
+            null
+        }
+    }
+
+    /**
      * 保存或更新单个源
      */
     fun saveSource(source: LyricsSource): Boolean {
@@ -232,9 +259,10 @@ object LyricsSourceManager {
                 if (!sourcesDir.exists()) {
                     sourcesDir.mkdirs()
                 }
-                val file = File(sourcesDir, "${source.id}.js")
+                val safeId = sanitizeSourceId(source.id)
+                val file = getSafeSourceFile(safeId) ?: return false
                 file.writeText(source.script)
-                prefs.edit().putBoolean(KEY_ENABLED_PREFIX + source.id, source.isEnabled).apply()
+                prefs.edit().putBoolean(KEY_ENABLED_PREFIX + safeId, source.isEnabled).apply()
                 reloadSources()
                 true
             } catch (e: Exception) {
@@ -249,8 +277,9 @@ object LyricsSourceManager {
      */
     fun toggleSource(id: String, enabled: Boolean) {
         synchronized(lock) {
-            prefs.edit().putBoolean(KEY_ENABLED_PREFIX + id, enabled).apply()
-            cachedSources.find { it.id == id }?.isEnabled = enabled
+            val safeId = sanitizeSourceId(id)
+            prefs.edit().putBoolean(KEY_ENABLED_PREFIX + safeId, enabled).apply()
+            cachedSources.find { it.id == safeId || it.id == id }?.isEnabled = enabled
         }
     }
 
@@ -259,9 +288,10 @@ object LyricsSourceManager {
      */
     fun deleteSource(id: String): Boolean {
         synchronized(lock) {
-            val file = File(sourcesDir, "$id.js")
+            val safeId = sanitizeSourceId(id)
+            val file = getSafeSourceFile(safeId) ?: return false
             val deleted = file.delete()
-            prefs.edit().remove(KEY_ENABLED_PREFIX + id).apply()
+            prefs.edit().remove(KEY_ENABLED_PREFIX + safeId).apply()
             reloadSources()
             return deleted
         }

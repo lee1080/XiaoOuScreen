@@ -34,6 +34,10 @@ abstract class LyricsSkin(context: Context) : FrameLayout(context) {
 
         // 小欧3D形象在小欧屏右侧占用的物理避让宽度 (原 600px，边界往右扩展 100px 后为 500px，歌词视口拓展至 X: 1420)
         const val XIAOOU_AVATAR_WIDTH_PX = 500
+
+        // 左右两侧 130px 物理安全暗角避让边界 (小欧屏硬件物理不可见区域)
+        const val SAFE_MARGIN_PX = 130f
+        const val SAFE_RIGHT_START_PX = 1790f // 1920 - 130
     }
 
     // ==================== 可调参数 ====================
@@ -110,17 +114,24 @@ abstract class LyricsSkin(context: Context) : FrameLayout(context) {
     /**
      * 计算并获取当前歌词区域的高精度净视口宽度 (px)
      * - 左面板宽度完全由 splitRatio 决定: totalW * splitRatio，开关避让绝对固定不变！
-     * - 当开启小欧避让 (xiaoOuAvoidanceEnabled) 时：歌词区右边界扣减 500px 形象避让区
-     * - 当未开启避让时：歌词区右边界延展至屏幕最右端
+     * - 左侧安全物理暗角固定预留 130px (SAFE_MARGIN_PX)
+     * - 当开启小欧避让 (xiaoOuAvoidanceEnabled) 时：右边界预留 500px 形象避让区 (视口截断至 X=1420)
+     * - 当未开启避让时：右边界预留 130px 物理安全暗角 (视口延展至最右安全边界 X=1790)
      */
     open fun getAccurateLyricsViewportWidth(): Float {
         val totalW = if (width > 0) width.toFloat() else 1920f
-        val leftW = totalW * splitRatio.coerceIn(MIN_SPLIT_RATIO, MAX_SPLIT_RATIO)
-        val avatarW = if (xiaoOuAvoidanceEnabled) {
-            val aW = if (totalW < 1000f) totalW * (XIAOOU_AVATAR_WIDTH_PX.toFloat() / 1920f) else XIAOOU_AVATAR_WIDTH_PX.toFloat()
-            aW
-        } else 0f
-        val areaW = totalW - leftW - avatarW
+        val isScaleDownPreview = totalW < 1000f
+        val scaleRatio = if (isScaleDownPreview) totalW / 1920f else 1.0f
+
+        val safeLeft = SAFE_MARGIN_PX * scaleRatio
+        val safeRight = if (xiaoOuAvoidanceEnabled) {
+            XIAOOU_AVATAR_WIDTH_PX * scaleRatio
+        } else {
+            SAFE_MARGIN_PX * scaleRatio
+        }
+        val sp = splitRatio.coerceIn(MIN_SPLIT_RATIO, MAX_SPLIT_RATIO)
+        val leftW = totalW * sp
+        val areaW = totalW - safeLeft - safeRight - leftW
         return areaW.coerceAtLeast(100f)
     }
 
@@ -163,27 +174,50 @@ abstract class LyricsSkin(context: Context) : FrameLayout(context) {
 
     /**
      * 更新左右面板的排版与几何尺寸：
-     * 1. contentRowLayout 自身永远占满 100% 物理宽度 (rightMargin 恒为 0)
+     * 1. contentRowLayout 自身设置安全物理边距：
+     *    - 左侧预留 130px 物理安全暗角避让 (safeLeftPx)
+     *    - 右侧预留 130px 物理安全暗角避让 (全屏) 或 500px 形象避让 (避让小欧) (safeRightPx)
      * 2. 左面板 (封面+歌名+歌手) 采用绝对定宽 (width = totalW * splitRatio, weight = 0f)，
      *    无论开启还是关闭小欧形象避让，绝对不发生任何位移或缩放！固定歌名和歌词模块位置！
-     * 3. 歌词区填满剩余空间 (width = 0, weight = 1f)，由自身的 rightMargin 承担小欧 3D 形象避让。
-     *    开启避让时右边距为 500px (视口截断至 X=1420)，关闭时为 0px (视口延展至全屏 X=1920)。
+     * 3. 歌词区填满 ContentRow 剩余空间 (width = 0, weight = 1f)，由 ContentRow 自身的外边距承担避让。
+     *    开启避让时视口截断至 X=1420，关闭时视口延展至小欧屏最右安全边界 X=1790。
      */
     open fun updatePanelLayouts() {
         val row = getContentRow()
         val left = getLeftPanel()
         val lyrics = getLyricsArea()
 
-        // 1. 确保 ContentRow 自身永远无外边距
+        val totalW = if (width > 0) width else 1920
+        val isScaleDownPreview = totalW < 1000
+        val scaleRatio = if (isScaleDownPreview) totalW.toFloat() / 1920f else 1.0f
+
+        val safeLeftPx = (SAFE_MARGIN_PX * scaleRatio).toInt()
+        val safeRightPx = if (xiaoOuAvoidanceEnabled) {
+            (XIAOOU_AVATAR_WIDTH_PX * scaleRatio).toInt()
+        } else {
+            (SAFE_MARGIN_PX * scaleRatio).toInt()
+        }
+
+        // 1. 设置 ContentRow 整体的安全物理外边距
         if (row != null) {
             val rowLp = row.layoutParams as? MarginLayoutParams
-            if (rowLp != null && rowLp.rightMargin != 0) {
-                rowLp.rightMargin = 0
-                row.layoutParams = rowLp
+            if (rowLp != null) {
+                var changed = false
+                if (rowLp.leftMargin != safeLeftPx) {
+                    rowLp.leftMargin = safeLeftPx
+                    changed = true
+                }
+                if (rowLp.rightMargin != safeRightPx) {
+                    rowLp.rightMargin = safeRightPx
+                    changed = true
+                }
+                if (changed) {
+                    row.layoutParams = rowLp
+                    row.requestLayout()
+                }
             }
         }
 
-        val totalW = if (width > 0) width else 1920
         val sp = splitRatio.coerceIn(MIN_SPLIT_RATIO, MAX_SPLIT_RATIO)
         val leftW = (totalW * sp).toInt()
 
@@ -207,13 +241,10 @@ abstract class LyricsSkin(context: Context) : FrameLayout(context) {
             }
         }
 
-        // 3. 歌词区填满剩余空间并由 rightMargin 避让
+        // 3. 歌词区填满 ContentRow 剩余空间 (ContentRow 自身的 rightMargin 已经承担了避让)
         if (lyrics != null) {
             val lyricsLp = lyrics.layoutParams as? LinearLayout.LayoutParams
             if (lyricsLp != null) {
-                val targetMargin = if (xiaoOuAvoidanceEnabled) {
-                    if (totalW < 1000) (totalW * (XIAOOU_AVATAR_WIDTH_PX.toFloat() / 1920f)).toInt() else XIAOOU_AVATAR_WIDTH_PX
-                } else 0
                 var changed = false
                 if (lyricsLp.width != 0) {
                     lyricsLp.width = 0
@@ -223,8 +254,8 @@ abstract class LyricsSkin(context: Context) : FrameLayout(context) {
                     lyricsLp.weight = 1f
                     changed = true
                 }
-                if (lyricsLp.rightMargin != targetMargin) {
-                    lyricsLp.rightMargin = targetMargin
+                if (lyricsLp.rightMargin != 0) {
+                    lyricsLp.rightMargin = 0
                     changed = true
                 }
                 if (changed) {

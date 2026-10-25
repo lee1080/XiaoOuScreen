@@ -24,9 +24,11 @@ import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
 import com.car.xiaoouscreen.R
 import com.car.xiaoouscreen.domain.WeatherSceneConfig
+import com.car.xiaoouscreen.car.CarCallManager
 import com.car.xiaoouscreen.ui.CarWeatherCanvasView
 import com.car.xiaoouscreen.ui.DriveModeWipeView
 import com.car.xiaoouscreen.ui.GearCubeFlipView
+import com.car.xiaoouscreen.ui.CarBottomLeftGearHudView
 import com.carlyrics.display.LyricsNormalizedContainerView
 import com.carlyrics.model.LyricLine
 import com.carlyrics.skin.SkinType
@@ -61,6 +63,7 @@ class WeatherOverlayWindow(
     private var lyricsContainerView: LyricsNormalizedContainerView? = null
     private var gearCubeView: GearCubeFlipView? = null
     private var driveModeView: DriveModeWipeView? = null
+    private var bottomLeftGearHudView: CarBottomLeftGearHudView? = null
 
     // 画面层级优先级管理与双向覆盖挂起控制器：
     // 1. 当触发档位动画后接着触发模式动画：模式动画覆盖档位页面，模式动画完毕后直接展示档位页面，2秒后档位页面退出动画回到主页面。
@@ -77,6 +80,8 @@ class WeatherOverlayWindow(
         } else if (currentPage == ActivePage.LYRICS) {
             lyricsContainerView?.resume()
         }
+        // 保证左下角 HUD 始终处于绝对置顶最前沿
+        bottomLeftGearHudView?.bringToFront()
     }
 
     private var currentPage: ActivePage = ActivePage.WEATHER
@@ -89,6 +94,8 @@ class WeatherOverlayWindow(
     private var pendingCanvasLyricLines: List<LyricLine>? = null
     private var pendingCanvasLyricsActive: Boolean? = null
     private var pendingCanvasAvoidance: Boolean? = null
+    private var pendingCallInfo: CarCallManager.CallInfo? = null
+    private var wasInLyricsBeforeCall: Boolean = false
 
     private val autoHideHandler = Handler(Looper.getMainLooper())
     private val hideCloseRunnable = Runnable {
@@ -196,8 +203,10 @@ class WeatherOverlayWindow(
             lyricsContainerView = pres.lyricsView
             gearCubeView = pres.gearView
             driveModeView = pres.driveModeView
+            bottomLeftGearHudView = pres.bottomLeftGearHudView
             closeButtonContainer = pres.closeContainer
             setupNativeAnimationViews()
+            setupBottomLeftGearHudView()
             resetCloseButtonTimer()
 
             weatherCanvasView?.visibility = View.VISIBLE
@@ -208,8 +217,13 @@ class WeatherOverlayWindow(
             pendingSceneConfig?.let { weatherCanvasView?.updateScene(it) }
             pendingCanvasLyricLines?.let { weatherCanvasView?.setLyrics(it) }
             pendingCanvasLyricsActive?.let { weatherCanvasView?.setLyricsActive(it, smooth = false) }
-            val shouldAvoid = (mode == Mode.FITNESS) && com.carlyrics.util.PrefsManager.isXiaoOuAvoidanceEnabled()
+            val shouldAvoid = (mode == Mode.FITNESS)
+            lyricsContainerView?.alpha = 0f
+            lyricsContainerView?.visibility = View.GONE
+            lyricsContainerView?.pause()
+            lyricsContainerView?.xiaoOuAvoidanceEnabled = shouldAvoid
             weatherCanvasView?.setXiaoOuAvoidance(shouldAvoid)
+            weatherCanvasView?.setLiquidGlassEnabled(com.carlyrics.util.PrefsManager.isLiquidGlassClockEnabled(), smooth = false)
             Log.i(TAG, "Presentation.show 成功 (2037) targetDisplay=${targetDisplay.displayId}")
             true
         } catch (t: Throwable) {
@@ -226,12 +240,14 @@ class WeatherOverlayWindow(
         lyricsContainerView = view.findViewById(R.id.lyricsContainerView)
         gearCubeView = view.findViewById(R.id.gearCubeView)
         driveModeView = view.findViewById(R.id.driveModeView)
+        bottomLeftGearHudView = view.findViewById(R.id.bottomLeftGearHudView)
         closeButtonContainer = view.findViewById(R.id.closeButtonContainer)
         view.findViewById<View>(R.id.tvCloseButton).setOnClickListener {
             onCloseListener?.invoke()
         }
 
         setupNativeAnimationViews()
+        setupBottomLeftGearHudView()
 
         weatherCanvasView?.alpha = 1f
         weatherCanvasView?.visibility = View.VISIBLE
@@ -240,12 +256,14 @@ class WeatherOverlayWindow(
         lyricsContainerView?.alpha = 0f
         lyricsContainerView?.visibility = View.GONE
         lyricsContainerView?.pause()
-        val shouldAvoid = (mode == Mode.FITNESS) && com.carlyrics.util.PrefsManager.isXiaoOuAvoidanceEnabled()
+        val shouldAvoid = (mode == Mode.FITNESS)
         lyricsContainerView?.xiaoOuAvoidanceEnabled = shouldAvoid
         weatherCanvasView?.setXiaoOuAvoidance(shouldAvoid)
+        weatherCanvasView?.setLiquidGlassEnabled(com.carlyrics.util.PrefsManager.isLiquidGlassClockEnabled(), smooth = false)
 
         pendingCanvasLyricLines?.let { weatherCanvasView?.setLyrics(it) }
         pendingCanvasLyricsActive?.let { weatherCanvasView?.setLyricsActive(it, smooth = false) }
+        pendingCallInfo?.let { weatherCanvasView?.setCallInfo(it) }
     }
 
     private fun setupNativeAnimationViews() {
@@ -269,6 +287,35 @@ class WeatherOverlayWindow(
         }
     }
 
+    private fun setupBottomLeftGearHudView() {
+        val hud = bottomLeftGearHudView ?: return
+        hud.backgroundProvider = { canvas, _ ->
+            weatherCanvasView?.drawWeatherBackgroundOnly(canvas)
+        }
+        hud.weatherLeftProvider = {
+            weatherCanvasView?.weatherHudLeftX ?: com.car.xiaoouscreen.ui.CarBottomLeftGearHudView.DEFAULT_SLOT_LEFT
+        }
+        weatherCanvasView?.onSceneRenderUpdated = {
+            hud.invalidate()
+        }
+        val currentGear = com.car.xiaoouscreen.car.CarGearManager.getInstance(appContext).getCurrentGear()
+        hud.setGear(currentGear, animate = false)
+        hud.setHudEnabled(com.carlyrics.util.PrefsManager.isBottomLeftGearHudEnabled(), animate = false)
+        hud.bringToFront()
+    }
+
+    /**
+     * 动态控制左下角常驻档位 HUD 开关 (置顶微型液态玻璃指示器)
+     */
+    fun setBottomLeftGearHudEnabled(enabled: Boolean) {
+        autoHideHandler.post {
+            bottomLeftGearHudView?.setHudEnabled(enabled, animate = true)
+            if (enabled) {
+                bottomLeftGearHudView?.bringToFront()
+            }
+        }
+    }
+
     /**
      * 触发小欧屏 3D 正方体向上翻转档位动效 (100% 纯原生)
      * - 用户规范：先模式再档位，档位退出后直接显示主界面，绝不复活展示模式
@@ -284,6 +331,9 @@ class WeatherOverlayWindow(
                 }
                 isGearActive = true
                 gearCubeView?.bringToFront()
+                // 左下角 HUD 同步滑移档位并保持置顶
+                bottomLeftGearHudView?.setGear(gear, animate = true)
+                bottomLeftGearHudView?.bringToFront()
 
                 gearV.triggerGearFlip(gear) { canvas ->
                     drawActiveUnderlyingView(canvas)
@@ -489,7 +539,8 @@ class WeatherOverlayWindow(
     }
 
     fun updateLyricsAvoidance(avoid: Boolean) {
-        lyricsContainerView?.xiaoOuAvoidanceEnabled = avoid
+        val effectiveAvoid = (mode == Mode.FITNESS)
+        lyricsContainerView?.xiaoOuAvoidanceEnabled = effectiveAvoid
     }
 
     // ==================== 天气画布五行居中歌词控制 ====================
@@ -513,6 +564,29 @@ class WeatherOverlayWindow(
         weatherCanvasView?.setXiaoOuAvoidance(avoid)
     }
 
+    // ==================== 车载接打电话控制 (方案 A 优先响应) ====================
+
+    fun setCallInfo(callInfo: CarCallManager.CallInfo) {
+        pendingCallInfo = callInfo
+        if (callInfo.isCallActive) {
+            // 通话开始/来电：若当前处于歌词模式，平滑切回天气主界面展示来电
+            if (currentPage == ActivePage.LYRICS) {
+                wasInLyricsBeforeCall = true
+                switchToWeatherPage(smooth = true)
+            }
+        } else if (callInfo.state == CarCallManager.CallState.IDLE) {
+            // 通话挂断结束完全恢复 IDLE：若此前在看歌词且音乐仍在播放，自动切回歌词模式
+            if (wasInLyricsBeforeCall) {
+                val isPlaying = com.carlyrics.CarLyricsApplication.recognitionEngine.currentTrack.value?.isPlaying == true
+                if (isPlaying) {
+                    switchToLyricsPage(smooth = true)
+                }
+                wasInLyricsBeforeCall = false
+            }
+        }
+        weatherCanvasView?.setCallInfo(callInfo)
+    }
+
     // ==================== 天气时钟控制 ====================
 
     fun resetCloseButtonTimer() {
@@ -528,6 +602,10 @@ class WeatherOverlayWindow(
 
     fun triggerInstantLightning() {
         weatherCanvasView?.triggerInstantLightning()
+    }
+
+    fun setLiquidGlassEnabled(enabled: Boolean) {
+        weatherCanvasView?.setLiquidGlassEnabled(enabled)
     }
 
     fun dismiss() {
@@ -569,6 +647,7 @@ class WeatherOverlayWindow(
         val lyricsView: LyricsNormalizedContainerView
         val gearView: GearCubeFlipView
         val driveModeView: DriveModeWipeView
+        val bottomLeftGearHudView: CarBottomLeftGearHudView
         val closeContainer: View
         private var onTouchCallback: (() -> Unit)? = null
         private var onCloseCallback: (() -> Unit)? = null
@@ -591,6 +670,7 @@ class WeatherOverlayWindow(
             lyricsView = contentView.findViewById(R.id.lyricsContainerView)
             gearView = contentView.findViewById(R.id.gearCubeView)
             driveModeView = contentView.findViewById(R.id.driveModeView)
+            bottomLeftGearHudView = contentView.findViewById(R.id.bottomLeftGearHudView)
             closeContainer = contentView.findViewById(R.id.closeButtonContainer)
             contentView.findViewById<View>(R.id.tvCloseButton).setOnClickListener {
                 onCloseCallback?.invoke()

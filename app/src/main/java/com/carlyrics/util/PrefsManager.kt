@@ -36,6 +36,8 @@ object PrefsManager {
     private const val KEY_PREFERRED_LYRICS_SOURCE = "preferred_lyrics_source"
     private const val KEY_STANDALONE_LYRICS_ENABLED = "standalone_lyrics_enabled"
     private const val KEY_XIAOOU_AVOIDANCE_ENABLED = "xiaoou_avoidance_enabled"
+    private const val KEY_LIQUID_GLASS_CLOCK_ENABLED = "liquid_glass_clock_enabled"
+    private const val KEY_BOTTOM_LEFT_GEAR_HUD_ENABLED = "bottom_left_gear_hud_enabled"
 
     private var prefs: SharedPreferences? = null
 
@@ -300,5 +302,17 @@ object PrefsManager {
     fun isXiaoOuAvoidanceEnabled(): Boolean = get().getBoolean(KEY_XIAOOU_AVOIDANCE_ENABLED, true)
     fun setXiaoOuAvoidanceEnabled(enabled: Boolean) {
         get().edit().putBoolean(KEY_XIAOOU_AVOIDANCE_ENABLED, enabled).commit()
+    }
+
+    // ----- 中央大时间液态玻璃质感总开关 (28px模糊/170%饱和度/10%白底叠层/1px边缘厚度与折射) -----
+    fun isLiquidGlassClockEnabled(): Boolean = get().getBoolean(KEY_LIQUID_GLASS_CLOCK_ENABLED, false)
+    fun setLiquidGlassClockEnabled(enabled: Boolean) {
+        get().edit().putBoolean(KEY_LIQUID_GLASS_CLOCK_ENABLED, enabled).commit()
+    }
+
+    // ----- 左下角常驻档位液态玻璃 HUD 开关 (置顶显示 R·N·D·P 独立微型玻璃指示器，默认开启) -----
+    fun isBottomLeftGearHudEnabled(): Boolean = get().getBoolean(KEY_BOTTOM_LEFT_GEAR_HUD_ENABLED, true)
+    fun setBottomLeftGearHudEnabled(enabled: Boolean) {
+        get().edit().putBoolean(KEY_BOTTOM_LEFT_GEAR_HUD_ENABLED, enabled).commit()
     }
 }

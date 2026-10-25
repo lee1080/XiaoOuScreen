@@ -7,12 +7,16 @@ import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.mozilla.javascript.ClassShutter
 import org.mozilla.javascript.Context
+import org.mozilla.javascript.ContextFactory
 import org.mozilla.javascript.Function
 import org.mozilla.javascript.NativeObject
+import org.mozilla.javascript.Script
 import org.mozilla.javascript.ScriptableObject
 import java.security.MessageDigest
 import java.util.Base64
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 /**
@@ -183,33 +187,74 @@ object LyricsSourceRunner {
         }
     }
 
+    // 预编译脚本缓存 (基于脚本内容 MD5，避免高频调用时重复 AST 词法语法解析)
+    private val compiledScriptCache = ConcurrentHashMap<String, Script>()
+
     /**
-     * 底层 Rhino 沙箱执行调度
+     * Rhino 安全沙箱 ContextFactory：
+     * 1. 禁用所有未经白名单许可的原生 Java 类访问，杜绝 RCE、提权与反射逃逸
+     * 2. 注入指令计数器观察，单次执行超 150,000 条指令时自动熔断，防死循环冻结车机
+     */
+    private class SandboxContextFactory : ContextFactory() {
+        override fun makeContext(): Context {
+            val cx = super.makeContext()
+            cx.optimizationLevel = -1
+            cx.languageVersion = Context.VERSION_ES6
+            cx.setGenerateObserverCount(true)
+            cx.instructionObserverThreshold = 150_000
+
+            // 严格白名单控制暴露给 JS 的 Java 类
+            cx.setClassShutter(object : ClassShutter {
+                override fun visibleToScripts(fullClassName: String): Boolean {
+                    return fullClassName.startsWith("com.carlyrics.lyrics.LyricsSourceRunner") ||
+                           fullClassName.startsWith("java.lang.String") ||
+                           fullClassName.startsWith("java.lang.Number") ||
+                           fullClassName.startsWith("java.lang.Boolean") ||
+                           fullClassName.startsWith("java.lang.Double") ||
+                           fullClassName.startsWith("java.lang.Integer") ||
+                           fullClassName.startsWith("java.lang.Long") ||
+                           fullClassName.startsWith("java.lang.Float") ||
+                           fullClassName.startsWith("java.util.Map") ||
+                           fullClassName.startsWith("java.util.List")
+                }
+            })
+            return cx
+        }
+
+        override fun observeInstructionCount(cx: Context?, instructionCount: Int) {
+            throw IllegalStateException("JS 脚本执行超时或陷入死循环，已被沙箱强制熔断 (count=$instructionCount)")
+        }
+    }
+
+    private val sandboxFactory = SandboxContextFactory()
+
+    /**
+     * 底层 Rhino 沙箱执行调度 (严格安全沙箱 + 预编译缓存)
      */
     private fun executeJsMethod(script: String, funcName: String, vararg args: Any?): Any? {
-        val cx = Context.enter()
+        val cx = sandboxFactory.enterContext()
         return try {
-            cx.optimizationLevel = -1 // 解释执行模式，兼容 Android 全平台与 Dalvik/ART
-            cx.languageVersion = Context.VERSION_ES6
+            // 使用安全标准对象 (不暴露 Packages, JavaAdapter, JavaImporter)
+            val scope = cx.initSafeStandardObjects()
 
-            val scope = cx.initStandardObjects()
-
-            // 注入宿主 API
+            // 注入受控宿主 API
             ScriptableObject.putProperty(scope, "__nativeHttp", Context.javaToJS(JsHttp, scope))
             ScriptableObject.putProperty(scope, "__nativeCrypto", Context.javaToJS(JsCrypto, scope))
             ScriptableObject.putProperty(scope, "__nativeConsole", Context.javaToJS(JsConsole, scope))
 
-            // 注入运行环境与垫片
-            cx.evaluateString(scope, RUNNER_POLYFILL, "polyfill.js", 1, null)
-            // 执行源脚本
-            cx.evaluateString(scope, script, "source.js", 1, null)
+            // 预编译缓存：同一脚本只编译一次，极大提升切歌与搜索效率
+            val scriptHash = JsCrypto.md5(script)
+            val compiled = compiledScriptCache.getOrPut(scriptHash) {
+                cx.compileString(RUNNER_POLYFILL + "\n" + script, "source_$scriptHash.js", 1, null)
+            }
+            compiled.exec(cx, scope)
 
             val func = scope.get(funcName, scope) as? Function ?: return null
             val jsArgs = args.map { Context.javaToJS(it, scope) }.toTypedArray()
             val result = func.call(cx, scope, scope, jsArgs)
             Context.jsToJava(result, Any::class.java)
         } catch (e: Exception) {
-            AppLogger.e(TAG, "JS 执行异常 [$funcName]: ${e.message}", e)
+            AppLogger.e(TAG, "JS 沙箱拦截或执行异常 [$funcName]: ${e.message}", e)
             null
         } finally {
             Context.exit()

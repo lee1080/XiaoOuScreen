@@ -1,10 +1,26 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <!-- 允许所有 HTTP (Cleartext) 网络请求，确保能连接本地 IP (如 192.168.x.x)、局域网服务与第三方开源音源 -->
+    <!-- 官方气象 API 强制要求 HTTPS 加密通信，防止密钥与位置泄露 -->
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="true">open-meteo.com</domain>
+        <domain includeSubdomains="true">qweather.com</domain>
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </domain-config>
+
+    <!-- 基础网络配置：仅信任系统 CA，允许局域网音源/自建服务 HTTP 通信 -->
     <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <!-- 仅在 DEBUG 调试模式下允许用户证书抓包，杜绝生产环境中间人解密风险 -->
+    <debug-overrides>
         <trust-anchors>
             <certificates src="system" />
             <certificates src="user" />
         </trust-anchors>
-    </base-config>
+    </debug-overrides>
 </network-security-config>

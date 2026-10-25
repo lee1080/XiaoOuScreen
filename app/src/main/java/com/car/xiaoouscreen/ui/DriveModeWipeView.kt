@@ -171,9 +171,6 @@ class DriveModeWipeView @JvmOverloads constructor(
         )
     )
 
-    // 模式切换排队队列 (FIFO，用于 <600ms 快速连续不同模式切换)
-    private val modeQueue = ArrayDeque<String>()
-
     // 状态机
     var currentState = AnimState.IDLE
         private set
@@ -498,45 +495,41 @@ class DriveModeWipeView @JvmOverloads constructor(
     }
 
     /**
-     * 触发驾驶模式左至右光刃擦除转场 (严格按车载交互优先级与排队机制)：
-     * 1. 相同模式连续触发：若当前模式正在动画或展示中，忽略后续触发；待完全消失回到主页面后再次触发才重新播放。
-     * 2. 不同模式快速连续触发 (<600ms)：入场动画未播完时，追加至 FIFO 队列；当前 600ms 播完立即播放下一模式的 600ms 擦除，仅最后一个模式停留 2s 并退出。
-     * 3. 不同模式在停留或退出阶段触发 (>600ms)：立即取消当前停留/退场，清空队列，从当前模式直接启动新模式的 600ms 擦除入场，驻留 2s 并退出。
+     * 触发驾驶模式左至右光刃擦除转场 (车规级连续切换即刻中断抢占机制)：
+     * 1. 相同模式连续触发：若当前模式正在动画或展示中，刷新停留倒计时。
+     * 2. 连续切换模式：无论当前处于入场、驻留还是退场，收到新模式时 0 延迟即刻中断打断！
+     *    当前模式画面无缝转为底层垫底背景，新模式倾斜光刃立即自左向右擦除展现覆盖；
+     *    仅当用户停止切模式后，最终模式驻留 2.0s 并退场，优雅返回主界面。
      */
     fun triggerDriveModeSwitch(mode: String, snapshotProvider: ((Canvas) -> Unit)? = null) {
         val targetMode = normalizeMode(mode)
         Log.i(TAG, "triggerDriveModeSwitch called: targetMode=$targetMode, currentState=$currentState, currentMode=$currentMode")
         mainHandler.post {
-            // 1. 同一模式连续触发保护：若当前正在展示该模式（入场/驻留/退场），直接忽略
+            // 1. 同一模式连续触发保护：若当前正在展示该模式（入场/驻留），重置驻留计时器并返回
             if (currentState != AnimState.IDLE && currentMode == targetMode) {
-                Log.i(TAG, "忽略相同模式重复触发: $targetMode (当前状态: $currentState)")
-                return@post
-            }
-
-            // 2. 在 600ms 入场动画期间（WIPING_IN）收到不同模式：加入 FIFO 排队队列
-            if (currentState == AnimState.WIPING_IN) {
-                if (targetMode != currentMode && modeQueue.lastOrNull() != targetMode) {
-                    modeQueue.addLast(targetMode)
-                    Log.i(TAG, "模式入场中追加排队: $targetMode, 当前队列: $modeQueue")
+                Log.i(TAG, "相同模式重复触发，刷新驻留计时器: $targetMode (当前状态: $currentState)")
+                if (currentState == AnimState.DWELLING) {
+                    resetDwellTimer()
                 }
                 return@post
             }
- 
-            // 3. 在驻留（DWELLING）或退场（WIPING_OUT）期间（间隔>600ms）收到不同模式：
-            // 取消当前驻留倒计时/退场动画，清空排队，立即从当前模式直接启动新模式的 600ms 擦除入场
-            if (currentState == AnimState.DWELLING || currentState == AnimState.WIPING_OUT) {
+
+            // 2. 连续切换不同模式：若当前模式正在入场(WIPING_IN)、驻留(DWELLING)或退场(WIPING_OUT)
+            // 立即中断前序动画，前序模式作为底层垫底背景，新模式即刻从屏幕左侧向右擦除展现！
+            if (currentState != AnimState.IDLE) {
+                Log.i(TAG, "⚡ 连续切模式即刻中断抢占: $currentMode -> $targetMode")
                 cancelAllAnimators()
-                modeQueue.clear()
-                isSwitchingBetweenModes = true
                 previousMode = currentMode
+                isSwitchingBetweenModes = true
                 currentMode = targetMode
+                visibility = VISIBLE
+                alpha = 1f
                 startWipeIn()
                 return@post
             }
 
-            // 4. 从 IDLE 常态全新启动：
+            // 3. 从 IDLE 常态全新启动：
             cancelAllAnimators()
-            modeQueue.clear()
             isSwitchingBetweenModes = false
             previousMode = null
             currentMode = targetMode
@@ -565,11 +558,12 @@ class DriveModeWipeView @JvmOverloads constructor(
     fun dismiss() {
         mainHandler.post {
             cancelAllAnimators()
-            modeQueue.clear()
             currentState = AnimState.IDLE
             wipeProgress = 0f
             dwellProgress = 0f
             isDwellPaused = false
+            isSwitchingBetweenModes = false
+            previousMode = null
             visibility = GONE
             Log.i(TAG, "驾驶模式已被打断并彻底终结 (dismiss)")
         }
@@ -608,7 +602,6 @@ class DriveModeWipeView @JvmOverloads constructor(
         val targetMode = normalizeMode(mode)
         mainHandler.post {
             cancelAllAnimators()
-            modeQueue.clear()
             currentMode = targetMode
             previousMode = null
             isSwitchingBetweenModes = false
@@ -638,11 +631,15 @@ class DriveModeWipeView @JvmOverloads constructor(
     private var logFrameCounter = 0
 
     private fun startWipeIn() {
-        Log.i(TAG, "startWipeIn: mode=$currentMode, duration=$DURATION_WIPE_IN_MS ms")
+        Log.i(TAG, "startWipeIn: mode=$currentMode, duration=$DURATION_WIPE_IN_MS ms, switching=$isSwitchingBetweenModes")
         currentState = AnimState.WIPING_IN
         wipeProgress = 0f
+        visibility = VISIBLE
+        alpha = 1f
         onWipeStartedListener?.invoke()
 
+        wipeInAnimator?.removeAllListeners()
+        wipeInAnimator?.cancel()
         wipeInAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = DURATION_WIPE_IN_MS
             interpolator = wipeInterpolator
@@ -656,19 +653,7 @@ class DriveModeWipeView @JvmOverloads constructor(
                     Log.i(TAG, "startWipeIn ended for mode=$currentMode")
                     isSwitchingBetweenModes = false
                     previousMode = null
-
-                    // 检查排队队列中是否有不同模式
-                    if (modeQueue.isNotEmpty()) {
-                        val nextMode = modeQueue.removeFirst()
-                        Log.i(TAG, "从排队队列取出下一个模式: $nextMode 紧接着播放 600ms 入场")
-                        isSwitchingBetweenModes = true
-                        previousMode = currentMode
-                        currentMode = nextMode
-                        startWipeIn()
-                    } else {
-                        // 队列清空，进入当前模式的 2.0s 停留展示
-                        startDwell(DURATION_DWELL_MS)
-                    }
+                    startDwell(DURATION_DWELL_MS)
                 }
             })
             start()
@@ -706,7 +691,9 @@ class DriveModeWipeView @JvmOverloads constructor(
     }
 
     private fun resetDwellTimer() {
+        dwellAnimator?.removeAllListeners()
         dwellAnimator?.cancel()
+        dwellAnimator = null
         startDwell(DURATION_DWELL_MS)
     }
 
@@ -724,6 +711,8 @@ class DriveModeWipeView @JvmOverloads constructor(
             }
         }
 
+        wipeOutAnimator?.removeAllListeners()
+        wipeOutAnimator?.cancel()
         wipeOutAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = DURATION_WIPE_OUT_MS
             interpolator = wipeInterpolator
@@ -733,6 +722,7 @@ class DriveModeWipeView @JvmOverloads constructor(
             }
             addListener(object : AnimatorListenerAdapter() {
                 override fun onAnimationEnd(animation: Animator) {
+                    if (currentState != AnimState.WIPING_OUT) return
                     Log.i(TAG, "startWipeOut ended -> IDLE")
                     currentState = AnimState.IDLE
                     wipeProgress = 0f
@@ -745,9 +735,17 @@ class DriveModeWipeView @JvmOverloads constructor(
     }
 
     private fun cancelAllAnimators() {
+        wipeInAnimator?.removeAllListeners()
         wipeInAnimator?.cancel()
+        wipeInAnimator = null
+
+        dwellAnimator?.removeAllListeners()
         dwellAnimator?.cancel()
+        dwellAnimator = null
+
+        wipeOutAnimator?.removeAllListeners()
         wipeOutAnimator?.cancel()
+        wipeOutAnimator = null
     }
 
     override fun onDraw(canvas: Canvas) {

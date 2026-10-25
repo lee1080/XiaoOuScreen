@@ -111,6 +111,231 @@
 
         </LinearLayout>
 
+        <!-- 卡片：中央大时间液态玻璃质感 (Liquid Glass Clock) -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:background="@drawable/bg_close_button"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="💎 中央大时间 · 液态玻璃质感"
+                    android:textColor="#38BDF8"
+                    android:textSize="16sp"
+                    android:textStyle="bold" />
+
+                <androidx.appcompat.widget.SwitchCompat
+                    android:id="@+id/switchLiquidGlassClock"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="开启液态玻璃"
+                    android:textColor="#E2E8F0"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="开启后中央大时间变为液态玻璃效果：加大背景模糊 28px、提高饱和度至 170%、叠一层 10% 白色微光层（rgb 255 255 255 / 10%）、文字边缘厚度浮雕（inet 1px 1px #fff8）与全曲率晶体折射高光边缘。"
+                android:textColor="#94A3B8"
+                android:textSize="12sp" />
+
+            <TextView
+                android:id="@+id/tvLiquidGlassStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:background="#1E293B"
+                android:fontFamily="monospace"
+                android:padding="8dp"
+                android:text="💎 当前时钟质感: 经典拟真荧光 (已关闭)"
+                android:textColor="#CBD5E1"
+                android:textSize="12sp" />
+
+        </LinearLayout>
+
+        <!-- 卡片 0.2：左下角常驻微型档位指示 · 液态玻璃 HUD -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:background="@drawable/bg_close_button"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="🚗 左下角微型档位指示 · 液态玻璃 HUD"
+                    android:textColor="#38BDF8"
+                    android:textSize="16sp"
+                    android:textStyle="bold" />
+
+                <androidx.appcompat.widget.SwitchCompat
+                    android:id="@+id/switchBottomLeftGearHud"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="开启指示器"
+                    android:textColor="#E2E8F0"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="开启后副屏左下角常驻微型 R·N·D·P 液态玻璃档位指示器，置顶最高优先级悬浮（不参与 3D 棱柱翻转和模式光刃动画），随切档平滑滑动，支持 R-红、N-银白、D-绿、P-橙四档色彩映射。"
+                android:textColor="#94A3B8"
+                android:textSize="12sp" />
+
+            <TextView
+                android:id="@+id/tvBottomLeftGearHudStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:background="#1E293B"
+                android:fontFamily="monospace"
+                android:padding="8dp"
+                android:text="🚗 当前状态: 开启 (常驻置顶微型指示)"
+                android:textColor="#CBD5E1"
+                android:textSize="12sp" />
+
+        </LinearLayout>
+
+        <!-- 卡片：和风高精天气服务设置 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:background="@drawable/bg_close_button"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="🌦️ 和风高精气象服务"
+                    android:textColor="#38BDF8"
+                    android:textSize="16sp"
+                    android:textStyle="bold" />
+
+                <androidx.appcompat.widget.SwitchCompat
+                    android:id="@+id/switchEnableQWeather"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="启用"
+                    android:textColor="#E2E8F0"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="以 Open-Meteo 免费全球数值为基底。启用后接入和风实测与 1km 雷达降水。"
+                    android:textColor="#94A3B8"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/tvQWeatherBadge"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:background="#1E293B"
+                    android:paddingStart="8dp"
+                    android:paddingTop="4dp"
+                    android:paddingEnd="8dp"
+                    android:paddingBottom="4dp"
+                    android:text="服务已停用"
+                    android:textColor="#94A3B8"
+                    android:textSize="11sp" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/tvQWeatherDetail"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:background="#0F172A"
+                android:fontFamily="monospace"
+                android:padding="8dp"
+                android:text="Host: 未配置\nKey: 未配置"
+                android:textColor="#CBD5E1"
+                android:textSize="11sp" />
+
+            <!-- 操作按钮行 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnConfigQWeather"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_button"
+                    android:text="⚙️ 配置 Key &amp; Host"
+                    android:textColor="#38BDF8"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/btnTestQWeather"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_marginStart="8dp"
+                    android:layout_weight="0.8"
+                    android:background="@drawable/bg_button"
+                    android:text="🔄 测试连接"
+                    android:textColor="#FFFFFF"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/btnClearQWeather"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_marginStart="8dp"
+                    android:layout_weight="0.7"
+                    android:background="@drawable/bg_button"
+                    android:text="🗑️ 清空"
+                    android:textColor="#EF4444"
+                    android:textSize="13sp" />
+            </LinearLayout>
+        </LinearLayout>
+
         <!-- 卡片 1：小欧屏投屏与多显控制 -->
         <LinearLayout
             android:layout_width="match_parent"
@@ -472,6 +697,149 @@
                     android:background="@drawable/bg_button"
                     android:text="⚡ 模式连续切换测试 (验证左至右擦除与2秒驻留防打断)"
                     android:textColor="#FB923C"
+                    android:textSize="12sp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- 卡片 1.5：车载接打电话与微信通话模拟控制台 (HMI 纯图形透明底 256x256 对齐) -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:background="@drawable/bg_close_button"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="📞 车载接打电话与微信通话模拟 (HMI Call)"
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/tvCurrentCallBadge"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:background="#1E293B"
+                    android:paddingHorizontal="10dp"
+                    android:paddingVertical="4dp"
+                    android:text="当前: 空闲"
+                    android:textColor="#10B981"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="左侧天气区域流畅替换为对应通话图标并配元素动效；支持普通蓝牙电话与微信电话自动绑定。"
+                android:textColor="#94A3B8"
+                android:textSize="12sp" />
+
+            <!-- 通话状态快速切换按钮行 1 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnCallIncoming"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_button"
+                    android:text="📞 普通来电\n(张总)"
+                    android:textColor="#10B981"
+                    android:textStyle="bold"
+                    android:textSize="12sp" />
+
+                <Button
+                    android:id="@+id/btnCallOutgoing"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_marginStart="6dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_button"
+                    android:text="📲 正在呼出\n(李思琪)"
+                    android:textColor="#0EA5E9"
+                    android:textStyle="bold"
+                    android:textSize="12sp" />
+
+                <Button
+                    android:id="@+id/btnCallActive"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_marginStart="6dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_button"
+                    android:text="🟢 通话接通\n(动态秒表)"
+                    android:textColor="#34D399"
+                    android:textStyle="bold"
+                    android:textSize="12sp" />
+
+                <Button
+                    android:id="@+id/btnCallHangup"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_marginStart="6dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_button"
+                    android:text="📴 挂断结束\n(2.5s退场)"
+                    android:textColor="#F43F5E"
+                    android:textStyle="bold"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <!-- 微信电话与重置行 2 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnCallWeChatIncoming"
+                    android:layout_width="0dp"
+                    android:layout_height="42dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_button"
+                    android:text="💬 微信来电邀请 (老婆)"
+                    android:textColor="#07C160"
+                    android:textStyle="bold"
+                    android:textSize="12sp" />
+
+                <Button
+                    android:id="@+id/btnCallWeChatActive"
+                    android:layout_width="0dp"
+                    android:layout_height="42dp"
+                    android:layout_marginStart="6dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_button"
+                    android:text="⏱️ 微信通话中 (声波走时)"
+                    android:textColor="#07C160"
+                    android:textStyle="bold"
+                    android:textSize="12sp" />
+
+                <Button
+                    android:id="@+id/btnCallResetIdle"
+                    android:layout_width="0dp"
+                    android:layout_height="42dp"
+                    android:layout_marginStart="6dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_button"
+                    android:text="🔄 立即恢复天气"
+                    android:textColor="#CBD5E1"
                     android:textSize="12sp" />
             </LinearLayout>
         </LinearLayout>

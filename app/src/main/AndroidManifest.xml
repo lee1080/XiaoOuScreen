@@ -16,6 +16,11 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- 长安欧尚原厂蓝牙电话权限 -->
+    <uses-permission android:name="com.chinatsp.phone.permission" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.READ_CALL_LOG" />
+
     <!-- 长安欧尚 Z6 车机 Automotive 底层信号读取权限 (纯 App 顶层接入) -->
     <uses-permission android:name="android.car.permission.CAR_CABIN" />
     <uses-permission android:name="android.car.permission.CAR_POWERTRAIN" />
@@ -78,6 +83,7 @@
                 <action android:name="com.car.xiaoouscreen.TRIGGER_LIGHTNING" />
                 <action android:name="com.car.xiaoouscreen.SIMULATE_PRESET" />
                 <action android:name="com.car.xiaoouscreen.RESET_LIVE" />
+                <action android:name="com.car.xiaoouscreen.CALL_EVENT" />
             </intent-filter>
         </receiver>
 

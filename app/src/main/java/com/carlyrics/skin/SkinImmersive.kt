@@ -429,7 +429,7 @@ class SkinImmersive(context: Context) : LyricsSkin(context) {
     }
 
     override fun onScaleChanged(scale: Float) {
-        val coverSz = dp((baseCoverSizeDp * scale).toInt())
+        val coverSz = dp((baseCoverSizeDp * scale).toInt()).coerceAtMost(360)
         (coverImage.layoutParams as FrameLayout.LayoutParams).apply { width = coverSz; height = coverSz }
         (coverFrame.layoutParams as LinearLayout.LayoutParams).apply { width = coverSz; height = coverSz }
         (coverFrame.background as? GradientDrawable)?.cornerRadius = dp((baseCoverCornerDp * scale).toInt()).toFloat()

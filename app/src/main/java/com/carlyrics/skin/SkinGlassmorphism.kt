@@ -385,7 +385,7 @@ class SkinGlassmorphism(context: Context) : LyricsSkin(context) {
 
     private fun refreshCoverLayout() {
         val scale = scaleFactor * BASE_DISPLAY_SCALE
-        val coverSz = dp((baseCoverSizeDp * scale).toInt())
+        val coverSz = dp((baseCoverSizeDp * scale).toInt()).coerceAtMost(360)
         (coverImage.layoutParams as? FrameLayout.LayoutParams)?.apply {
             width = coverSz
             height = coverSz

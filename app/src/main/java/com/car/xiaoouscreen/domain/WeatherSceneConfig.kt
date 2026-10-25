@@ -50,6 +50,13 @@ data class WeatherSceneConfig(
     val sunsetUnix: Long = 0L,
     val lastUpdateUnix: Long = System.currentTimeMillis() / 1000L,
 
+    // --- 高精与分钟级降水拓展字段 ---
+    val feelsLikeCelsius: Float = 22.0f,
+    val windDirectionText: String = "微风",
+    val windScaleText: String = "2级",
+    val minuteRainSummary: String? = null,
+    val isMinuteRainActive: Boolean = false,
+
     // --- 动态天空渐变基色 (顶色与底色) ---
     @ColorInt val skyTopColor: Int = Color.parseColor("#0284C7"),
     @ColorInt val skyBottomColor: Int = Color.parseColor("#BAE6FD"),

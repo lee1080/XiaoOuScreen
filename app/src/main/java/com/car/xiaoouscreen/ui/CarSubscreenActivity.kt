@@ -21,6 +21,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.car.xiaoouscreen.R
+import com.car.xiaoouscreen.car.CarCallManager
 import com.car.xiaoouscreen.car.CarGearManager
 import com.car.xiaoouscreen.data.OpenMeteoRepository
 import com.car.xiaoouscreen.domain.Intensity
@@ -34,6 +35,7 @@ import com.carlyrics.display.LyricsNormalizedContainerView
 import com.carlyrics.lyrics.LyricsApiManager
 import com.carlyrics.model.CurrentTrack
 import com.carlyrics.model.LyricLine
+import com.carlyrics.util.PrefsManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -78,6 +80,7 @@ class CarSubscreenActivity : AppCompatActivity(),
     private lateinit var lyricsContainerView: LyricsNormalizedContainerView
     private lateinit var driveModeView: DriveModeWipeView
     private lateinit var gearCubeView: GearCubeFlipView
+    private lateinit var bottomLeftGearHudView: CarBottomLeftGearHudView
     private lateinit var closeButtonContainer: View
     private lateinit var viewModel: WeatherClockViewModel
 
@@ -114,6 +117,28 @@ class CarSubscreenActivity : AppCompatActivity(),
         switchToWeatherPage(smooth = true)
     }
 
+    private var wasInLyricsBeforeCall: Boolean = false
+    private val callListener = object : CarCallManager.CallListener {
+        override fun onCallChanged(callInfo: CarCallManager.CallInfo) {
+            runOnUiThread {
+                if (callInfo.isCallActive) {
+                    if (currentPage == ActivePage.LYRICS) {
+                        wasInLyricsBeforeCall = true
+                        switchToWeatherPage(smooth = true)
+                    }
+                } else if (callInfo.state == CarCallManager.CallState.IDLE) {
+                    if (wasInLyricsBeforeCall) {
+                        if (isMusicPlaying) {
+                            switchToLyricsPage(smooth = true)
+                        }
+                        wasInLyricsBeforeCall = false
+                    }
+                }
+                weatherCanvasView.setCallInfo(callInfo)
+            }
+        }
+    }
+
     private val simulationReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val action = intent?.action ?: return
@@ -122,14 +147,12 @@ class CarSubscreenActivity : AppCompatActivity(),
                 ACTION_GEAR_SWITCH, ACTION_SWITCH_GEAR -> {
                     val gear = intent.getStringExtra(EXTRA_GEAR) ?: "P"
                     isFirstGearEvent = false
-                    lastReportedGear = gear
-                    triggerGearFlip(gear)
+                    CarGearManager.getInstance(this@CarSubscreenActivity).simulateGear(gear)
                 }
                 ACTION_SWITCH_DRIVE_MODE -> {
                     val mode = intent.getStringExtra(EXTRA_MODE) ?: "SPORT"
                     isFirstDriveModeEvent = false
-                    lastReportedDriveMode = mode
-                    triggerDriveModeSwitch(mode)
+                    CarGearManager.getInstance(this@CarSubscreenActivity).simulateDriveMode(mode)
                 }
                 WeatherOverlayService.ACTION_SIMULATE_CUSTOM -> {
                     val timeIdx = intent.getIntExtra(WeatherOverlayService.EXTRA_TIME_OF_DAY, 1)
@@ -149,6 +172,54 @@ class CarSubscreenActivity : AppCompatActivity(),
                     )
                     weatherCanvasView.updateScene(scene)
                 }
+                WeatherOverlayService.ACTION_CALL_EVENT -> {
+                    val typeStr = intent.getStringExtra(WeatherOverlayService.EXTRA_CALL_TYPE) ?: "normal"
+                    val stateStr = intent.getStringExtra(WeatherOverlayService.EXTRA_CALL_STATE) ?: "ringing"
+                    val name = intent.getStringExtra(WeatherOverlayService.EXTRA_CALL_NAME) ?: "张总"
+                    val number = intent.getStringExtra(WeatherOverlayService.EXTRA_CALL_NUMBER) ?: "13800009527"
+                    val type = if (typeStr.equals("wechat", ignoreCase = true)) CarCallManager.CallType.WECHAT else CarCallManager.CallType.NORMAL
+                    val state = when (stateStr.lowercase()) {
+                        "ringing", "incoming" -> CarCallManager.CallState.RINGING
+                        "dialing", "outgoing" -> CarCallManager.CallState.DIALING
+                        "active", "connected" -> CarCallManager.CallState.ACTIVE
+                        "hangup", "terminated" -> CarCallManager.CallState.TERMINATED
+                        else -> CarCallManager.CallState.IDLE
+                    }
+                    CarCallManager.getInstance(this@CarSubscreenActivity).simulateCall(type, state, name, number)
+                }
+                WeatherOverlayService.ACTION_UPDATE_LIQUID_GLASS -> {
+                    val enabled = intent.getBooleanExtra(WeatherOverlayService.EXTRA_LIQUID_GLASS_ENABLED, PrefsManager.isLiquidGlassClockEnabled())
+                    Log.i(TAG, "📡 副屏预览收到液态玻璃时钟状态变更: enabled=$enabled")
+                    weatherCanvasView.setLiquidGlassEnabled(enabled, smooth = true)
+                }
+                WeatherOverlayService.ACTION_UPDATE_BOTTOM_LEFT_GEAR_HUD -> {
+                    val enabled = intent.getBooleanExtra(WeatherOverlayService.EXTRA_BOTTOM_LEFT_GEAR_HUD_ENABLED, PrefsManager.isBottomLeftGearHudEnabled())
+                    Log.i(TAG, "📡 副屏预览收到左下角档位HUD状态变更: enabled=$enabled")
+                    bottomLeftGearHudView.setHudEnabled(enabled, animate = true)
+                    if (enabled) {
+                        bottomLeftGearHudView.bringToFront()
+                    }
+                }
+                WeatherOverlayService.ACTION_UPDATE_LYRICS_SETTINGS -> {
+                    Log.i(TAG, "📡 副屏预览收到歌词设置/预设变更广播，立即同步运行时状态")
+                    val shouldAvoid = PrefsManager.isXiaoOuAvoidanceEnabled()
+                    lyricsContainerView.xiaoOuAvoidanceEnabled = shouldAvoid
+                    weatherCanvasView.setXiaoOuAvoidance(shouldAvoid)
+                    lyricsContainerView.reloadSkin(PrefsManager.getSkinType())
+                    lyricsContainerView.getSkin()?.fontSizeSp = PrefsManager.getFontSizeSp()
+                    lyricsContainerView.getSkin()?.splitRatio = PrefsManager.getSplitRatio()
+                    lyricsContainerView.getSkin()?.lyricsTextAlignment = PrefsManager.getLyricsAlignment()
+                    lyricsContainerView.getSkin()?.marqueeEnabled = PrefsManager.isMarqueeEnabled()
+                    lyricsContainerView.getSkin()?.scaleFactor = PrefsManager.getDpiScale()
+                    lyricsContainerView.getSkin()?.infoFontScale = PrefsManager.getInfoFontScale()
+                    lyricsContainerView.getSkin()?.lyricsOffsetMs = PrefsManager.lyricsOffsetMs
+                }
+                WeatherOverlayService.ACTION_SIMULATE_MUSIC -> {
+                    val playing = intent.getBooleanExtra(WeatherOverlayService.EXTRA_MUSIC_PLAYING, true)
+                    val title = intent.getStringExtra(WeatherOverlayService.EXTRA_MUSIC_TITLE) ?: "See You Again (feat. Charlie Puth)"
+                    val artist = intent.getStringExtra(WeatherOverlayService.EXTRA_MUSIC_ARTIST) ?: "Wiz Khalifa / Charlie Puth"
+                    onTrackStateChanged(CurrentTrack(title = title, artist = artist, isPlaying = playing, position = 15000L, duration = 200000L))
+                }
             }
         }
     }
@@ -162,6 +233,7 @@ class CarSubscreenActivity : AppCompatActivity(),
         lyricsContainerView = findViewById(R.id.lyricsContainerView)
         driveModeView = findViewById(R.id.driveModeView)
         gearCubeView = findViewById(R.id.gearCubeView)
+        bottomLeftGearHudView = findViewById(R.id.bottomLeftGearHudView)
         closeButtonContainer = findViewById(R.id.closeButtonContainer)
 
         findViewById<View>(R.id.tvCloseButton).setOnClickListener {
@@ -175,10 +247,27 @@ class CarSubscreenActivity : AppCompatActivity(),
         weatherCanvasView.alpha = 1f
         weatherCanvasView.visibility = View.VISIBLE
         weatherCanvasView.resumeAnimation()
+        weatherCanvasView.setLiquidGlassEnabled(PrefsManager.isLiquidGlassClockEnabled(), smooth = false)
 
+        // 初始化左下角常驻微型档位 HUD (置顶)
+        bottomLeftGearHudView.backgroundProvider = { canvas, _ ->
+            weatherCanvasView.drawWeatherBackgroundOnly(canvas)
+        }
+        bottomLeftGearHudView.weatherLeftProvider = {
+            weatherCanvasView.weatherHudLeftX
+        }
+        weatherCanvasView.onSceneRenderUpdated = {
+            bottomLeftGearHudView.invalidate()
+        }
+        bottomLeftGearHudView.setHudEnabled(PrefsManager.isBottomLeftGearHudEnabled(), animate = false)
+        bottomLeftGearHudView.bringToFront()
+
+        val shouldAvoid = PrefsManager.isXiaoOuAvoidanceEnabled()
         lyricsContainerView.alpha = 0f
         lyricsContainerView.visibility = View.GONE
         lyricsContainerView.pause()
+        lyricsContainerView.xiaoOuAvoidanceEnabled = shouldAvoid
+        weatherCanvasView.setXiaoOuAvoidance(shouldAvoid)
 
         // 注册切档与驾驶模式监听
         val carManager = CarGearManager.getInstance(this).apply {
@@ -188,6 +277,13 @@ class CarSubscreenActivity : AppCompatActivity(),
         }
         lastReportedGear = carManager.getCurrentGear()
         lastReportedDriveMode = carManager.getCurrentDriveMode()
+        lastReportedGear?.let { bottomLeftGearHudView.setGear(it, animate = false) }
+
+        // 注册原厂与模拟通话状态监听
+        CarCallManager.getInstance(this).apply {
+            startListening()
+            addListener(callListener)
+        }
 
         // 注册 ADB 模拟广播
         val filter = IntentFilter().apply {
@@ -195,6 +291,11 @@ class CarSubscreenActivity : AppCompatActivity(),
             addAction(ACTION_SWITCH_GEAR)
             addAction(ACTION_SWITCH_DRIVE_MODE)
             addAction(WeatherOverlayService.ACTION_SIMULATE_CUSTOM)
+            addAction(WeatherOverlayService.ACTION_CALL_EVENT)
+            addAction(WeatherOverlayService.ACTION_UPDATE_LIQUID_GLASS)
+            addAction(WeatherOverlayService.ACTION_UPDATE_BOTTOM_LEFT_GEAR_HUD)
+            addAction(WeatherOverlayService.ACTION_UPDATE_LYRICS_SETTINGS)
+            addAction(WeatherOverlayService.ACTION_SIMULATE_MUSIC)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(simulationReceiver, filter, Context.RECEIVER_EXPORTED)
@@ -248,6 +349,7 @@ class CarSubscreenActivity : AppCompatActivity(),
         } else {
             lyricsContainerView.resume()
         }
+        bottomLeftGearHudView.bringToFront()
     }
 
     // ==================== 档位与驾驶模式监听 ====================
@@ -257,12 +359,16 @@ class CarSubscreenActivity : AppCompatActivity(),
         if (isFirstGearEvent) {
             isFirstGearEvent = false
             lastReportedGear = gear
+            bottomLeftGearHudView.setGear(gear, animate = false)
+            bottomLeftGearHudView.bringToFront()
             Log.i(TAG, "🚗 副屏初始档位静默就绪: $gear (首次进入不触发动画)")
             return
         }
         if (lastReportedGear == gear) return
         lastReportedGear = gear
 
+        bottomLeftGearHudView.setGear(gear, animate = true)
+        bottomLeftGearHudView.bringToFront()
         Log.i(TAG, "🚗 监听到真实档位变动: $gear (raw=$rawValue)，立即执行 3D 向上翻转")
         triggerGearFlip(gear)
     }
@@ -292,6 +398,8 @@ class CarSubscreenActivity : AppCompatActivity(),
                 }
                 isGearActive = true
                 gearCubeView.bringToFront()
+                bottomLeftGearHudView.setGear(gear, animate = true)
+                bottomLeftGearHudView.bringToFront()
 
                 gearCubeView.triggerGearFlip(gear) { canvas ->
                     drawActiveUnderlyingView(canvas)
@@ -561,6 +669,7 @@ class CarSubscreenActivity : AppCompatActivity(),
         } catch (_: Exception) {}
         CarGearManager.getInstance(this).unregisterListener(this)
         CarGearManager.getInstance(this).unregisterDriveModeListener(this)
+        CarCallManager.getInstance(this).removeListener(callListener)
         autoHideHandler.removeCallbacks(hideCloseRunnable)
         mainHandler.removeCallbacks(fallbackToWeatherRunnable)
         lyricsProgressJob?.cancel()

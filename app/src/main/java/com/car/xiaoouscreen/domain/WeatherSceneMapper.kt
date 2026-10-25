@@ -111,6 +111,212 @@ object WeatherSceneMapper {
     }
 
     /**
+     * 和风天气实况 + 分钟降水雷达 + Open-Meteo 天文时刻 融合映射核心入口
+     */
+    fun mapQWeatherToScene(
+        qNow: com.car.xiaoouscreen.data.QWeatherNowDto?,
+        minutely: com.car.xiaoouscreen.data.QWeatherMinutelyResponse?,
+        openMeteoWmoCode: Int,
+        nowUnix: Long,
+        sunriseUnix: Long,
+        sunsetUnix: Long,
+        fallbackWindSpeed: Float = 10f,
+        fallbackTemp: Float = 22f,
+        fallbackWindDir: Float = 45f
+    ): WeatherSceneConfig {
+        val timeOfDay = resolveTimeOfDay(nowUnix, sunriseUnix, sunsetUnix)
+
+        // 基础温湿与风力解析
+        val temp = qNow?.temp?.toFloatOrNull() ?: fallbackTemp
+        val feelsLike = qNow?.feelsLike?.toFloatOrNull() ?: temp
+        val windSpeed = qNow?.windSpeed?.toFloatOrNull() ?: fallbackWindSpeed
+        val windDirDegree = qNow?.wind360?.toFloatOrNull() ?: fallbackWindDir
+        val windDirText = qNow?.windDir ?: resolveWindDirText(windDirDegree)
+        val windScaleText = qNow?.windScale?.let { "${it}级" } ?: resolveWindScaleText(windSpeed)
+
+        // 分钟级降水雷达外推切片解析
+        val summary = minutely?.summary
+        val hasRainSummary = !summary.isNullOrBlank() && summary != "未来两小时无降水"
+        val currentSlot = minutely?.minutely?.firstOrNull()
+        val currentPrecip = currentSlot?.precip?.toFloatOrNull() ?: 0f
+        val isRadarRaining = currentPrecip > 0.05f
+
+        val weatherState: WeatherState
+        val intensity: Intensity
+        val description: String
+
+        if (isRadarRaining) {
+            // 雷达超短临实况见降水：最高优先级裁决覆盖
+            if (currentSlot?.type == "snow") {
+                weatherState = WeatherState.SNOW
+                intensity = if (currentPrecip > 2.0f) Intensity.HEAVY else Intensity.LIGHT
+                description = if (intensity == Intensity.HEAVY) "大暴雪" else "小雪"
+            } else {
+                if (temp <= 2.0f) {
+                    weatherState = WeatherState.SLEET
+                    intensity = Intensity.LIGHT
+                    description = "雨夹雪"
+                } else if (qNow?.icon in listOf("302", "303", "304") || openMeteoWmoCode in listOf(95, 96, 99)) {
+                    weatherState = WeatherState.STORM
+                    intensity = Intensity.HEAVY
+                    description = "雷暴天气"
+                } else {
+                    weatherState = WeatherState.RAIN
+                    intensity = if (currentPrecip > 1.5f) Intensity.HEAVY else Intensity.LIGHT
+                    description = if (intensity == Intensity.HEAVY) "大暴雨" else "中雨"
+                }
+            }
+        } else if (qNow != null) {
+            // 雷达无雨但有和风地面实况
+            val (qState, qIntensity, qDesc) = mapQWeatherIconToState(qNow.icon, qNow.text)
+            weatherState = qState
+            intensity = qIntensity
+            description = qDesc
+        } else {
+            // 回退纯 Open-Meteo WMO 代码
+            val (wState, wIntensity, wDesc) = resolveWmoCode(openMeteoWmoCode)
+            weatherState = wState
+            intensity = wIntensity
+            description = wDesc
+        }
+
+        return buildSceneConfig(
+            weatherState = weatherState,
+            timeOfDay = timeOfDay,
+            intensity = intensity,
+            description = description,
+            temperature = temp,
+            windSpeed = windSpeed,
+            windDirection = windDirDegree,
+            sunriseUnix = sunriseUnix,
+            sunsetUnix = sunsetUnix,
+            nowUnix = nowUnix,
+            feelsLike = feelsLike,
+            windDirText = windDirText,
+            windScaleText = windScaleText,
+            minuteRainSummary = summary,
+            isMinuteRainActive = hasRainSummary
+        )
+    }
+
+    /**
+     * 本地时间轴推进与光影重算（严格保留当前已确立的气象现象 WeatherState 与降水强度）
+     * 杜绝将阴天、暴雨等天气降级为多云或晴天
+     */
+    fun updateSceneTimeline(
+        current: WeatherSceneConfig,
+        nowUnix: Long,
+        updatedMinuteRainSummary: String?,
+        isMinuteRainActive: Boolean
+    ): WeatherSceneConfig {
+        val newTimeOfDay = resolveTimeOfDay(nowUnix, current.sunriseUnix, current.sunsetUnix)
+        return buildSceneConfig(
+            weatherState = current.weatherState,
+            timeOfDay = newTimeOfDay,
+            intensity = current.intensity,
+            description = current.weatherDescription,
+            temperature = current.temperatureCelsius,
+            windSpeed = current.windSpeedKmh,
+            windDirection = current.windDirectionDegree,
+            sunriseUnix = current.sunriseUnix,
+            sunsetUnix = current.sunsetUnix,
+            nowUnix = nowUnix,
+            feelsLike = current.feelsLikeCelsius,
+            windDirText = current.windDirectionText,
+            windScaleText = current.windScaleText,
+            minuteRainSummary = updatedMinuteRainSummary,
+            isMinuteRainActive = isMinuteRainActive
+        )
+    }
+
+    fun mapQWeatherIconToState(icon: String, text: String): Triple<WeatherState, Intensity, String> {
+        val cleanIcon = icon.trim()
+        val cleanText = text.trim()
+
+        // 1. 语义最高优先级对齐：确保屏幕上呈现的文字与后面的背景动画绝对 100% 吻合！
+        if (cleanText.isNotEmpty()) {
+            when {
+                cleanText.contains("雷") -> {
+                    return Triple(WeatherState.STORM, Intensity.HEAVY, cleanText)
+                }
+                cleanText.contains("雨夹雪") -> {
+                    return Triple(WeatherState.SLEET, Intensity.LIGHT, cleanText)
+                }
+                cleanText.contains("雪") -> {
+                    val isHeavy = cleanIcon in listOf("402", "403", "409", "410") || cleanText.contains("暴雪") || cleanText.contains("大雪")
+                    return Triple(WeatherState.SNOW, if (isHeavy) Intensity.HEAVY else Intensity.LIGHT, cleanText)
+                }
+                cleanText.contains("雨") -> {
+                    val isHeavy = cleanIcon in listOf("301", "307", "308", "310", "311", "312", "316", "317", "318", "351") ||
+                                  cleanText.contains("大雨") || cleanText.contains("暴雨")
+                    return Triple(WeatherState.RAIN, if (isHeavy) Intensity.HEAVY else Intensity.LIGHT, cleanText)
+                }
+                cleanText.contains("阴") || cleanText.contains("雾") || cleanText.contains("霾") ||
+                cleanText.contains("沙") || cleanText.contains("尘") -> {
+                    return Triple(WeatherState.OVERCAST, Intensity.LIGHT, cleanText)
+                }
+                cleanText.contains("多云") || cleanText.contains("少云") -> {
+                    return Triple(WeatherState.CLOUDY, Intensity.LIGHT, cleanText)
+                }
+                cleanText.contains("晴") -> {
+                    return Triple(WeatherState.CLEAR, Intensity.LIGHT, cleanText)
+                }
+            }
+        }
+
+        // 2. 代码解析兜底 (当 text 为空时依据标准和风 Weather Code 映射)
+        return when (cleanIcon) {
+            "100", "150" -> Triple(WeatherState.CLEAR, Intensity.LIGHT, cleanText.ifBlank { "晴朗" })
+            "101", "102", "103", "151", "152", "153" -> Triple(WeatherState.CLOUDY, Intensity.LIGHT, cleanText.ifBlank { "多云" })
+            "104" -> Triple(WeatherState.OVERCAST, Intensity.LIGHT, cleanText.ifBlank { "阴天" })
+            "302", "303", "304" -> Triple(WeatherState.STORM, Intensity.HEAVY, cleanText.ifBlank { "雷暴天气" })
+            "313", "404", "405", "406", "456" -> Triple(WeatherState.SLEET, Intensity.LIGHT, cleanText.ifBlank { "雨夹雪" })
+            in "300".."399" -> {
+                val isHeavy = cleanIcon in listOf("301", "307", "308", "310", "311", "312", "316", "317", "318", "351")
+                Triple(WeatherState.RAIN, if (isHeavy) Intensity.HEAVY else Intensity.LIGHT, cleanText.ifBlank { "降雨" })
+            }
+            in "400".."499" -> {
+                val isHeavy = cleanIcon in listOf("402", "403", "409", "410")
+                Triple(WeatherState.SNOW, if (isHeavy) Intensity.HEAVY else Intensity.LIGHT, cleanText.ifBlank { "降雪" })
+            }
+            in "500".."515" -> Triple(WeatherState.OVERCAST, Intensity.LIGHT, cleanText.ifBlank { "阴天/霾" })
+            else -> Triple(WeatherState.CLEAR, Intensity.LIGHT, cleanText.ifBlank { "晴朗" })
+        }
+    }
+
+    fun resolveWindDirText(degrees: Float): String {
+        val deg = (degrees % 360 + 360) % 360
+        return when {
+            deg >= 337.5 || deg < 22.5 -> "北风"
+            deg < 67.5 -> "东北风"
+            deg < 112.5 -> "东风"
+            deg < 157.5 -> "东南风"
+            deg < 202.5 -> "南风"
+            deg < 247.5 -> "西南风"
+            deg < 292.5 -> "西风"
+            else -> "西北风"
+        }
+    }
+
+    fun resolveWindScaleText(speedKmh: Float): String {
+        return when {
+            speedKmh < 1f -> "0级"
+            speedKmh <= 5f -> "1级"
+            speedKmh <= 11f -> "2级"
+            speedKmh <= 19f -> "3级"
+            speedKmh <= 28f -> "4级"
+            speedKmh <= 38f -> "5级"
+            speedKmh <= 49f -> "6级"
+            speedKmh <= 61f -> "7级"
+            speedKmh <= 74f -> "8级"
+            speedKmh <= 88f -> "9级"
+            speedKmh <= 102f -> "10级"
+            speedKmh <= 117f -> "11级"
+            else -> "12级"
+        }
+    }
+
+    /**
      * 内部装配器：装配天空渐变基色、iOS 多层云参数、粒子数量与时钟环境光
      */
     private fun buildSceneConfig(
@@ -123,7 +329,12 @@ object WeatherSceneMapper {
         windDirection: Float,
         sunriseUnix: Long,
         sunsetUnix: Long,
-        nowUnix: Long
+        nowUnix: Long,
+        feelsLike: Float = temperature,
+        windDirText: String = resolveWindDirText(windDirection),
+        windScaleText: String = resolveWindScaleText(windSpeed),
+        minuteRainSummary: String? = null,
+        isMinuteRainActive: Boolean = false
     ): WeatherSceneConfig {
         // 计算 4x7=28 种天空色彩组合
         val (skyTop, skyBottom) = resolveSkyColors(timeOfDay, weatherState)
@@ -193,7 +404,12 @@ object WeatherSceneMapper {
             starsVisible = starsVisible,
             rainParticleCount = rainParticles,
             snowParticleCount = snowParticles,
-            lightningEnabled = lightningEnabled
+            lightningEnabled = lightningEnabled,
+            feelsLikeCelsius = feelsLike,
+            windDirectionText = windDirText,
+            windScaleText = windScaleText,
+            minuteRainSummary = minuteRainSummary,
+            isMinuteRainActive = isMinuteRainActive
         )
     }
 

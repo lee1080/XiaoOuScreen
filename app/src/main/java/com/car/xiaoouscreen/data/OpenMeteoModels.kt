@@ -10,7 +10,13 @@ data class OpenMeteoResponse(
     @SerializedName("longitude") val longitude: Double,
     @SerializedName("timezone") val timezone: String,
     @SerializedName("current") val current: CurrentWeatherDto?,
+    @SerializedName("hourly") val hourly: HourlyWeatherDto?,
     @SerializedName("daily") val daily: DailyWeatherDto?
+)
+
+data class HourlyWeatherDto(
+    @SerializedName("time") val time: List<Long>?,
+    @SerializedName("precipitation_probability") val precipitationProbability: List<Int>?
 )
 
 data class CurrentWeatherDto(

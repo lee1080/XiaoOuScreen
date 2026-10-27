@@ -13,46 +13,46 @@ data class SkinDefaultParams(
 
 enum class SkinType(val label: String, val defaultParams: SkinDefaultParams) {
     DEFAULT("默认", SkinDefaultParams(
-        splitRatio = 0.35f,
+        splitRatio = 0.25f,
         marqueeEnabled = true,
         lyricsAlignment = Gravity.START or Gravity.CENTER_VERTICAL, // 8388611
-        displayScale = 1.55f,
-        infoFontScale = 1.0f
+        displayScale = 0.85f,
+        infoFontScale = 1.2272727f
     )),
     GLASSMORPHISM("毛玻璃质感", SkinDefaultParams(
-        splitRatio = 0.38f,
+        splitRatio = 0.25f,
         marqueeEnabled = true,
         lyricsAlignment = Gravity.START or Gravity.CENTER_VERTICAL, // 8388611
-        displayScale = 1.05f,
-        infoFontScale = 1.35f
+        displayScale = 0.85f,
+        infoFontScale = 1.2272727f
     )),
     MINIMAL_NEON("极简霓虹", SkinDefaultParams(
-        splitRatio = 0.31f,
+        splitRatio = 0.25f,
         marqueeEnabled = true,
         lyricsAlignment = Gravity.START or Gravity.CENTER_VERTICAL, // 8388611
-        displayScale = 1.55f,
-        infoFontScale = 0.95f
+        displayScale = 0.85f,
+        infoFontScale = 1.2272727f
     )),
     VIBRANT_WAVE("动感波浪", SkinDefaultParams(
-        splitRatio = 0.38f,
-        marqueeEnabled = false,
-        lyricsAlignment = Gravity.CENTER, // 17
-        displayScale = 1.55f,
-        infoFontScale = 0.95f
+        splitRatio = 0.25f,
+        marqueeEnabled = true,
+        lyricsAlignment = Gravity.CENTER, // 17 (动感波浪居中)
+        displayScale = 0.85f,
+        infoFontScale = 1.2272727f
     )),
     VINYL_PLAYER("唱片风格", SkinDefaultParams(
-        splitRatio = 0.38f,
+        splitRatio = 0.25f,
         marqueeEnabled = true,
         lyricsAlignment = Gravity.START or Gravity.CENTER_VERTICAL, // 8388611
-        displayScale = 1.55f,
-        infoFontScale = 0.70f
+        displayScale = 0.85f,
+        infoFontScale = 1.2272727f
     )),
     IMMERSIVE("沉浸式", SkinDefaultParams(
-        splitRatio = 0.36f,
+        splitRatio = 0.25f,
         marqueeEnabled = true,
         lyricsAlignment = Gravity.START or Gravity.CENTER_VERTICAL, // 8388611
-        displayScale = 1.15f,
-        infoFontScale = 0.80f
+        displayScale = 0.85f,
+        infoFontScale = 1.2272727f
     ));
 }
 

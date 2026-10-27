@@ -6,7 +6,7 @@ import android.content.ServiceConnection
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.util.Log
+import com.carlyrics.util.AppLogger
 import java.lang.reflect.Method
 import java.lang.reflect.Proxy
 import java.util.concurrent.CopyOnWriteArrayList
@@ -114,8 +114,8 @@ class CarGearManager private constructor(private val context: Context) {
     private var pendingNRunnable: Runnable? = null
     private var pendingNRaw: Int = RAW_GEAR_N
 
-    private var currentDriveMode = MODE_SPORT
-    private var currentRawDriveMode = 3
+    private var currentDriveMode = MODE_NORMAL
+    private var currentRawDriveMode = 1
 
     fun registerListener(listener: GearListener) {
         if (!listeners.contains(listener)) {
@@ -152,47 +152,49 @@ class CarGearManager private constructor(private val context: Context) {
     @Synchronized
     fun init() {
         if (isInitialized) {
-            Log.d(TAG, "CarGearManager 已经初始化过，当前已连接=$isConnected")
+            AppLogger.d(TAG, "CarGearManager 已经初始化过，当前已连接=$isConnected")
             return
         }
         isInitialized = true
 
-        try {
-            val carClass = Class.forName("android.car.Car")
-            isCarSupported = true
-            Log.i(TAG, "🚗 检测到系统包含 android.car.Car，开始与 CarService 进行 IPC 握手...")
+        Thread {
+            try {
+                val carClass = Class.forName("android.car.Car")
+                isCarSupported = true
+                AppLogger.i(TAG, "🚗 检测到系统包含 android.car.Car，开始与 CarService 进行 IPC 握手...")
 
-            val serviceConnection = object : ServiceConnection {
-                override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-                    Log.i(TAG, "✅ CarService 服务连通: $name")
-                    isConnected = true
-                    initManagers(carClass, carInstance)
+                val serviceConnection = object : ServiceConnection {
+                    override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+                        AppLogger.i(TAG, "✅ CarService 服务连通: $name")
+                        isConnected = true
+                        initManagers(carClass, carInstance)
+                    }
+
+                    override fun onServiceDisconnected(name: ComponentName?) {
+                        AppLogger.w(TAG, "⚠️ CarService 服务断开: $name")
+                        isConnected = false
+                        cabinManager = null
+                        mcuManager = null
+                    }
                 }
 
-                override fun onServiceDisconnected(name: ComponentName?) {
-                    Log.w(TAG, "⚠️ CarService 服务断开: $name")
-                    isConnected = false
-                    cabinManager = null
-                    mcuManager = null
-                }
+                // Method: Car.createCar(Context, ServiceConnection)
+                val createCarMethod = carClass.getMethod("createCar", Context::class.java, ServiceConnection::class.java)
+                carInstance = createCarMethod.invoke(null, context, serviceConnection)
+
+                // Android 9 Automotive 必须显式调用 connect()
+                val connectMethod = carClass.getMethod("connect")
+                connectMethod.invoke(carInstance)
+                AppLogger.i(TAG, "已调用 car.connect()，等待 onServiceConnected 回调...")
+
+            } catch (e: ClassNotFoundException) {
+                isCarSupported = false
+                isConnected = false
+                AppLogger.w(TAG, "当前设备非 Android Automotive 车机系统 (缺少 android.car.Car)，无缝启用本地模拟驱动")
+            } catch (t: Throwable) {
+                AppLogger.e(TAG, "初始化 CarService 握手异常: ${t.message}", t)
             }
-
-            // Method: Car.createCar(Context, ServiceConnection)
-            val createCarMethod = carClass.getMethod("createCar", Context::class.java, ServiceConnection::class.java)
-            carInstance = createCarMethod.invoke(null, context, serviceConnection)
-
-            // Android 9 Automotive 必须显式调用 connect()
-            val connectMethod = carClass.getMethod("connect")
-            connectMethod.invoke(carInstance)
-            Log.i(TAG, "已调用 car.connect()，等待 onServiceConnected 回调...")
-
-        } catch (e: ClassNotFoundException) {
-            isCarSupported = false
-            isConnected = false
-            Log.w(TAG, "当前设备非 Android Automotive 车机系统 (缺少 android.car.Car)，无缝启用本地模拟驱动")
-        } catch (t: Throwable) {
-            Log.e(TAG, "初始化 CarService 握手异常: ${t.message}", t)
-        }
+        }.start()
     }
 
     /**
@@ -206,28 +208,28 @@ class CarGearManager private constructor(private val context: Context) {
             // 1. 获取 CarCabinManager (服务名: "cabin")
             cabinManager = getCarManagerMethod.invoke(car, "cabin")
             if (cabinManager != null) {
-                Log.i(TAG, "成功获取 CarCabinManager 实例")
+                AppLogger.i(TAG, "成功获取 CarCabinManager 实例")
                 registerCabinCallback(cabinManager!!)
                 // 连通时主动读取一次当前实车档位与驾驶模式
                 readInitialGear(cabinManager!!)
                 readInitialDriveMode(cabinManager!!)
             } else {
-                Log.w(TAG, "未能获取到 CarCabinManager (cabin)")
+                AppLogger.w(TAG, "未能获取到 CarCabinManager (cabin)")
             }
 
             // 2. 获取备用 CarMcuManager (服务名: "mcu_service")
             try {
                 mcuManager = getCarManagerMethod.invoke(car, "mcu_service")
                 if (mcuManager != null) {
-                    Log.i(TAG, "成功获取 CarMcuManager 备用实例")
+                    AppLogger.i(TAG, "成功获取 CarMcuManager 备用实例")
                     registerMcuCallback(mcuManager!!)
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "未启用/未找到 mcu_service: ${e.message}")
+                AppLogger.w(TAG, "未启用/未找到 mcu_service: ${e.message}")
             }
 
         } catch (t: Throwable) {
-            Log.e(TAG, "initManagers 异常", t)
+            AppLogger.e(TAG, "initManagers 异常: ${t.message}", t)
         }
     }
 
@@ -245,13 +247,13 @@ class CarGearManager private constructor(private val context: Context) {
             val raw = getIntMethod.invoke(cabin, ID_GEAR_SELECTION_NEW, 0) as Int
             if (isValidGear(raw)) {
                 val label = toGearLabel(raw)
-                Log.i(TAG, "🎉 实车初始档位主动查询成功: raw=$raw -> $label 档")
+                AppLogger.i(TAG, "🎉 实车初始档位主动查询成功: raw=$raw -> $label 档")
                 notifyGearInternal(label, raw, debounceN = false)
             } else {
-                Log.d(TAG, "实车初始档位非白名单值: raw=$raw (有效值: 1=N, 2=R, 4=P, 8=D)")
+                AppLogger.d(TAG, "实车初始档位非白名单值: raw=$raw (有效值: 1=N, 2=R, 4=P, 8=D)")
             }
         } catch (t: Throwable) {
-            Log.w(TAG, "主动读取初始档位异常: ${t.message}")
+            AppLogger.w(TAG, "主动读取初始档位异常: ${t.message}")
         }
     }
 
@@ -267,10 +269,10 @@ class CarGearManager private constructor(private val context: Context) {
             )
             val raw = getIntMethod.invoke(cabin, ID_VENDOR_DRIVER_MODE_SET, 0) as Int
             val mode = toDriveMode(raw)
-            Log.i(TAG, "🎉 实车初始驾驶模式主动查询成功: raw=$raw -> $mode")
+            AppLogger.i(TAG, "🎉 实车初始驾驶模式主动查询成功: raw=$raw -> $mode")
             notifyDriveModeInternal(mode, raw)
         } catch (t: Throwable) {
-            Log.w(TAG, "主动读取初始驾驶模式异常: ${t.message}")
+            AppLogger.w(TAG, "主动读取初始驾驶模式异常: ${t.message}")
         }
     }
 
@@ -295,7 +297,7 @@ class CarGearManager private constructor(private val context: Context) {
                         null
                     }
                     "onErrorEvent" -> {
-                        Log.w(TAG, "CarCabinManager.onErrorEvent: ${args?.contentToString()}")
+                        AppLogger.w(TAG, "CarCabinManager.onErrorEvent: ${args?.contentToString()}")
                         null
                     }
                     "equals" -> false
@@ -314,13 +316,12 @@ class CarGearManager private constructor(private val context: Context) {
             registerMethod.invoke(cabin, callbackProxy, intArrayOf(
                 ID_GEAR_SELECTION_NEW, 
                 ID_GEAR_SELECTION,
-                ID_VENDOR_DRIVER_MODE_SET,
-                ID_DRIVING_MODE_ALL
+                ID_VENDOR_DRIVER_MODE_SET
             ))
-            Log.i(TAG, "🔥 成功向 CarCabinManager 订阅档位与驾驶模式属性 (0x2140210f / 0x11400400 / 0x2140f030 / 0x2141f08e)")
+            AppLogger.i(TAG, "🔥 成功向 CarCabinManager 订阅档位与驾驶模式属性 (0x2140210f / 0x11400400 / 0x2140f030)")
 
         } catch (t: Throwable) {
-            Log.e(TAG, "注册 CarCabinManager 监听异常", t)
+            AppLogger.e(TAG, "注册 CarCabinManager 监听异常: ${t.message}", t)
         }
     }
 
@@ -349,10 +350,20 @@ class CarGearManager private constructor(private val context: Context) {
                 IntArray::class.java
             )
             registerMethod.invoke(mcu, callbackProxy, intArrayOf(ID_GEAR_SELECTION))
-            Log.i(TAG, "成功向 CarMcuManager 订阅备用档位属性 (0x11400400)")
+            AppLogger.i(TAG, "成功向 CarMcuManager 订阅备用档位属性 (0x11400400)")
 
         } catch (t: Throwable) {
-            Log.w(TAG, "注册 CarMcuManager 监听失败: ${t.message}")
+            AppLogger.w(TAG, "注册 CarMcuManager 监听失败: ${t.message}")
+        }
+    }
+
+    private fun extractIntFromValue(value: Any?): Int {
+        return when (value) {
+            is Int -> value
+            is Array<*> -> (value.firstOrNull() as? Number)?.toInt() ?: 0
+            is IntArray -> value.firstOrNull() ?: 0
+            is Number -> value.toInt()
+            else -> 0
         }
     }
 
@@ -363,22 +374,22 @@ class CarGearManager private constructor(private val context: Context) {
         try {
             val propId = event.javaClass.getMethod("getPropertyId").invoke(event) as Int
             if (propId == ID_GEAR_SELECTION_NEW || propId == ID_GEAR_SELECTION) {
-                val rawValue = event.javaClass.getMethod("getValue").invoke(event) as Int
+                val rawValue = extractIntFromValue(event.javaClass.getMethod("getValue").invoke(event))
                 if (isValidGear(rawValue)) {
                     val label = toGearLabel(rawValue)
-                    Log.i(TAG, "🚘 实车档位总线变动触发: prop=0x${Integer.toHexString(propId)}, raw=$rawValue -> $label")
+                    AppLogger.i(TAG, "🚘 实车档位总线变动触发: prop=0x${Integer.toHexString(propId)}, raw=$rawValue -> $label")
                     notifyGearInternal(label, rawValue, debounceN = true)
                 } else {
-                    Log.d(TAG, "忽略非标准档位过渡噪声: raw=$rawValue")
+                    AppLogger.d(TAG, "忽略非标准档位过渡噪声: raw=$rawValue")
                 }
-            } else if (propId == ID_VENDOR_DRIVER_MODE_SET || propId == ID_DRIVING_MODE_ALL) {
-                val rawValue = event.javaClass.getMethod("getValue").invoke(event) as Int
+            } else if (propId == ID_VENDOR_DRIVER_MODE_SET) {
+                val rawValue = extractIntFromValue(event.javaClass.getMethod("getValue").invoke(event))
                 val mode = toDriveMode(rawValue)
-                Log.i(TAG, "🏎️ 实车驾驶模式总线变动触发: prop=0x${Integer.toHexString(propId)}, raw=$rawValue -> $mode")
+                AppLogger.i(TAG, "🏎️ 实车驾驶模式总线变动触发: prop=0x${Integer.toHexString(propId)}, raw=$rawValue -> $mode")
                 notifyDriveModeInternal(mode, rawValue)
             }
         } catch (e: Exception) {
-            Log.e(TAG, "解析 CarPropertyValue 异常", e)
+            AppLogger.e(TAG, "解析 CarPropertyValue 异常: ${e.message}", e)
         }
     }
 
@@ -394,14 +405,14 @@ class CarGearManager private constructor(private val context: Context) {
             "D" -> RAW_GEAR_D
             else -> return
         }
-        Log.i(TAG, "🧪 模拟切档触发: $label (raw=$raw)")
+        AppLogger.i(TAG, "🧪 模拟切档触发: $label (raw=$raw)")
         notifyGearInternal(label, raw, debounceN = true)
     }
 
     fun simulateRawGear(rawGear: Int) {
         if (isValidGear(rawGear)) {
             val label = toGearLabel(rawGear)
-            Log.i(TAG, "🧪 模拟 Raw 档位触发: raw=$rawGear -> $label")
+            AppLogger.i(TAG, "🧪 模拟 Raw 档位触发: raw=$rawGear -> $label")
             notifyGearInternal(label, rawGear, debounceN = true)
         }
     }
@@ -424,13 +435,13 @@ class CarGearManager private constructor(private val context: Context) {
             MODE_RACE -> 5
             else -> 4
         }
-        Log.i(TAG, "🧪 模拟驾驶模式触发: $mode (raw=$raw)")
+        AppLogger.i(TAG, "🧪 模拟驾驶模式触发: $mode (raw=$raw)")
         notifyDriveModeInternal(mode, raw)
     }
 
     fun simulateRawDriveMode(rawMode: Int) {
         val mode = toDriveMode(rawMode)
-        Log.i(TAG, "🧪 模拟 Raw 驾驶模式触发: raw=$rawMode -> $mode")
+        AppLogger.i(TAG, "🧪 模拟 Raw 驾驶模式触发: raw=$rawMode -> $mode")
         notifyDriveModeInternal(mode, rawMode)
     }
 
@@ -442,10 +453,10 @@ class CarGearManager private constructor(private val context: Context) {
             // N 档意图确认窗口 (车规级过路档抑制算法: 250ms 防抖)
             // 揉库 (D <-> R) 或快速 P -> D 切档时，总线瞬态经过 N 档在此窗口内被暂扣，不打扰全屏 3D 翻转
             pendingNRunnable?.let { mainHandler.removeCallbacks(it) }
-            Log.d(TAG, "⏳ 收到 N 档信号，启动 ${TRANSIT_N_DEBOUNCE_MS}ms 意图确认窗口 (防揉库闪屏)...")
+            AppLogger.d(TAG, "⏳ 收到 N 档信号，启动 ${TRANSIT_N_DEBOUNCE_MS}ms 意图确认窗口 (防揉库闪屏)...")
             pendingNRaw = raw
             val runnable = Runnable {
-                Log.i(TAG, "⏱️ N 档停留已达 ${TRANSIT_N_DEBOUNCE_MS}ms，确认为真实挂入空档，执行调度")
+                AppLogger.i(TAG, "⏱️ N 档停留已达 ${TRANSIT_N_DEBOUNCE_MS}ms，确认为真实挂入空档，执行调度")
                 pendingNRunnable = null
                 notifyGearDirect("N", pendingNRaw)
             }
@@ -459,7 +470,7 @@ class CarGearManager private constructor(private val context: Context) {
         if (pendingNRunnable != null) {
             mainHandler.removeCallbacks(pendingNRunnable!!)
             pendingNRunnable = null
-            Log.i(TAG, "🚦 检测到快速切档到非 N 档 ($label)，成功抑制过路 N 档，直通调度: $label 档")
+            AppLogger.i(TAG, "🚦 检测到快速切档到非 N 档 ($label)，成功抑制过路 N 档，直通调度: $label 档")
         }
 
         notifyGearDirect(label, raw)

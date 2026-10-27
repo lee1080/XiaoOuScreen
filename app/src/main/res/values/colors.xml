@@ -8,4 +8,5 @@
     <color name="background_dark">#FF000000</color>
     <color name="accent_orange">#FFFF6900</color>
     <color name="lyric_current">#FFFFD700</color>
+    <color name="ic_launcher_background">#BFE0FA</color>
 </resources>

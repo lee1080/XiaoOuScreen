@@ -27,17 +27,18 @@ import com.carlyrics.util.CoverColorUtil
 import com.carlyrics.util.LyricsCacheManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class LyricsDisplayView(context: Context) : LyricsSkin(context) {
 
     companion object {
-        private const val CURRENT_SCALE = 1.35f
+        private const val CURRENT_SCALE = 1.8f
         private const val NORMAL_ALPHA = 0.85f
-        const val DEFAULT_FONT_SIZE_SP = 38f
-        const val MIN_FONT_SIZE_SP = 26f
-        const val MAX_FONT_SIZE_SP = 50f
+        const val DEFAULT_FONT_SIZE_SP = 92f
+        const val MIN_FONT_SIZE_SP = 30f
+        const val MAX_FONT_SIZE_SP = 160f
     }
 
     // ==================== 可调参数 ====================
@@ -94,7 +95,7 @@ class LyricsDisplayView(context: Context) : LyricsSkin(context) {
         typeface = Typeface.DEFAULT_BOLD
         letterSpacing = -0.015f
         gravity = Gravity.CENTER
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp * CURRENT_SCALE)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp)
         setShadowLayer(dp(12).toFloat(), 0f, 0f, Color.parseColor("#80FF4081"))
     }
 
@@ -254,7 +255,7 @@ class LyricsDisplayView(context: Context) : LyricsSkin(context) {
                 setTextColor(Color.parseColor("#FF111111"))
                 alpha = NORMAL_ALPHA
                 gravity = Gravity.START
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp / CURRENT_SCALE)
                 letterSpacing = 0.01f
                 setPadding(dp(16), dp(10), dp(16), dp(10))
                 setShadowLayer(2f, 0f, 1f, Color.parseColor("#15000000"))
@@ -312,7 +313,7 @@ class LyricsDisplayView(context: Context) : LyricsSkin(context) {
             lyLineViews[currentIndex].apply {
                 com.carlyrics.skin.KaraokeHelper.resetKaraoke(this, lyricLines[currentIndex].text)
                 alpha = NORMAL_ALPHA
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp / CURRENT_SCALE)
                 setTextColor(Color.parseColor("#FF111111"))
                 letterSpacing = 0.01f
                 background = null
@@ -324,7 +325,7 @@ class LyricsDisplayView(context: Context) : LyricsSkin(context) {
         if (currentIndex in lyLineViews.indices) {
             lyLineViews[currentIndex].apply {
                 alpha = 1f
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp * CURRENT_SCALE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp)
                 setTextColor(Color.parseColor("#FFFF4081"))
                 typeface = Typeface.DEFAULT_BOLD
                 letterSpacing = -0.015f
@@ -389,13 +390,14 @@ class LyricsDisplayView(context: Context) : LyricsSkin(context) {
     // ==================== 内部 ====================
 
     private fun refreshFontSize() {
-        noLyricsText.setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp * CURRENT_SCALE)
+        noLyricsText.setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp)
+        val normalSize = fontSizeSp / CURRENT_SCALE
         lyLineViews.forEach { tv ->
-            tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp)
+            tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, normalSize)
         }
         // 重新高亮当前行
         if (currentIndex in lyLineViews.indices) {
-            lyLineViews[currentIndex].setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp * CURRENT_SCALE)
+            lyLineViews[currentIndex].setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp)
         }
     }
 
@@ -496,5 +498,15 @@ class LyricsDisplayView(context: Context) : LyricsSkin(context) {
             value.toFloat(),
             resources.displayMetrics
         ).toInt()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        uiScope.cancel()
+    }
+
+    override fun onDetachedFromWindow() {
+        onDestroy()
+        super.onDetachedFromWindow()
     }
 }

@@ -200,6 +200,12 @@ class CarSubscreenActivity : AppCompatActivity(),
                         bottomLeftGearHudView.bringToFront()
                     }
                 }
+                WeatherOverlayService.ACTION_UPDATE_XIAOOU_AVATAR -> {
+                    val enabled = intent.getBooleanExtra(WeatherOverlayService.EXTRA_XIAOOU_AVATAR_ENABLED, PrefsManager.isXiaoOuAvatarEnabled())
+                    Log.i(TAG, "📡 副屏预览收到小欧形象避让状态变更: enabled=$enabled")
+                    weatherCanvasView.setXiaoOuAvoidance(enabled)
+                    lyricsContainerView.xiaoOuAvoidanceEnabled = enabled
+                }
                 WeatherOverlayService.ACTION_UPDATE_LYRICS_SETTINGS -> {
                     Log.i(TAG, "📡 副屏预览收到歌词设置/预设变更广播，立即同步运行时状态")
                     val shouldAvoid = PrefsManager.isXiaoOuAvoidanceEnabled()
@@ -257,7 +263,7 @@ class CarSubscreenActivity : AppCompatActivity(),
             weatherCanvasView.weatherHudLeftX
         }
         weatherCanvasView.onSceneRenderUpdated = {
-            bottomLeftGearHudView.invalidate()
+            bottomLeftGearHudView.invalidateBackground()
         }
         bottomLeftGearHudView.setHudEnabled(PrefsManager.isBottomLeftGearHudEnabled(), animate = false)
         bottomLeftGearHudView.bringToFront()
@@ -294,6 +300,7 @@ class CarSubscreenActivity : AppCompatActivity(),
             addAction(WeatherOverlayService.ACTION_CALL_EVENT)
             addAction(WeatherOverlayService.ACTION_UPDATE_LIQUID_GLASS)
             addAction(WeatherOverlayService.ACTION_UPDATE_BOTTOM_LEFT_GEAR_HUD)
+            addAction(WeatherOverlayService.ACTION_UPDATE_XIAOOU_AVATAR)
             addAction(WeatherOverlayService.ACTION_UPDATE_LYRICS_SETTINGS)
             addAction(WeatherOverlayService.ACTION_SIMULATE_MUSIC)
         }
@@ -491,6 +498,7 @@ class CarSubscreenActivity : AppCompatActivity(),
 
     private fun fetchLyricsAndCover(title: String, artist: String) {
         lyricsFetchJob?.cancel()
+        lyricsApi.cancelAllRequests()
         lyricsContainerView.setTrackInfo(title, artist)
 
         lyricsFetchJob = lifecycleScope.launch(Dispatchers.IO) {
@@ -520,6 +528,10 @@ class CarSubscreenActivity : AppCompatActivity(),
         lyricsProgressJob?.cancel()
         lyricsProgressJob = lifecycleScope.launch {
             while (isActive && isMusicPlaying) {
+                if (currentPage != ActivePage.LYRICS) {
+                    delay(200L)
+                    continue
+                }
                 val now = System.nanoTime()
                 val deltaMs = ((now - lastPositionNanos) / 1_000_000L).coerceAtLeast(0L)
                 val currentPos = lastKnownPosition + deltaMs
@@ -662,6 +674,25 @@ class CarSubscreenActivity : AppCompatActivity(),
                 )
     }
 
+    override fun onResume() {
+        super.onResume()
+        hideSystemUi()
+        weatherCanvasView.resumeAnimation()
+        if (currentPage == ActivePage.LYRICS) {
+            lyricsContainerView.resume()
+            if (isMusicPlaying) {
+                startLyricsProgressTicker()
+            }
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        weatherCanvasView.pauseAnimation()
+        lyricsContainerView.pause()
+        lyricsProgressJob?.cancel()
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         try {
@@ -672,6 +703,9 @@ class CarSubscreenActivity : AppCompatActivity(),
         CarCallManager.getInstance(this).removeListener(callListener)
         autoHideHandler.removeCallbacks(hideCloseRunnable)
         mainHandler.removeCallbacks(fallbackToWeatherRunnable)
+        bottomLeftGearHudView.backgroundProvider = null
+        bottomLeftGearHudView.weatherLeftProvider = null
+        weatherCanvasView.onSceneRenderUpdated = null
         lyricsProgressJob?.cancel()
         lyricsFetchJob?.cancel()
         viewModel.stop()

@@ -145,7 +145,7 @@ class SkinVinylPlayer(context: Context) : LyricsSkin(context) {
         }
         noLyricsText = GradientTV(context).apply {
             text = "等待播放音乐..."
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp * 1.35f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp)
             setTextColor(Color.WHITE)
             typeface = Typeface.DEFAULT_BOLD
             letterSpacing = -0.015f
@@ -338,7 +338,7 @@ class SkinVinylPlayer(context: Context) : LyricsSkin(context) {
             }
             val tv = GradientTV(context).apply {
                 text = it.text; setTextColor(Color.parseColor("#FFFFFF"))
-                alpha = 1f; setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp)
+                alpha = 1f; setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp / CURRENT_SCALE)
                 letterSpacing = 0.01f
                 setPadding(dp(2), dp(8), dp(12), dp(8))
                 maxLines = if (marqueeEnabled) 1 else Integer.MAX_VALUE; ellipsize = null
@@ -381,14 +381,14 @@ class SkinVinylPlayer(context: Context) : LyricsSkin(context) {
 
         if (currentIndex in lyLineViews.indices) lyLineViews[currentIndex].apply {
             KaraokeHelper.resetKaraoke(this, lyricLines[currentIndex].text)
-            alpha = 1f; setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp)
+            alpha = 1f; setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp / CURRENT_SCALE)
             setTextColor(Color.parseColor("#FFFFFF")); typeface = Typeface.DEFAULT_BOLD
             letterSpacing = 0.01f
             gradientStart = null; clearTextShader()
         }
         currentIndex = target
         if (currentIndex in lyLineViews.indices) lyLineViews[currentIndex].apply {
-            alpha = 1f; setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp * CURRENT_SCALE)
+            alpha = 1f; setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp)
             typeface = Typeface.DEFAULT_BOLD; letterSpacing = -0.015f
             clearTextShader()
             val nextTs = lyricLines.getOrNull(currentIndex + 1)?.timestamp
@@ -408,8 +408,9 @@ class SkinVinylPlayer(context: Context) : LyricsSkin(context) {
     override fun setPlaceholderText(text: String) { noLyricsText.text = text }
 
     override fun onFontSizeChanged(sp: Float) {
+        noLyricsText.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp)
         lyLineViews.forEachIndexed { i, tv ->
-            tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (i == currentIndex) sp * CURRENT_SCALE else sp)
+            tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (i == currentIndex) sp else sp / CURRENT_SCALE)
         }
     }
 

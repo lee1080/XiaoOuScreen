@@ -51,8 +51,8 @@ class CarBottomLeftGearHudView @JvmOverloads constructor(
         private const val LOGICAL_WIDTH = 1920f
         private const val LOGICAL_HEIGHT = 384f
 
-        // 槽体几何尺寸 (整体放大 120%: 288×60px)
-        const val DEFAULT_SLOT_LEFT = 185f // 严格与天气面板文字最左边 (hudStartX) 像素级对齐
+        // 槽体几何尺寸 (整体 288×60px，在小欧屏可用最左侧 130px 与天气面板最右侧 535px 之间水平居中：130 + (405 - 288)/2 = 188.5px)
+        const val DEFAULT_SLOT_LEFT = 188.5f
         private const val SLOT_WIDTH = 288f
         private const val SLOT_HEIGHT = 60f
         private const val SLOT_TOP = 314f
@@ -129,6 +129,16 @@ class CarBottomLeftGearHudView @JvmOverloads constructor(
     private val glassPixels = IntArray(GLASS_BUFFER_W * GLASS_BUFFER_H)
     private val glassPixelsTemp = IntArray(GLASS_BUFFER_W * GLASS_BUFFER_H)
     private val glassSrcRect = Rect(0, 0, GLASS_BUFFER_W, GLASS_BUFFER_H)
+    private var isBackgroundDirty = true
+    private var lastGlassBlurUpdateTime = 0L
+
+    /**
+     * 标记背景为脏，提示下次绘制时重新捕获并模糊背景
+     */
+    fun invalidateBackground() {
+        isBackgroundDirty = true
+        invalidate()
+    }
 
     // ==========================================
     // 画笔定义 (严格与大时间液态玻璃效果 100% 统一)
@@ -221,6 +231,7 @@ class CarBottomLeftGearHudView @JvmOverloads constructor(
         slotPath.addRoundRect(slotRect, SLOT_RADIUS, SLOT_RADIUS, Path.Direction.CW)
 
         setupShaders()
+        isBackgroundDirty = true
         // 关键：由于 capsuleOffset 采用槽内相对坐标，当外部天气面板文字宽度变动自适应推拉槽体时，
         // 胶囊自然同步跟随整体平移，绝对不再打断飞行中动画或造成偏心！
     }
@@ -459,30 +470,38 @@ class CarBottomLeftGearHudView @JvmOverloads constructor(
     }
 
     /**
-     * 2. 绘制局部磨砂玻璃背景 (28px 快速盒式模糊 + 170% 饱和度 + 严格清屏避免旧色残留)
+     * 2. 绘制局部磨砂玻璃背景 (28px 快速盒式模糊 + 170% 饱和度 + 节流复用，避免切档动画 60fps 重复模糊)
      */
     private fun drawFrostedGlassBackground(canvas: Canvas) {
         val provider = backgroundProvider ?: return
         canvas.save()
         canvas.clipPath(slotPath)
 
-        // 关键：清空缓冲脏数据，防止白天冷蓝像素残留至黄昏/夜晚
-        glassBgCanvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
+        val nowMs = android.os.SystemClock.uptimeMillis()
+        val isSlidingAnim = slideAnimator?.isRunning == true
+        // 切档滑移动画执行期间暂缓盒式模糊重算，直接复用当前快照，保证 60FPS 满帧无卡顿
+        if (!isSlidingAnim && (isBackgroundDirty || lastGlassBlurUpdateTime == 0L || (nowMs - lastGlassBlurUpdateTime >= 350L))) {
+            lastGlassBlurUpdateTime = nowMs
+            isBackgroundDirty = false
 
-        // 抓取底层实时天气到 4x 降采样缓冲
-        glassBgCanvas.save()
-        glassBgCanvas.scale(
-            GLASS_BUFFER_W / slotRect.width(),
-            GLASS_BUFFER_H / slotRect.height()
-        )
-        glassBgCanvas.translate(-slotRect.left, -slotRect.top)
-        provider.invoke(glassBgCanvas, slotRect)
-        glassBgCanvas.restore()
+            // 关键：清空缓冲脏数据，防止白天冷蓝像素残留至黄昏/夜晚
+            glassBgCanvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
 
-        // 执行 28px 快速盒式模糊 (半径 7 * 4x = 28px，严格等效大时间)
-        glassBgBitmap.getPixels(glassPixels, 0, GLASS_BUFFER_W, 0, 0, GLASS_BUFFER_W, GLASS_BUFFER_H)
-        fastBoxBlur(glassPixels, glassPixelsTemp, GLASS_BUFFER_W, GLASS_BUFFER_H, 7)
-        glassBgBitmap.setPixels(glassPixels, 0, GLASS_BUFFER_W, 0, 0, GLASS_BUFFER_W, GLASS_BUFFER_H)
+            // 抓取底层实时天气到 4x 降采样缓冲
+            glassBgCanvas.save()
+            glassBgCanvas.scale(
+                GLASS_BUFFER_W / slotRect.width(),
+                GLASS_BUFFER_H / slotRect.height()
+            )
+            glassBgCanvas.translate(-slotRect.left, -slotRect.top)
+            provider.invoke(glassBgCanvas, slotRect)
+            glassBgCanvas.restore()
+
+            // 执行 28px 快速盒式模糊 (半径 7 * 4x = 28px，严格等效大时间)
+            glassBgBitmap.getPixels(glassPixels, 0, GLASS_BUFFER_W, 0, 0, GLASS_BUFFER_W, GLASS_BUFFER_H)
+            fastBoxBlur(glassPixels, glassPixelsTemp, GLASS_BUFFER_W, GLASS_BUFFER_H, 7)
+            glassBgBitmap.setPixels(glassPixels, 0, GLASS_BUFFER_W, 0, 0, GLASS_BUFFER_W, GLASS_BUFFER_H)
+        }
 
         // 绘制模糊后的高饱和背景 (饱和度 170%)
         canvas.drawBitmap(glassBgBitmap, glassSrcRect, slotRect, glassBitmapPaint)
@@ -677,5 +696,15 @@ class CarBottomLeftGearHudView @JvmOverloads constructor(
                 bSum += (pBottom and 0xFF) - (pTop and 0xFF)
             }
         }
+    }
+
+    override fun onDetachedFromWindow() {
+        super.onDetachedFromWindow()
+        slideAnimator?.cancel()
+        slideAnimator = null
+        fadeAnimator?.cancel()
+        fadeAnimator = null
+        backgroundProvider = null
+        weatherLeftProvider = null
     }
 }

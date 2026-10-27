@@ -112,7 +112,7 @@ class SkinGlassmorphism(context: Context) : LyricsSkin(context) {
         }
         artistText = com.carlyrics.display.BouncingTitleView(context).apply {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            typeface = Typeface.create(Typeface.DEFAULT, 600)
+            typeface = com.car.xiaoouscreen.util.HmiFontManager.getWeightedTypeface(600, fallbackBold = true)
             setTextColor(ARTIST_COLOR)
             gravity = Gravity.START or Gravity.CENTER_VERTICAL
             letterSpacing = 0.02f
@@ -136,7 +136,7 @@ class SkinGlassmorphism(context: Context) : LyricsSkin(context) {
         }
         noLyricsText = GradientTextView(context).apply {
             text = "等待播放音乐..."
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp * CURRENT_SCALE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp)
             setTextColor(Color.WHITE)
             typeface = Typeface.DEFAULT_BOLD
             letterSpacing = -0.015f
@@ -255,7 +255,7 @@ class SkinGlassmorphism(context: Context) : LyricsSkin(context) {
             }
             val tv = GradientTextView(context).apply {
                 text = it.text; setTextColor(LYRIC_NORMAL_COLOR)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp); typeface = Typeface.DEFAULT_BOLD
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp / CURRENT_SCALE); typeface = Typeface.DEFAULT_BOLD
                 letterSpacing = 0.01f
                 setPadding(dp(16), dp(8), dp(16), dp(8))
                 gravity = align; maxLines = if (marqueeEnabled) 1 else Integer.MAX_VALUE; ellipsize = null
@@ -298,14 +298,14 @@ class SkinGlassmorphism(context: Context) : LyricsSkin(context) {
 
         if (currentIndex in lyLineViews.indices) lyLineViews[currentIndex].apply {
             KaraokeHelper.resetKaraoke(this, lyricLines[currentIndex].text)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp); setTextColor(LYRIC_NORMAL_COLOR)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp / CURRENT_SCALE); setTextColor(LYRIC_NORMAL_COLOR)
             gradientStart = null; typeface = Typeface.DEFAULT_BOLD
             letterSpacing = 0.01f
             clearTextShader(); setShadowLayer(0f, 0f, 0f, 0)
         }
         currentIndex = target
         if (currentIndex in lyLineViews.indices) lyLineViews[currentIndex].apply {
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp * CURRENT_SCALE); typeface = Typeface.DEFAULT_BOLD
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp); typeface = Typeface.DEFAULT_BOLD
             letterSpacing = -0.015f
             setTextColor(Color.WHITE)
             setShadowLayer(0f, 0f, 0f, 0)
@@ -329,9 +329,9 @@ class SkinGlassmorphism(context: Context) : LyricsSkin(context) {
     }
 
     override fun onFontSizeChanged(sp: Float) {
-        noLyricsText.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp * CURRENT_SCALE)
+        noLyricsText.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp)
         lyLineViews.forEachIndexed { i, tv ->
-            tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (i == currentIndex) sp * CURRENT_SCALE else sp)
+            tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (i == currentIndex) sp else sp / CURRENT_SCALE)
         }
     }
 

@@ -64,14 +64,12 @@ object PrefsManager {
     // ----- Skin -----
     fun getSkinType(): SkinType {
         val name = get().getString(KEY_SKIN_TYPE, SkinType.DEFAULT.name) ?: SkinType.DEFAULT.name
-        val result = try { SkinType.valueOf(name) } catch (_: Exception) { SkinType.DEFAULT }
-        AppLogger.d(TAG, "getSkinType: $result (raw=$name)")
-        return result
+        return try { SkinType.valueOf(name) } catch (_: Exception) { SkinType.DEFAULT }
     }
 
     fun setSkinType(type: SkinType) {
         AppLogger.d(TAG, "setSkinType: $type")
-        get().edit().putString(KEY_SKIN_TYPE, type.name).commit()
+        get().edit().putString(KEY_SKIN_TYPE, type.name).apply()
     }
 
     /**
@@ -89,65 +87,58 @@ object PrefsManager {
 
     // ----- Font Size -----
     fun getFontSizeSp(): Float {
-        val value = get().getFloat(KEY_FONT_SIZE_SP, 38f)
-        AppLogger.d(TAG, "getFontSizeSp: $value")
-        return value
+        return get().getFloat(KEY_FONT_SIZE_SP, 88f)
     }
 
     fun setFontSizeSp(sp: Float) {
         AppLogger.d(TAG, "setFontSizeSp: $sp")
-        get().edit().putFloat(KEY_FONT_SIZE_SP, sp).commit()
+        get().edit().putFloat(KEY_FONT_SIZE_SP, sp).apply()
     }
 
     // ----- Horizontal Offset -----
     fun getHorizontalOffset(): Float {
-        val value = get().getFloat(KEY_HORIZONTAL_OFFSET, 0f)
-        AppLogger.d(TAG, "getHorizontalOffset: $value")
-        return value
+        return get().getFloat(KEY_HORIZONTAL_OFFSET, 0f)
     }
 
     fun setHorizontalOffset(ratio: Float) {
         AppLogger.d(TAG, "setHorizontalOffset: $ratio")
-        get().edit().putFloat(KEY_HORIZONTAL_OFFSET, ratio).commit()
+        get().edit().putFloat(KEY_HORIZONTAL_OFFSET, ratio).apply()
     }
 
     // ----- Split Ratio -----
     fun getSplitRatio(): Float {
-        val defaultVal = getSkinType().defaultParams.splitRatio
-        val value = get().getFloat(KEY_SPLIT_RATIO, defaultVal)
-        AppLogger.d(TAG, "getSplitRatio: $value")
-        return value
+        val defaultVal = 0.25f
+        return get().getFloat(KEY_SPLIT_RATIO, defaultVal)
     }
 
     fun setSplitRatio(ratio: Float) {
         AppLogger.d(TAG, "setSplitRatio: $ratio")
-        get().edit().putFloat(KEY_SPLIT_RATIO, ratio).commit()
+        get().edit().putFloat(KEY_SPLIT_RATIO, ratio).apply()
     }
 
-    // ----- Lyrics Alignment -----
+    // ----- Lyrics Alignment (动感波浪居中，其余皮肤全量左对齐) -----
     fun getLyricsAlignment(): Int {
-        val defaultVal = getSkinType().defaultParams.lyricsAlignment
-        val value = get().getInt(KEY_LYRICS_ALIGNMENT, defaultVal)
-        AppLogger.d(TAG, "getLyricsAlignment: $value")
-        return value
+        val skin = getSkinType()
+        return if (skin == com.carlyrics.skin.SkinType.VIBRANT_WAVE) {
+            android.view.Gravity.CENTER
+        } else {
+            android.view.Gravity.START or android.view.Gravity.CENTER_VERTICAL
+        }
     }
 
     fun setLyricsAlignment(alignment: Int) {
         AppLogger.d(TAG, "setLyricsAlignment: $alignment")
-        get().edit().putInt(KEY_LYRICS_ALIGNMENT, alignment).commit()
+        get().edit().putInt(KEY_LYRICS_ALIGNMENT, alignment).apply()
     }
 
-    // ----- Marquee Enabled -----
+    // ----- Marquee Enabled (默认恒定开启) -----
     fun isMarqueeEnabled(): Boolean {
-        val defaultVal = getSkinType().defaultParams.marqueeEnabled
-        val value = get().getBoolean(KEY_MARQUEE_ENABLED, defaultVal)
-        AppLogger.d(TAG, "isMarqueeEnabled: $value")
-        return value
+        return true
     }
 
     fun setMarqueeEnabled(enabled: Boolean) {
         AppLogger.d(TAG, "setMarqueeEnabled: $enabled")
-        get().edit().putBoolean(KEY_MARQUEE_ENABLED, enabled).commit()
+        get().edit().putBoolean(KEY_MARQUEE_ENABLED, enabled).apply()
     }
 
     // ----- Overlay Size -----
@@ -160,7 +151,7 @@ object PrefsManager {
     }
 
     fun setOverlaySize(width: Int, height: Int) {
-        get().edit().putInt(KEY_OVERLAY_WIDTH, width).putInt(KEY_OVERLAY_HEIGHT, height).commit()
+        get().edit().putInt(KEY_OVERLAY_WIDTH, width).putInt(KEY_OVERLAY_HEIGHT, height).apply()
     }
 
     // ----- Target Display -----
@@ -169,7 +160,7 @@ object PrefsManager {
     }
 
     fun setTargetDisplayId(id: Int) {
-        get().edit().putInt(KEY_TARGET_DISPLAY_ID, id).commit()
+        get().edit().putInt(KEY_TARGET_DISPLAY_ID, id).apply()
     }
 
     // ----- API URLs & Key -----
@@ -181,7 +172,7 @@ object PrefsManager {
     }
 
     fun setLyricsApiUrl(url: String) {
-        get().edit().putString(KEY_LYRICS_API_URL, url).commit()
+        get().edit().putString(KEY_LYRICS_API_URL, url).apply()
     }
 
     fun getCoverApiUrl(): String {
@@ -189,7 +180,7 @@ object PrefsManager {
     }
 
     fun setCoverApiUrl(url: String) {
-        get().edit().putString(KEY_COVER_API_URL, url).commit()
+        get().edit().putString(KEY_COVER_API_URL, url).apply()
     }
 
     fun getApiKey(): String {
@@ -197,7 +188,7 @@ object PrefsManager {
     }
 
     fun setApiKey(key: String) {
-        get().edit().putString(KEY_API_KEY, key).commit()
+        get().edit().putString(KEY_API_KEY, key).apply()
     }
 
     fun isTransparentWhenIdleEnabled(): Boolean {
@@ -205,20 +196,18 @@ object PrefsManager {
     }
 
     fun setTransparentWhenIdleEnabled(enabled: Boolean) {
-        get().edit().putBoolean(KEY_TRANSPARENT_WHEN_IDLE, enabled).commit()
+        get().edit().putBoolean(KEY_TRANSPARENT_WHEN_IDLE, enabled).apply()
     }
 
-    // ----- DPI Scale -----
+    // ----- DPI Scale (封面缩放默认 85%) -----
     fun getDpiScale(): Float {
-        val defaultVal = getSkinType().defaultParams.displayScale
-        val value = get().getFloat(KEY_DISPLAY_SCALE, defaultVal)
-        AppLogger.d(TAG, "getDpiScale: $value")
-        return value
+        val defaultVal = 0.85f
+        return get().getFloat(KEY_DISPLAY_SCALE, defaultVal)
     }
 
     fun setDpiScale(scale: Float) {
         AppLogger.d(TAG, "setDpiScale: $scale")
-        get().edit().putFloat(KEY_DISPLAY_SCALE, scale).commit()
+        get().edit().putFloat(KEY_DISPLAY_SCALE, scale).apply()
     }
 
     // ----- Cache -----
@@ -227,16 +216,16 @@ object PrefsManager {
     }
 
     fun setCacheMaxSizeMb(mb: Int) {
-        get().edit().putInt(KEY_CACHE_MAX_SIZE_MB, mb).commit()
+        get().edit().putInt(KEY_CACHE_MAX_SIZE_MB, mb).apply()
     }
 
-    // ----- Info Font Scale -----
+    // ----- Info Font Scale (歌名字号默认 27px，基准为22px) -----
     fun getInfoFontScale(): Float {
-        return get().getFloat(KEY_INFO_FONT_SCALE, 1.0f)
+        return get().getFloat(KEY_INFO_FONT_SCALE, 27f / 22f)
     }
 
     fun setInfoFontScale(scale: Float) {
-        get().edit().putFloat(KEY_INFO_FONT_SCALE, scale).commit()
+        get().edit().putFloat(KEY_INFO_FONT_SCALE, scale).apply()
     }
 
     // ----- Overlay Visible -----
@@ -245,23 +234,23 @@ object PrefsManager {
     }
 
     fun setOverlayVisible(visible: Boolean) {
-        get().edit().putBoolean(KEY_OVERLAY_VISIBLE, visible).commit()
+        get().edit().putBoolean(KEY_OVERLAY_VISIBLE, visible).apply()
     }
 
     // ----- Lyrics Time Offset -----
     var lyricsOffsetMs: Long
         get() = get().getLong(KEY_LYRICS_OFFSET_MS, 0L)
         set(value) {
-            get().edit().putLong(KEY_LYRICS_OFFSET_MS, value).commit()
+            get().edit().putLong(KEY_LYRICS_OFFSET_MS, value).apply()
         }
 
     // ----- Auto Start on Boot -----
     fun isAutoStartBoot(): Boolean {
-        return get().getBoolean(KEY_AUTO_START_BOOT, false)
+        return get().getBoolean(KEY_AUTO_START_BOOT, true)
     }
 
     fun setAutoStartBoot(enabled: Boolean) {
-        get().edit().putBoolean(KEY_AUTO_START_BOOT, enabled).commit()
+        get().edit().putBoolean(KEY_AUTO_START_BOOT, enabled).apply()
     }
 
     // ----- Cluster Display Area Adjustment -----
@@ -277,7 +266,7 @@ object PrefsManager {
             .putInt(KEY_DISPLAY_AREA_TOP, top)
             .putInt(KEY_DISPLAY_AREA_RIGHT, right)
             .putInt(KEY_DISPLAY_AREA_BOTTOM, bottom)
-            .commit()
+            .apply()
     }
 
     // ----- 日志记录开关 (默认关闭 false) -----
@@ -289,30 +278,39 @@ object PrefsManager {
     // ----- 偏好源 (auto/qq/netease/kugou/kuwo) -----
     fun getPreferredLyricsSource(): String = get().getString(KEY_PREFERRED_LYRICS_SOURCE, "auto") ?: "auto"
     fun setPreferredLyricsSource(source: String) {
-        get().edit().putString(KEY_PREFERRED_LYRICS_SOURCE, source).commit()
+        get().edit().putString(KEY_PREFERRED_LYRICS_SOURCE, source).apply()
     }
 
     // ----- 独立车载歌词总开关 (开启后播放音乐全屏显示，暂停或未播放 5s 平滑回退时间天气) -----
-    fun isStandaloneLyricsEnabled(): Boolean = get().getBoolean(KEY_STANDALONE_LYRICS_ENABLED, true)
+    fun isStandaloneLyricsEnabled(): Boolean = get().getBoolean(KEY_STANDALONE_LYRICS_ENABLED, false)
     fun setStandaloneLyricsEnabled(enabled: Boolean) {
         get().edit().putBoolean(KEY_STANDALONE_LYRICS_ENABLED, enabled).apply()
     }
 
-    // ----- 小欧3D形象避让开关 (投屏在小欧下方时避让右侧500px，投屏在小欧上方时不避让或根据配置自适应，默认 true) -----
+    // ----- 小欧3D形象避让/显示开关 (开启=小欧下方Mode.FITNESS且避让右侧，关闭=小欧上方Mode.TOP覆盖全屏，默认 true) -----
     fun isXiaoOuAvoidanceEnabled(): Boolean = get().getBoolean(KEY_XIAOOU_AVOIDANCE_ENABLED, true)
     fun setXiaoOuAvoidanceEnabled(enabled: Boolean) {
-        get().edit().putBoolean(KEY_XIAOOU_AVOIDANCE_ENABLED, enabled).commit()
+        get().edit().putBoolean(KEY_XIAOOU_AVOIDANCE_ENABLED, enabled).apply()
     }
+    fun isXiaoOuAvatarEnabled(): Boolean = isXiaoOuAvoidanceEnabled()
+    fun setXiaoOuAvatarEnabled(enabled: Boolean) = setXiaoOuAvoidanceEnabled(enabled)
 
     // ----- 中央大时间液态玻璃质感总开关 (28px模糊/170%饱和度/10%白底叠层/1px边缘厚度与折射) -----
     fun isLiquidGlassClockEnabled(): Boolean = get().getBoolean(KEY_LIQUID_GLASS_CLOCK_ENABLED, false)
     fun setLiquidGlassClockEnabled(enabled: Boolean) {
-        get().edit().putBoolean(KEY_LIQUID_GLASS_CLOCK_ENABLED, enabled).commit()
+        get().edit().putBoolean(KEY_LIQUID_GLASS_CLOCK_ENABLED, enabled).apply()
     }
 
     // ----- 左下角常驻档位液态玻璃 HUD 开关 (置顶显示 R·N·D·P 独立微型玻璃指示器，默认开启) -----
     fun isBottomLeftGearHudEnabled(): Boolean = get().getBoolean(KEY_BOTTOM_LEFT_GEAR_HUD_ENABLED, true)
     fun setBottomLeftGearHudEnabled(enabled: Boolean) {
-        get().edit().putBoolean(KEY_BOTTOM_LEFT_GEAR_HUD_ENABLED, enabled).commit()
+        get().edit().putBoolean(KEY_BOTTOM_LEFT_GEAR_HUD_ENABLED, enabled).apply()
+    }
+
+    // ----- 最新实况天气场景持久化缓存 (冷启动首帧直接加载，杜绝默认晴朗20°跳变) -----
+    private const val KEY_LAST_WEATHER_SCENE_JSON = "key_last_weather_scene_json"
+    fun getLastWeatherSceneJson(): String? = get().getString(KEY_LAST_WEATHER_SCENE_JSON, null)
+    fun setLastWeatherSceneJson(json: String) {
+        get().edit().putString(KEY_LAST_WEATHER_SCENE_JSON, json).apply()
     }
 }

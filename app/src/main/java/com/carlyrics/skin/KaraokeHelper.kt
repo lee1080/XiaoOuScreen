@@ -119,7 +119,7 @@ object KaraokeHelper {
     )
 
     /**
-     * KTV 经典从左至右逐字平滑渐变擦除着色器 (基于 LinearGradient 硬件加速)
+     * KTV 经典从左至右逐字平滑渐变擦除着色器 (基于 LinearGradient + Matrix 本地坐标变换，实现 60FPS 零 GC)
      */
     class KaraokeLineWipeSpan(
         var startX: Float,
@@ -129,6 +129,13 @@ object KaraokeHelper {
         var activeColor: Int,
         var upcomingColor: Int
     ) : CharacterStyle(), UpdateAppearance {
+        private val localMatrix = android.graphics.Matrix()
+        private var baseShader: LinearGradient? = null
+        private var lastSung = 0
+        private var lastActive = 0
+        private var lastUpcoming = 0
+        private val featherPx = 8.0f
+
         override fun updateDrawState(tp: TextPaint) {
             val span = (endX - startX).coerceAtLeast(1f)
             val r = ((wipeX - startX) / span).coerceIn(0f, 1f)
@@ -148,55 +155,50 @@ object KaraokeHelper {
             tp.color = Color.WHITE
             tp.alpha = 255
 
-            // 边缘平滑羽化高亮宽度 (展开至 8.0 像素软光束，呈现丝滑纯净的 KTV 渐变扫光效果)
-            val feather = (8.0f / span).coerceIn(0.002f, 0.05f)
-            val p1 = r.coerceIn(0f, 1f)
-            val p0 = (p1 - feather).coerceAtLeast(0f)
-            val p2 = (p1 + feather).coerceAtMost(1f)
+            // 车规级零 GC 关键：构建基准羽化 Shader [sungColor -> activeColor -> upcomingColor]
+            // TileMode.CLAMP 使得 x < 0 自动取 sungColor，x > 2*feather 自动取 upcomingColor
+            if (baseShader == null || sungColor != lastSung || activeColor != lastActive || upcomingColor != lastUpcoming) {
+                val colors = intArrayOf(sungColor, activeColor, upcomingColor)
+                val positions = floatArrayOf(0f, 0.5f, 1f)
+                baseShader = LinearGradient(
+                    0f, 0f, featherPx * 2f, 0f,
+                    colors,
+                    positions,
+                    Shader.TileMode.CLAMP
+                )
+                lastSung = sungColor
+                lastActive = activeColor
+                lastUpcoming = upcomingColor
+            }
 
-            val colors = intArrayOf(
-                sungColor,
-                sungColor,
-                activeColor,
-                upcomingColor,
-                upcomingColor
-            )
-            val positions = floatArrayOf(
-                0f,
-                p0,
-                p1,
-                p2,
-                1f
-            )
+            // 纯矩阵零 GC 变换：将羽化中心 (featherPx) 精准对齐到当前瞬时 wipeX 坐标，彻底杜绝每帧 new LinearGradient
+            localMatrix.reset()
+            localMatrix.setTranslate(wipeX - featherPx, 0f)
+            baseShader!!.setLocalMatrix(localMatrix)
 
-            tp.shader = LinearGradient(
-                startX, 0f, endX, 0f,
-                colors,
-                positions,
-                Shader.TileMode.CLAMP
-            )
+            tp.shader = baseShader
         }
     }
 
-    fun applyKaraoke(
-        textView: TextView,
-        line: LyricLine,
-        nextLineTimestamp: Long?,
-        currentPositionMs: Long,
-        style: KaraokeStyle,
-        marqueeEnabled: Boolean = true
-    ) {
-        val text = line.text
-        if (text.isBlank()) return
+    // 字块与歌词分词高效 LRU 缓存，杜绝 60FPS 逐帧重复拆分与分配
+    private val wordSpanCache = object : LinkedHashMap<String, List<WordSpanInfo>>(48, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<WordSpanInfo>>?): Boolean {
+            return size > 48
+        }
+    }
+
+    private fun getOrBuildWordSpans(line: LyricLine, text: String, nextLineTimestamp: Long?): List<WordSpanInfo> {
+        val cacheKey = "${line.timestamp}_${text.hashCode()}_${nextLineTimestamp ?: 0L}"
+        synchronized(wordSpanCache) {
+            wordSpanCache[cacheKey]?.let { return it }
+        }
 
         val rawWords = line.getOrGenerateWords(nextLineTimestamp)
-        if (rawWords.isEmpty()) return
+        if (rawWords.isEmpty()) return emptyList()
 
-        // 智能细化词块为单字粒度，实现真正高品质的 KTV 级逐字平滑渲染
         val words = ArrayList<LyricWord>(rawWords.size * 2)
         for (w in rawWords) {
             val len = w.text.length
-            // 若词长度大于 1 且不含空格（典型中文连字），按字等分时间戳
             if (len > 1 && !w.text.trim().contains(' ')) {
                 val charDur = (w.duration / len).coerceAtLeast(15L)
                 for (ci in 0 until len) {
@@ -213,7 +215,6 @@ object KaraokeHelper {
             }
         }
 
-        // 映射每个 word 在当前 text 中的字符起止索引
         val wordSpans = ArrayList<WordSpanInfo>(words.size)
         var curIdx = 0
         for (w in words) {
@@ -231,6 +232,25 @@ object KaraokeHelper {
                 }
             }
         }
+
+        synchronized(wordSpanCache) {
+            wordSpanCache[cacheKey] = wordSpans
+        }
+        return wordSpans
+    }
+
+    fun applyKaraoke(
+        textView: TextView,
+        line: LyricLine,
+        nextLineTimestamp: Long?,
+        currentPositionMs: Long,
+        style: KaraokeStyle,
+        marqueeEnabled: Boolean = true
+    ) {
+        val text = line.text
+        if (text.isBlank()) return
+
+        val wordSpans = getOrBuildWordSpans(line, text, nextLineTimestamp)
         if (wordSpans.isEmpty()) return
 
         val firstStart = wordSpans.first().word.startTime

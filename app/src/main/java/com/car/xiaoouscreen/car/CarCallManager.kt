@@ -10,9 +10,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.Parcel
 import android.os.SystemClock
-import android.telephony.PhoneStateListener
-import android.telephony.TelephonyManager
-import android.util.Log
+import com.carlyrics.util.AppLogger
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
@@ -152,7 +150,7 @@ class CarCallManager private constructor(private val context: Context) {
     // 挂断退场定时器 (挂断后展示“通话结束”2.5秒后平滑回退至 IDLE)
     private val terminateDismissRunnable = Runnable {
         if (currentCallInfo.state == CallState.TERMINATED) {
-            Log.i(TAG, "🏁 挂断展示倒计时结束，通话状态平滑重置为 IDLE")
+            AppLogger.i(TAG, "🏁 挂断展示倒计时结束，通话状态平滑重置为 IDLE")
             updateCallState(CallState.IDLE, "", "")
         }
     }
@@ -172,7 +170,7 @@ class CarCallManager private constructor(private val context: Context) {
                         val contact1 = if (hasContact1) readCallContact(data) else null
                         val hasContact2 = data.readInt() != 0
                         val contact2 = if (hasContact2) readCallContact(data) else null
-                        Log.i(TAG, "📞 收到 onBothContactCall: comb=$combination, c1=$contact1, c2=$contact2")
+                        AppLogger.i(TAG, "📞 收到 onBothContactCall: comb=$combination, c1=$contact1, c2=$contact2")
                         val activeContact = contact1 ?: contact2
                         if (activeContact != null) {
                             handleRawContact(activeContact)
@@ -185,7 +183,7 @@ class CarCallManager private constructor(private val context: Context) {
                         val contact1 = if (hasContact1) readCallContact(data) else null
                         val hasContact2 = data.readInt() != 0
                         val contact2 = if (hasContact2) readCallContact(data) else null
-                        Log.i(TAG, "📴 收到 onBothCallTerminated: c1=$contact1, c2=$contact2")
+                        AppLogger.i(TAG, "📴 收到 onBothCallTerminated: c1=$contact1, c2=$contact2")
                         val lastContact = contact1 ?: contact2
                         handleRawTerminated(lastContact?.name ?: currentCallInfo.name, lastContact?.number ?: currentCallInfo.number)
                         return true
@@ -210,83 +208,155 @@ class CarCallManager private constructor(private val context: Context) {
                     }
                 }
             } catch (t: Throwable) {
-                Log.e(TAG, "解析车机电话 AIDL 回调异常: ${t.message}", t)
+                AppLogger.e(TAG, "解析车机电话 AIDL 回调异常: ${t.message}", t)
             }
             return super.onTransact(code, data, reply, flags)
         }
     }
 
+    private val deathRecipient = IBinder.DeathRecipient {
+        AppLogger.w(TAG, "⚠️ 原厂蓝牙电话服务 Binder 异常死亡 (DeathRecipient 触发)")
+        phoneServiceBinder = null
+        isServiceBound = false
+        mainHandler.postDelayed({
+            if (listeners.isNotEmpty()) {
+                AppLogger.i(TAG, "🔄 触发原厂蓝牙电话服务自动重连...")
+                bindBluetoothPhoneService()
+            }
+        }, 3000L)
+    }
+
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-            Log.i(TAG, "🚗 成功连通原厂蓝牙电话服务: $name")
+            AppLogger.i(TAG, "🚗 成功连通原厂蓝牙电话服务: $name")
             phoneServiceBinder = service
             isServiceBound = true
+            try {
+                service?.linkToDeath(deathRecipient, 0)
+            } catch (e: Exception) {
+                AppLogger.w(TAG, "linkToDeath 异常: ${e.message}")
+            }
             registerRemoteReply()
             queryActiveCalls()
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
-            Log.w(TAG, "⚠️ 原厂蓝牙电话服务断开连接: $name")
+            AppLogger.w(TAG, "⚠️ 原厂蓝牙电话服务断开连接: $name")
+            try {
+                phoneServiceBinder?.unlinkToDeath(deathRecipient, 0)
+            } catch (_: Exception) {}
             phoneServiceBinder = null
             isServiceBound = false
         }
     }
 
     init {
-        startPhoneStateListening()
+        // 彻底停用标准 TelephonyManager 监听，杜绝车机无 SIM 卡虚拟基带误报 OFFHOOK 导致的常驻“未知通话”
     }
 
     fun startListening() {
-        bindBluetoothPhoneService()
+        Thread {
+            bindBluetoothPhoneService()
+        }.start()
+    }
+
+    fun stopListening() {
+        if (isServiceBound) {
+            try {
+                phoneServiceBinder?.unlinkToDeath(deathRecipient, 0)
+                unregisterRemoteReply()
+                context.unbindService(serviceConnection)
+            } catch (e: Exception) {
+                AppLogger.w(TAG, "解绑车机原生蓝牙电话服务异常: ${e.message}")
+            } finally {
+                isServiceBound = false
+                phoneServiceBinder = null
+            }
+        }
+    }
+
+    private fun unregisterRemoteReply() {
+        val binder = phoneServiceBinder ?: return
+        val data = Parcel.obtain()
+        try {
+            data.writeInterfaceToken(DESCRIPTOR_MANAGER)
+            // 原厂 AIDL unregisterReply(String key) 接受调用者 key
+            data.writeString(context.packageName)
+            binder.transact(TRANSACTION_UNREGISTER_REPLY, data, null, IBinder.FLAG_ONEWAY)
+            AppLogger.i(TAG, "注销车机蓝牙电话远程 Reply 回调成功 (key=${context.packageName})")
+        } catch (e: Exception) {
+            AppLogger.w(TAG, "注销车机电话 Reply 异常: ${e.message}")
+        } finally {
+            data.recycle()
+        }
     }
 
     private fun bindBluetoothPhoneService() {
         try {
-            val intent = Intent().apply {
+            val explicitIntent = Intent().apply {
                 component = ComponentName(BT_PHONE_PKG, BT_PHONE_CLS)
                 action = BT_PHONE_ACTION
             }
-            val ok = context.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
-            Log.i(TAG, "尝试绑定车机原生蓝牙电话服务: ok=$ok")
+            var ok = context.bindService(explicitIntent, serviceConnection, Context.BIND_AUTO_CREATE)
+            if (!ok) {
+                val implicitIntent = Intent(BT_PHONE_ACTION).apply {
+                    `package` = BT_PHONE_PKG
+                }
+                ok = context.bindService(implicitIntent, serviceConnection, Context.BIND_AUTO_CREATE)
+            }
+            AppLogger.i(TAG, "尝试绑定车机原生蓝牙电话服务 (com.chinatsp.phone): ok=$ok")
         } catch (e: Exception) {
-            Log.w(TAG, "绑定车机原生蓝牙电话服务失败 (非车机或被拦截): ${e.message}")
+            AppLogger.w(TAG, "绑定车机原生蓝牙电话服务失败 (非车机或被拦截): ${e.message}")
         }
     }
 
     private fun registerRemoteReply() {
         val binder = phoneServiceBinder ?: return
+        val data = Parcel.obtain()
         try {
-            val data = Parcel.obtain()
             data.writeInterfaceToken(DESCRIPTOR_MANAGER)
+            // 原厂 AIDL registerReply(String key, IBluetoothPhoneReply callback)
+            // 第一个参数是 key (String)，第二个参数是回调 Binder
+            data.writeString(context.packageName)
             data.writeStrongBinder(replyCallbackStub)
             // 根据规范：FLAG_ONEWAY 且 reply 为 null
             binder.transact(TRANSACTION_REGISTER_REPLY, data, null, IBinder.FLAG_ONEWAY)
-            data.recycle()
-            Log.i(TAG, "✅ 注册车机蓝牙电话远程 Reply 回调成功 (FLAG_ONEWAY)")
+            AppLogger.i(TAG, "✅ 注册车机蓝牙电话远程 Reply 回调成功 (key=${context.packageName}, FLAG_ONEWAY)")
         } catch (e: Exception) {
-            Log.e(TAG, "注册车机电话 Reply 异常: ${e.message}", e)
+            AppLogger.e(TAG, "注册车机电话 Reply 异常: ${e.message}", e)
+        } finally {
+            data.recycle()
         }
     }
 
     private fun queryActiveCalls() {
         val binder = phoneServiceBinder ?: return
+        val data = Parcel.obtain()
+        val reply = Parcel.obtain()
         try {
-            val data = Parcel.obtain()
-            val reply = Parcel.obtain()
             data.writeInterfaceToken(DESCRIPTOR_MANAGER)
-            binder.transact(TRANSACTION_GET_CALLS, data, reply, 0)
-            reply.readException()
-            // 读取现存活动通话列表
-            val size = reply.readInt()
-            Log.i(TAG, "主动查询现存活动通话: 数量=$size")
-            if (size > 0) {
-                val contact = readCallContact(reply)
-                handleRawContact(contact)
+            val ok = binder.transact(TRANSACTION_GET_CALLS, data, reply, 0)
+            if (ok) {
+                reply.readException()
+                // 读取现存活动通话列表 (createTypedArrayList 结构: size, 然后每个元素为 hasItem(Int) + CallContact)
+                val size = reply.readInt()
+                AppLogger.i(TAG, "主动查询现存活动通话: 数量=$size")
+                for (i in 0 until size) {
+                    val hasItem = reply.readInt() != 0
+                    if (hasItem) {
+                        val contact = readCallContact(reply)
+                        AppLogger.i(TAG, "现存通话项[$i]: $contact")
+                        if (i == 0) {
+                            handleRawContact(contact)
+                        }
+                    }
+                }
             }
+        } catch (e: Exception) {
+            AppLogger.w(TAG, "查询现存活动通话失败: ${e.message}")
+        } finally {
             data.recycle()
             reply.recycle()
-        } catch (e: Exception) {
-            Log.w(TAG, "查询现存活动通话失败: ${e.message}")
         }
     }
 
@@ -326,9 +396,15 @@ class CarCallManager private constructor(private val context: Context) {
      * 核心状态机推进逻辑
      */
     fun updateCallState(state: CallState, rawName: String, rawNumber: String) {
-        val type = detectCallType(rawName, rawNumber)
         val cleanName = cleanContactName(rawName)
 
+        // 防虚假未知通话保护：若姓名和号码全部为空白，且非 IDLE，判定为底层总线未就绪的空占位，忽略该事件
+        if (state != CallState.IDLE && cleanName.isBlank() && rawNumber.isBlank()) {
+            AppLogger.d(TAG, "忽略无联系人信息的虚假通话状态: $state")
+            return
+        }
+
+        val type = detectCallType(rawName, rawNumber)
         val previousState = currentCallInfo.state
 
         if (state == CallState.ACTIVE) {
@@ -364,48 +440,11 @@ class CarCallManager private constructor(private val context: Context) {
             durationSeconds = duration
         )
 
-        Log.i(TAG, "📢 通话状态演变: state=$state, type=$type, name=$cleanName, number=$rawNumber, dur=${duration}s")
+        AppLogger.i(TAG, "📢 通话状态演变: state=$state, type=$type, name=$cleanName, number=$rawNumber, dur=${duration}s")
         notifyListeners(currentCallInfo)
     }
 
-    /**
-     * 降级容灾：标准 AOSP TelephonyManager 电话监听 (当车机插了 SIM 卡或手机为标准 Android 时)
-     */
-    private fun startPhoneStateListening() {
-        try {
-            val tm = context.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager ?: return
-            val listener = object : PhoneStateListener() {
-                override fun onCallStateChanged(state: Int, phoneNumber: String?) {
-                    super.onCallStateChanged(state, phoneNumber)
-                    val num = phoneNumber ?: ""
-                    when (state) {
-                        TelephonyManager.CALL_STATE_RINGING -> {
-                            Log.i(TAG, "TelephonyManager 来电振铃: $num")
-                            updateCallState(CallState.RINGING, num, num)
-                        }
-                        TelephonyManager.CALL_STATE_OFFHOOK -> {
-                            Log.i(TAG, "TelephonyManager 接通/呼出: $num")
-                            if (currentCallInfo.state == CallState.RINGING) {
-                                updateCallState(CallState.ACTIVE, currentCallInfo.name.ifBlank { num }, num)
-                            } else {
-                                updateCallState(CallState.DIALING, currentCallInfo.name.ifBlank { num }, num)
-                            }
-                        }
-                        TelephonyManager.CALL_STATE_IDLE -> {
-                            if (currentCallInfo.state != CallState.IDLE) {
-                                Log.i(TAG, "TelephonyManager 通话结束挂断")
-                                updateCallState(CallState.TERMINATED, currentCallInfo.name, currentCallInfo.number)
-                            }
-                        }
-                    }
-                }
-            }
-            tm.listen(listener, PhoneStateListener.LISTEN_CALL_STATE)
-            Log.i(TAG, "标准 TelephonyManager 电话状态监听已启动")
-        } catch (e: Exception) {
-            Log.w(TAG, "启动 TelephonyManager 监听失败: ${e.message}")
-        }
-    }
+
 
     /**
      * 模拟测试接口 (支持 Pad 预览与 ADB 调试)

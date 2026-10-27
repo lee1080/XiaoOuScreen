@@ -72,6 +72,7 @@ object CrashHandler : Thread.UncaughtExceptionHandler {
             }
 
             AppLogger.e("CrashHandler", "未捕获异常已记录", throwable)
+            AppLogger.flushSync()
         } catch (_: Exception) {
             // 即使日志写入失败也不能吞掉异常
         } finally {

@@ -80,7 +80,7 @@ class SkinVibrantWave(context: Context) : LyricsSkin(context) {
 
         titleText = com.carlyrics.display.BouncingTitleView(context).apply {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
-            typeface = Typeface.create(Typeface.DEFAULT, 900)
+            typeface = com.car.xiaoouscreen.util.HmiFontManager.getWeightedTypeface(900, fallbackBold = true)
             setTextColor(Color.WHITE)
             setShadowLayer(dp(8).toFloat(), 0f, dp(4).toFloat(), Color.parseColor("#99000000"))
             gravity = Gravity.CENTER
@@ -88,7 +88,7 @@ class SkinVibrantWave(context: Context) : LyricsSkin(context) {
         }
         artistText = com.carlyrics.display.BouncingTitleView(context).apply {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            typeface = Typeface.create(Typeface.DEFAULT, 500)
+            typeface = com.car.xiaoouscreen.util.HmiFontManager.getWeightedTypeface(500, fallbackBold = false)
             setTextColor(Color.parseColor("#E6FFFFFF"))
             gravity = Gravity.CENTER
             letterSpacing = 0.04f; includeFontPadding = false
@@ -107,7 +107,7 @@ class SkinVibrantWave(context: Context) : LyricsSkin(context) {
             private val shadow2Color = Color.parseColor("#CC000000")
 
             init {
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp * CURRENT_SCALE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp)
                 typeface = Typeface.DEFAULT_BOLD
                 setTextColor(Color.WHITE)
                 gravity = Gravity.CENTER
@@ -159,7 +159,7 @@ class SkinVibrantWave(context: Context) : LyricsSkin(context) {
             typeface = Typeface.SERIF
         }
 
-        noLyricsText = createTV(fontSizeSp * 1.5f, Typeface.DEFAULT_BOLD, Color.WHITE).apply {
+        noLyricsText = createTV(fontSizeSp, Typeface.DEFAULT_BOLD, Color.WHITE).apply {
             text = "等待播放音乐..."
             letterSpacing = -0.015f
             gravity = Gravity.CENTER
@@ -332,7 +332,8 @@ class SkinVibrantWave(context: Context) : LyricsSkin(context) {
     override fun setPlaceholderText(text: String) { noLyricsText.text = text }
 
     override fun onFontSizeChanged(sp: Float) {
-        currentLyricText.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp * CURRENT_SCALE)
+        currentLyricText.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp)
+        noLyricsText.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp)
     }
 
     override fun onSplitRatioChanged() {

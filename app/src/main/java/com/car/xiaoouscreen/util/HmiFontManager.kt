@@ -14,6 +14,14 @@ object HmiFontManager {
     private var orbitronTypeface: Typeface? = null
     private var isInitialized = false
 
+    private val cachedSystemMediumBold: Typeface by lazy {
+        Typeface.create("sans-serif-medium", Typeface.BOLD)
+    }
+
+    private val cachedSystemMedium: Typeface by lazy {
+        Typeface.create("sans-serif-medium", Typeface.NORMAL)
+    }
+
     fun getOrbitronBold(context: Context): Typeface {
         orbitronTypeface?.let { return it }
 
@@ -24,17 +32,21 @@ object HmiFontManager {
                 Log.i(TAG, "车载离线 Orbitron 科技字体加载成功")
             } catch (t: Throwable) {
                 Log.w(TAG, "加载 assets Orbitron 字体失败，降级至原生加粗字体: ${t.message}")
-                orbitronTypeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                orbitronTypeface = getSystemMediumBold()
             }
         }
-        return orbitronTypeface ?: Typeface.create("sans-serif-medium", Typeface.BOLD)
+        return orbitronTypeface ?: getSystemMediumBold()
     }
 
-    fun getSystemMediumBold(): Typeface {
-        return Typeface.create("sans-serif-medium", Typeface.BOLD)
-    }
+    fun getSystemMediumBold(): Typeface = cachedSystemMediumBold
 
-    fun getSystemMedium(): Typeface {
-        return Typeface.create("sans-serif-medium", Typeface.NORMAL)
+    fun getSystemMedium(): Typeface = cachedSystemMedium
+
+    fun getWeightedTypeface(weight: Int, fallbackBold: Boolean = false): Typeface {
+        return if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+            Typeface.create(Typeface.DEFAULT, weight, false)
+        } else {
+            if (fallbackBold) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+        }
     }
 }

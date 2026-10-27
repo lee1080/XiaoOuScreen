@@ -22,39 +22,38 @@ class QWeatherConfigManager(context: Context) {
 
     var apiHost: String
         get() {
-            val h = prefs.getString(KEY_API_HOST, "") ?: ""
-            if (h == "devapi.qweather.com") {
-                prefs.edit().remove(KEY_API_HOST).apply()
-                return ""
-            }
-            return h
+            val h = prefs.getString(KEY_API_HOST, "devapi.qweather.com") ?: "devapi.qweather.com"
+            return if (h.isBlank()) "devapi.qweather.com" else h
         }
         set(value) {
             val cleaned = cleanHost(value)
-            if (cleaned == "devapi.qweather.com" || cleaned.isEmpty()) {
-                prefs.edit().remove(KEY_API_HOST).apply()
-            } else {
-                prefs.edit().putString(KEY_API_HOST, cleaned).apply()
-            }
+            prefs.edit().putString(KEY_API_HOST, cleaned.ifBlank { "devapi.qweather.com" }).apply()
         }
 
-    fun isConfigured(): Boolean = apiKey.isNotBlank() && apiHost.isNotBlank()
+    var isConnected: Boolean
+        get() = prefs.getBoolean(KEY_IS_CONNECTED, false)
+        set(value) = prefs.edit().putBoolean(KEY_IS_CONNECTED, value).apply()
+
+    var lastTestResult: String
+        get() = prefs.getString(KEY_LAST_TEST_RESULT, "和风高精度天气配置就绪") ?: "和风高精度天气配置就绪"
+        set(value) = prefs.edit().putString(KEY_LAST_TEST_RESULT, value).apply()
+
+    fun isConfigured(): Boolean = apiKey.isNotBlank()
 
     fun saveConfig(key: String, host: String) {
-        val cleanedHost = cleanHost(host)
-        val editor = prefs.edit().putString(KEY_API_KEY, key.trim())
-        if (cleanedHost == "devapi.qweather.com" || cleanedHost.isEmpty()) {
-            editor.remove(KEY_API_HOST)
-        } else {
-            editor.putString(KEY_API_HOST, cleanedHost)
-        }
-        editor.apply()
+        val cleanedHost = cleanHost(host).ifBlank { "devapi.qweather.com" }
+        prefs.edit()
+            .putString(KEY_API_KEY, key.trim())
+            .putString(KEY_API_HOST, cleanedHost)
+            .apply()
     }
 
     fun clearConfig() {
         prefs.edit()
             .remove(KEY_API_KEY)
             .remove(KEY_API_HOST)
+            .remove(KEY_IS_CONNECTED)
+            .remove(KEY_LAST_TEST_RESULT)
             .apply()
     }
 
@@ -68,7 +67,8 @@ class QWeatherConfigManager(context: Context) {
 
     fun getBaseUrl(): String {
         val h = cleanHost(apiHost)
-        return if (h.isNotEmpty()) "https://$h/" else "https://api.qweather.com/"
+        val host = if (h.isNotEmpty()) h else "devapi.qweather.com"
+        return "https://$host/"
     }
 
     companion object {
@@ -76,5 +76,7 @@ class QWeatherConfigManager(context: Context) {
         private const val KEY_API_KEY = "key_qweather_api_key"
         private const val KEY_API_HOST = "key_qweather_api_host"
         private const val KEY_IS_ENABLED = "key_qweather_is_enabled"
+        private const val KEY_IS_CONNECTED = "key_qweather_is_connected"
+        private const val KEY_LAST_TEST_RESULT = "key_qweather_last_test_result"
     }
 }

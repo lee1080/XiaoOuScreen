@@ -26,6 +26,7 @@ import android.view.animation.DecelerateInterpolator
 import android.view.animation.PathInterpolator
 import com.car.xiaoouscreen.R
 import com.car.xiaoouscreen.util.HmiFontManager
+import com.car.xiaoouscreen.util.SharedHmiAssetManager
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -175,7 +176,7 @@ class DriveModeWipeView @JvmOverloads constructor(
     var currentState = AnimState.IDLE
         private set
 
-    var currentMode: String = "SPORT"
+    var currentMode: String = "NORMAL"
         private set
     private var previousMode: String? = null
     private var isSwitchingBetweenModes = false
@@ -276,9 +277,6 @@ class DriveModeWipeView @JvmOverloads constructor(
     private var vignetteLeftShader: LinearGradient? = null
     private var vignetteRightShader: LinearGradient? = null
 
-    // 1920×384 原生 WebP 背景图缓存 (完全 1:1 对齐 HTML CSS 渐变与 130px 物理安全暗角)
-    private val modeBgBitmaps = mutableMapOf<String, Bitmap>()
-
     // 虚线 PathEffect (CUSTOM 刻度标尺)
     private val dashEffect = DashPathEffect(floatArrayOf(4f, 12f), 0f)
 
@@ -317,31 +315,6 @@ class DriveModeWipeView @JvmOverloads constructor(
         }
 
         buildStaticShaders()
-        loadModeBackgroundBitmaps()
-        startBreatheLoop()
-    }
-
-    private fun loadModeBackgroundBitmaps() {
-        val opt = BitmapFactory.Options().apply {
-            inScaled = false
-            inPreferredConfig = Bitmap.Config.ARGB_8888
-        }
-        val resMap = mapOf(
-            "ECO" to R.drawable.bg_mode_eco,
-            "NORMAL" to R.drawable.bg_mode_normal,
-            "SPORT" to R.drawable.bg_mode_sport,
-            "RACE" to R.drawable.bg_mode_race,
-            "CUSTOM" to R.drawable.bg_mode_custom
-        )
-        resMap.forEach { (key, resId) ->
-            try {
-                BitmapFactory.decodeResource(resources, resId, opt)?.let { bmp ->
-                    modeBgBitmaps[key] = bmp
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "加载模式 WebP 背景图失败: $key", e)
-            }
-        }
     }
 
     private fun buildStaticShaders() {
@@ -444,6 +417,7 @@ class DriveModeWipeView @JvmOverloads constructor(
     }
 
     private fun startBreatheLoop() {
+        if (breatheAnimator != null && breatheAnimator!!.isRunning) return
         breatheAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = 2400L // 2.4秒黄金律动周期
             repeatCount = ValueAnimator.INFINITE
@@ -623,6 +597,7 @@ class DriveModeWipeView @JvmOverloads constructor(
             isDwellPaused = true
             visibility = VISIBLE
             alpha = 1f
+            startBreatheLoop()
             invalidate()
             Log.i(TAG, "驾驶模式已在底层静默就绪为完全展现态: $targetMode 模式")
         }
@@ -636,6 +611,7 @@ class DriveModeWipeView @JvmOverloads constructor(
         wipeProgress = 0f
         visibility = VISIBLE
         alpha = 1f
+        startBreatheLoop()
         onWipeStartedListener?.invoke()
 
         wipeInAnimator?.removeAllListeners()
@@ -725,6 +701,7 @@ class DriveModeWipeView @JvmOverloads constructor(
                     if (currentState != AnimState.WIPING_OUT) return
                     Log.i(TAG, "startWipeOut ended -> IDLE")
                     currentState = AnimState.IDLE
+                    cancelAllAnimators()
                     wipeProgress = 0f
                     visibility = GONE
                     onWipeCompleteListener?.invoke()
@@ -746,6 +723,16 @@ class DriveModeWipeView @JvmOverloads constructor(
         wipeOutAnimator?.removeAllListeners()
         wipeOutAnimator?.cancel()
         wipeOutAnimator = null
+
+        breatheAnimator?.removeAllListeners()
+        breatheAnimator?.cancel()
+        breatheAnimator = null
+    }
+
+    override fun onDetachedFromWindow() {
+        dismiss()
+        cancelAllAnimators()
+        super.onDetachedFromWindow()
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -755,10 +742,6 @@ class DriveModeWipeView @JvmOverloads constructor(
         val w = width.toFloat()
         val h = height.toFloat()
         if (w <= 0f || h <= 0f) return
-
-        if (logFrameCounter++ % 30 == 0) {
-            Log.d(TAG, "onDraw: state=$currentState, mode=$currentMode, wipe=$wipeProgress, dwell=$dwellProgress, w=$w, h=$h")
-        }
 
         val targetAspect = LOGICAL_WIDTH / LOGICAL_HEIGHT
         val currentAspect = w / h
@@ -790,7 +773,7 @@ class DriveModeWipeView @JvmOverloads constructor(
         }.coerceIn(0f, 1f)
         heroBreatheScale = 1.00f + 0.05f * totalProgress
 
-        val theme = modeThemes[currentMode] ?: modeThemes["SPORT"]!!
+        val theme = modeThemes[currentMode] ?: modeThemes["NORMAL"]!!
 
         when (currentState) {
             AnimState.WIPING_IN -> {
@@ -868,14 +851,14 @@ class DriveModeWipeView @JvmOverloads constructor(
         val cx = LOGICAL_WIDTH / 2f
         val cy = LOGICAL_HEIGHT / 2f
 
-        // 1. 大气背景：优先使用 HTML 1:1 像素级 1920×384 WebP 渐变背景大图 (带物理安全暗角)
-        val bgBmp = modeBgBitmaps[theme.key] ?: modeBgBitmaps["SPORT"]
+        // 1. 大气背景：优先使用 HTML 1:1 像素级 1920×384 WebP 渐变背景大图 (带物理安全暗角，共享RGB_565池)
+        val bgBmp = SharedHmiAssetManager.getDriveModeBitmap(resources, theme.key) ?: SharedHmiAssetManager.getDriveModeBitmap(resources, "NORMAL")
         if (bgBmp != null) {
             bgPaint.shader = null
             bgPaint.alpha = 255
             canvas.drawBitmap(bgBmp, 0f, 0f, bgPaint)
         } else {
-            val bgShader = bgShaders[theme.key] ?: bgShaders["SPORT"]!!
+            val bgShader = bgShaders[theme.key] ?: bgShaders["NORMAL"]!!
             bgPaint.shader = bgShader
             bgPaint.alpha = 255
             rectTmp.set(0f, 0f, LOGICAL_WIDTH, LOGICAL_HEIGHT)

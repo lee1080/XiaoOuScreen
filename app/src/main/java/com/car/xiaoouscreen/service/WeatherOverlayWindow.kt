@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.view.Display
 import android.view.Gravity
@@ -32,6 +33,8 @@ import com.car.xiaoouscreen.ui.CarBottomLeftGearHudView
 import com.carlyrics.display.LyricsNormalizedContainerView
 import com.carlyrics.model.LyricLine
 import com.carlyrics.skin.SkinType
+import com.carlyrics.util.AppLogger
+import com.carlyrics.util.PrefsManager
 
 /**
  * 小欧屏悬浮窗 / Presentation 宿主窗口 (100% 纯原生车规版)：
@@ -89,6 +92,10 @@ class WeatherOverlayWindow(
     var isAttached = false
         private set
     var onCloseListener: (() -> Unit)? = null
+    var onFocusLostListener: (() -> Unit)? = null
+
+    private var lastReassertTime = 0L
+    private var consecutiveReassertCount = 0
 
     private var pendingSceneConfig: WeatherSceneConfig? = null
     private var pendingCanvasLyricLines: List<LyricLine>? = null
@@ -171,8 +178,11 @@ class WeatherOverlayWindow(
             pendingSceneConfig?.let { weatherCanvasView?.updateScene(it) }
             pendingCanvasLyricLines?.let { weatherCanvasView?.setLyrics(it) }
             pendingCanvasLyricsActive?.let { weatherCanvasView?.setLyricsActive(it, smooth = false) }
-            pendingCanvasAvoidance?.let { weatherCanvasView?.setXiaoOuAvoidance(it) }
-            Log.i(TAG, "OverlayWindow.show 成功 (2038) displayId=${targetDisplay.displayId}")
+            val shouldAvoid = PrefsManager.isXiaoOuAvatarEnabled()
+            lyricsContainerView?.xiaoOuAvoidanceEnabled = shouldAvoid
+            weatherCanvasView?.setXiaoOuAvoidance(shouldAvoid)
+            weatherCanvasView?.setLiquidGlassEnabled(com.carlyrics.util.PrefsManager.isLiquidGlassClockEnabled(), smooth = false)
+            Log.i(TAG, "OverlayWindow.show 成功 (2038) displayId=${targetDisplay.displayId}, shouldAvoid=$shouldAvoid")
             true
         } catch (t: Throwable) {
             Log.e(TAG, "OverlayWindow.show 异常: ${t.message}", t)
@@ -195,6 +205,7 @@ class WeatherOverlayWindow(
             val pres = InternalPresentation(appContext, targetDisplay).apply {
                 setOnTouchCallback { resetCloseButtonTimer() }
                 setOnCloseCallback { onCloseListener?.invoke() }
+                setOnFocusLostCallback { onFocusLostListener?.invoke() }
                 show()
             }
             presentation = pres
@@ -217,7 +228,7 @@ class WeatherOverlayWindow(
             pendingSceneConfig?.let { weatherCanvasView?.updateScene(it) }
             pendingCanvasLyricLines?.let { weatherCanvasView?.setLyrics(it) }
             pendingCanvasLyricsActive?.let { weatherCanvasView?.setLyricsActive(it, smooth = false) }
-            val shouldAvoid = (mode == Mode.FITNESS)
+            val shouldAvoid = PrefsManager.isXiaoOuAvatarEnabled()
             lyricsContainerView?.alpha = 0f
             lyricsContainerView?.visibility = View.GONE
             lyricsContainerView?.pause()
@@ -256,7 +267,7 @@ class WeatherOverlayWindow(
         lyricsContainerView?.alpha = 0f
         lyricsContainerView?.visibility = View.GONE
         lyricsContainerView?.pause()
-        val shouldAvoid = (mode == Mode.FITNESS)
+        val shouldAvoid = PrefsManager.isXiaoOuAvatarEnabled()
         lyricsContainerView?.xiaoOuAvoidanceEnabled = shouldAvoid
         weatherCanvasView?.setXiaoOuAvoidance(shouldAvoid)
         weatherCanvasView?.setLiquidGlassEnabled(com.carlyrics.util.PrefsManager.isLiquidGlassClockEnabled(), smooth = false)
@@ -293,10 +304,10 @@ class WeatherOverlayWindow(
             weatherCanvasView?.drawWeatherBackgroundOnly(canvas)
         }
         hud.weatherLeftProvider = {
-            weatherCanvasView?.weatherHudLeftX ?: com.car.xiaoouscreen.ui.CarBottomLeftGearHudView.DEFAULT_SLOT_LEFT
+            com.car.xiaoouscreen.ui.CarBottomLeftGearHudView.DEFAULT_SLOT_LEFT
         }
         weatherCanvasView?.onSceneRenderUpdated = {
-            hud.invalidate()
+            hud.invalidateBackground()
         }
         val currentGear = com.car.xiaoouscreen.car.CarGearManager.getInstance(appContext).getCurrentGear()
         hud.setGear(currentGear, animate = false)
@@ -539,8 +550,14 @@ class WeatherOverlayWindow(
     }
 
     fun updateLyricsAvoidance(avoid: Boolean) {
-        val effectiveAvoid = (mode == Mode.FITNESS)
-        lyricsContainerView?.xiaoOuAvoidanceEnabled = effectiveAvoid
+        lyricsContainerView?.xiaoOuAvoidanceEnabled = avoid
+    }
+
+    fun updateAvatarAndAvoidance(enabled: Boolean) {
+        autoHideHandler.post {
+            updateCanvasAvoidance(enabled)
+            updateLyricsAvoidance(enabled)
+        }
     }
 
     // ==================== 天气画布五行居中歌词控制 ====================
@@ -608,8 +625,31 @@ class WeatherOverlayWindow(
         weatherCanvasView?.setLiquidGlassEnabled(enabled)
     }
 
+    fun pause() {
+        weatherCanvasView?.pauseAnimation()
+        lyricsContainerView?.pause()
+    }
+
+    fun resume() {
+        if (isAttached) {
+            weatherCanvasView?.resumeAnimation()
+            if (currentPage == ActivePage.LYRICS) {
+                lyricsContainerView?.resume()
+            }
+        }
+    }
+
     fun dismiss() {
         autoHideHandler.removeCallbacks(hideCloseRunnable)
+
+        // 彻底切断底层子视图物理引擎与模糊监听闭包
+        weatherCanvasView?.onSceneRenderUpdated = null
+        weatherCanvasView?.pauseAnimation()
+        lyricsContainerView?.pause()
+        bottomLeftGearHudView?.backgroundProvider = null
+        bottomLeftGearHudView?.weatherLeftProvider = null
+        gearCubeView?.dismiss()
+        driveModeView?.dismiss()
 
         overlayRootView?.let { root ->
             windowManager?.let { wm ->
@@ -628,13 +668,107 @@ class WeatherOverlayWindow(
             presentation = null
         }
 
+        weatherCanvasView = null
+        lyricsContainerView = null
+        gearCubeView = null
+        driveModeView = null
+        bottomLeftGearHudView = null
+        closeButtonContainer = null
+
         isAttached = false
         isGearActive = false
         isDriveModeActive = false
         currentActiveDriveMode = null
-        gearCubeView = null
-        driveModeView = null
-        Log.i(TAG, "小欧副屏宿主窗口已销毁")
+        AppLogger.i(TAG, "小欧副屏宿主窗口已销毁")
+    }
+
+    /**
+     * 辅助方案 B：失焦自愈与无缝重新登顶
+     * 当车机原厂系统在 2037 层后发调用 MediaPresentation.show() 覆盖我方界面时，
+     * 通过创建新 Presentation 并在显示就绪后立即 dismiss 旧 Presentation，
+     * 视觉上 0 闪黑、0 割裂，重新将我方界面排回 2037 最顶层！
+     */
+    fun reassertTop(): Boolean {
+        if (!isAttached) return false
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastReassertTime < 2000L) {
+            AppLogger.d(TAG, "🛡️ 置顶重登节流保护 (2s 内已执行)，跳过重复调用")
+            return false
+        }
+        if (consecutiveReassertCount >= 3 && now - lastReassertTime < 15000L) {
+            AppLogger.w(TAG, "🛡️ 连续失焦重登已达上限 (3次)，为防死循环暂停自动重登")
+            return false
+        }
+        if (now - lastReassertTime > 15000L) {
+            consecutiveReassertCount = 0
+        }
+        lastReassertTime = now
+        consecutiveReassertCount++
+
+        return try {
+            if (mode == Mode.FITNESS && targetDisplay.displayId != Display.DEFAULT_DISPLAY) {
+                AppLogger.i(TAG, "🛡️ 开始执行 Presentation (2037) 无缝重新登顶，压制系统自带媒体界面...")
+                val oldPres = presentation
+                val newPres = InternalPresentation(appContext, targetDisplay).apply {
+                    setOnTouchCallback { resetCloseButtonTimer() }
+                    setOnCloseCallback { onCloseListener?.invoke() }
+                    setOnFocusLostCallback { onFocusLostListener?.invoke() }
+                    show()
+                }
+                presentation = newPres
+                weatherCanvasView = newPres.canvasView
+                lyricsContainerView = newPres.lyricsView
+                gearCubeView = newPres.gearView
+                driveModeView = newPres.driveModeView
+                bottomLeftGearHudView = newPres.bottomLeftGearHudView
+                closeButtonContainer = newPres.closeContainer
+                setupNativeAnimationViews()
+                setupBottomLeftGearHudView()
+                resetCloseButtonTimer()
+
+                pendingSceneConfig?.let { weatherCanvasView?.updateScene(it) }
+                pendingCanvasLyricLines?.let { weatherCanvasView?.setLyrics(it) }
+                pendingCanvasLyricsActive?.let { weatherCanvasView?.setLyricsActive(it, smooth = false) }
+                val shouldAvoid = PrefsManager.isXiaoOuAvatarEnabled()
+                lyricsContainerView?.xiaoOuAvoidanceEnabled = shouldAvoid
+                weatherCanvasView?.setXiaoOuAvoidance(shouldAvoid)
+                weatherCanvasView?.setLiquidGlassEnabled(PrefsManager.isLiquidGlassClockEnabled(), smooth = false)
+
+                if (currentPage == ActivePage.LYRICS) {
+                    lyricsContainerView?.visibility = View.VISIBLE
+                    lyricsContainerView?.alpha = 1f
+                    lyricsContainerView?.resume()
+                    weatherCanvasView?.visibility = View.GONE
+                } else {
+                    weatherCanvasView?.visibility = View.VISIBLE
+                    weatherCanvasView?.alpha = 1f
+                    lyricsContainerView?.visibility = View.GONE
+                    lyricsContainerView?.pause()
+                }
+
+                // 销毁旧 Presentation，因为新 Presentation 已经先一步 show 出在顶层，视觉上 0 闪黑
+                try {
+                    oldPres?.canvasView?.pauseAnimation()
+                    oldPres?.lyricsView?.pause()
+                    oldPres?.dismiss()
+                } catch (_: Throwable) {}
+
+                AppLogger.i(TAG, "🛡️ 小欧副屏 2037 Presentation 无缝重新置顶完成！")
+                true
+            } else if (overlayRootView != null && windowManager != null) {
+                val root = overlayRootView ?: return false
+                val wm = windowManager ?: return false
+                val lp = (root.layoutParams as? WindowManager.LayoutParams) ?: return false
+                wm.updateViewLayout(root, lp)
+                AppLogger.i(TAG, "🛡️ Overlay 2038 窗口更新布局置顶完成")
+                true
+            } else {
+                false
+            }
+        } catch (t: Throwable) {
+            AppLogger.e(TAG, "reassertTop 异常: ${t.message}", t)
+            false
+        }
     }
 
     // 内部 Presentation 实现 (Type 2037)
@@ -651,9 +785,11 @@ class WeatherOverlayWindow(
         val closeContainer: View
         private var onTouchCallback: (() -> Unit)? = null
         private var onCloseCallback: (() -> Unit)? = null
+        private var onFocusLostCallback: (() -> Unit)? = null
 
         fun setOnTouchCallback(cb: () -> Unit) { onTouchCallback = cb }
         fun setOnCloseCallback(cb: () -> Unit) { onCloseCallback = cb }
+        fun setOnFocusLostCallback(cb: () -> Unit) { onFocusLostCallback = cb }
 
         init {
             val contentView = LayoutInflater.from(context).inflate(R.layout.presentation_weather_overlay, null)
@@ -663,6 +799,7 @@ class WeatherOverlayWindow(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
                 ))
                 onTouchDown = { onTouchCallback?.invoke() }
+                onFocusLost = { onFocusLostCallback?.invoke() }
             }
             setContentView(root)
 
@@ -686,15 +823,22 @@ class WeatherOverlayWindow(
         }
     }
 
-    // 触摸拦截容器：捕获用户任意触控行为并唤出退出按钮
+    // 触摸拦截与失焦回弹守护容器：捕获用户触控唤出退出按钮，并监听被系统窗口遮挡时的失焦事件
     private class TouchInterceptFrameLayout(context: Context) : FrameLayout(context) {
         var onTouchDown: (() -> Unit)? = null
+        var onFocusLost: (() -> Unit)? = null
 
         override fun dispatchTouchEvent(ev: MotionEvent?): Boolean {
             if (ev?.action == MotionEvent.ACTION_DOWN) {
                 onTouchDown?.invoke()
             }
             return super.dispatchTouchEvent(ev)
+        }
+
+        override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
+            super.onWindowFocusChanged(hasWindowFocus)
+            // 车机多屏环境：副屏失去窗口焦点是主屏操作（切桌面、点应用）的正常跨屏调度，
+            // 绝不能在副屏失焦时触发重登或重建 Presentation，彻底杜绝切桌面时歌词回零跳变！
         }
     }
 

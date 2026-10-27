@@ -44,7 +44,7 @@ class LyricsApiManager {
     private val cacheLock = Any()
 
     fun cancelAllRequests() {
-        LyricsSourceRunner.client.dispatcher.cancelAll()
+        LyricsSourceRunner.cancelAll()
     }
 
     fun getCachedLyrics(title: String, artist: String): LyricData? {
@@ -74,8 +74,9 @@ class LyricsApiManager {
         val reqBuilder = Request.Builder().url(url)
         headers?.forEach { (k, v) -> reqBuilder.header(k, v) }
         return try {
-            val resp = sharedClient.newCall(reqBuilder.build()).execute()
-            if (resp.isSuccessful) resp.body?.string() else null
+            sharedClient.newCall(reqBuilder.build()).execute().use { resp ->
+                if (resp.isSuccessful) resp.body?.string() else null
+            }
         } catch (e: Exception) {
             AppLogger.d(TAG, "httpGet 失败: $url, err=${e.message}")
             null
@@ -89,8 +90,9 @@ class LyricsApiManager {
         val reqBuilder = Request.Builder().url(url).post(formBody)
         headers?.forEach { (k, v) -> reqBuilder.header(k, v) }
         return try {
-            val resp = sharedClient.newCall(reqBuilder.build()).execute()
-            if (resp.isSuccessful) resp.body?.string() else null
+            sharedClient.newCall(reqBuilder.build()).execute().use { resp ->
+                if (resp.isSuccessful) resp.body?.string() else null
+            }
         } catch (e: Exception) {
             AppLogger.d(TAG, "httpPostForm 失败: $url, err=${e.message}")
             null
@@ -98,6 +100,9 @@ class LyricsApiManager {
     }
 
     fun fetchFromNeteaseOfficial(title: String, artist: String): LyricData? {
+        if (title.isBlank() || com.carlyrics.recognition.MusicRecognitionEngine.isInvalidPlaceholderTrack(title, artist)) {
+            return null
+        }
         try {
             val searchUrl = "https://music.163.com/api/search/get"
             val headers = mapOf(
@@ -129,7 +134,8 @@ class LyricsApiManager {
 
                 val tScore = evaluateTitleMatch(title, sTitle)
                 val aScore = evaluateArtistMatch(artist, sArtist)
-                if (tScore >= 70 && (aScore >= 0 || tScore == 100)) {
+                // 严苛比对：标题相似度必须 >= 70，且若提供了歌手则歌手评分必须 >= 0
+                if (tScore >= 70 && (if (artist.isNotBlank()) aScore >= 0 else true)) {
                     val idNum = (song["id"] as? Number)?.toLong() ?: continue
                     matchedSongId = idNum
                     matchedTitle = sTitle
@@ -154,12 +160,14 @@ class LyricsApiManager {
             }
 
             AppLogger.d(TAG, "网易云官方直连命中: $matchedTitle - $matchedArtist (${lines.size}行)")
-            return LyricData(
+            val data = LyricData(
                 lines = lines,
                 coverUrl = matchedCoverUrl,
                 sourceName = "网易云音乐(官方直连)",
                 rawLrc = rawLrc
             )
+            synchronized(cacheLock) { preloadCache["$title|$artist"] = data }
+            return data
         } catch (e: Exception) {
             AppLogger.d(TAG, "fetchFromNeteaseOfficial 异常: ${e.message}")
             return null
@@ -263,13 +271,8 @@ class LyricsApiManager {
         }
 
         if (longer.contains(shorter)) {
-            val lengthRatio = shorter.length.toFloat() / longer.length.toFloat()
-            // 长度比例达到 70% 以上，视为版本副标题差异
-            if (lengthRatio >= 0.70f) {
-                return 75
-            }
-
-            // 检查 longer 去掉 shorter 之后，多出来的部分是否全属于已知的版本修饰词
+            // 严格白名单过滤：检查 longer 去掉 shorter 之后，多出来的部分是否全属于已知的版本修饰词 (如 Live, Remix, 伴奏等)
+            // 绝不能单凭 lengthRatio >= 0.70 就认定匹配（例如“小城故事”与“小城故事多”完全是不同歌曲！）
             var remainder = longer.replace(shorter, "").trim()
             for (suffix in VERSION_SUFFIXES) {
                 remainder = remainder.replace(suffix, "")
@@ -341,47 +344,36 @@ class LyricsApiManager {
     }
 
     /**
-     * 依据用户偏好源设置与播放器渠道来源，重排歌词源瀑布流优先级
+     * 依据【1.播放器渠道自动识别 (最高优先级) -> 2.用户偏好源 (次优先级) -> 3.其余全量已启用源 (严格兜底)】
+     * 重排歌词源瀑布流调度优先级
      */
     private fun sortSourcesByPreferenceAndChannel(
         sources: MutableList<LyricsSource>,
         packageName: String?
     ) {
-        val preferred = PrefsManager.getPreferredLyricsSource()
-        if (preferred.isNotBlank() && preferred != "auto") {
-            // 模式1：用户手动指定了偏好源，严格优先作为第一匹配
-            val preferredIdx = sources.indexOfFirst { it.id.equals(preferred, ignoreCase = true) }
-            if (preferredIdx >= 0) {
-                if (preferredIdx > 0) {
-                    val pSource = sources.removeAt(preferredIdx)
-                    sources.add(0, pSource)
-                }
-                AppLogger.d(TAG, "用户手动指定偏好源置顶: ${sources[0].name} (${sources[0].id})")
-            } else {
-                val allSources = LyricsSourceManager.getAllSources()
-                val pSource = allSources.find { it.id.equals(preferred, ignoreCase = true) }
-                if (pSource != null) {
-                    sources.add(0, pSource)
-                    AppLogger.d(TAG, "用户手动指定偏好源(独立生效)置顶: ${pSource.name} (${pSource.id})")
-                }
-            }
-        } else {
-            // 模式2：自动匹配，先探测获取到歌名和歌手的播放器渠道
-            val actualPkg = packageName?.ifBlank { null }
-                ?: try { com.carlyrics.CarLyricsApplication.recognitionEngine.currentTrack.value?.packageName } catch (_: Exception) { null }
+        val actualPkg = packageName?.ifBlank { null }
+            ?: try { com.carlyrics.CarLyricsApplication.recognitionEngine.currentTrack.value?.packageName } catch (_: Exception) { null }
 
-            val channelMatched = LyricsSourceManager.findChannelMatchedSource(actualPkg, sources)
-            if (channelMatched != null) {
-                val matchIdx = sources.indexOfFirst { it.id == channelMatched.id }
-                if (matchIdx > 0) {
-                    val cSource = sources.removeAt(matchIdx)
-                    sources.add(0, cSource)
-                }
-                AppLogger.d(TAG, "渠道溯源自动匹配成功: 播放器渠道[$actualPkg] -> 专属源[${sources[0].name}](${sources[0].id})置顶第一优先")
-            } else {
-                AppLogger.d(TAG, "自动匹配: 渠道[$actualPkg]无专属源或未识别，使用瀑布流默认排序")
+        // 1. 最高优先级：若匹配到具体播放器渠道，默认优先选择对应的专属歌词源
+        val channelMatched = LyricsSourceManager.findChannelMatchedSource(actualPkg, sources)
+
+        val sortedList = mutableListOf<LyricsSource>()
+
+        if (channelMatched != null) {
+            sortedList.add(channelMatched)
+            AppLogger.d(TAG, "【播放器渠道命中】[$actualPkg] 自动优先调度专属源: ${channelMatched.name} (${channelMatched.id})")
+        }
+
+        // 2. 若未匹配到播放器渠道 (如蓝牙音乐) 或其余所有源：严格按照用户在设置中手动拖拽排序的优先级顺序查询
+        for (src in sources) {
+            if (sortedList.none { it.id == src.id }) {
+                sortedList.add(src)
             }
         }
+
+        sources.clear()
+        sources.addAll(sortedList)
+        AppLogger.d(TAG, "歌词源瀑布流调度序列更新为: ${sources.joinToString(" -> ") { it.name }}")
     }
 
     /**
@@ -394,8 +386,9 @@ class LyricsApiManager {
         mediaId: String? = null,
         packageName: String? = null
     ): Result<LyricData> = withContext(Dispatchers.IO) {
-        if (title.isBlank()) {
-            return@withContext Result.failure(IllegalArgumentException("歌曲标题为空"))
+        if (title.isBlank() || com.carlyrics.recognition.MusicRecognitionEngine.isInvalidPlaceholderTrack(title, artist)) {
+            AppLogger.d(TAG, "fetchLyrics 忽略无效/占位符曲名: title=$title, artist=$artist")
+            return@withContext Result.failure(IllegalArgumentException("无效的曲目标题"))
         }
 
         getCachedLyrics(title, artist)?.let {
@@ -463,7 +456,7 @@ class LyricsApiManager {
                 var matchedCandidate: SourceSearchItem? = null
                 var matchedScore = -1
 
-                for ((qTitle, qArtist, isUgcFallback) in queries) {
+                for ((qTitle, qArtist, _) in queries) {
                     val searchItems = LyricsSourceRunner.search(source, qTitle, qArtist, durationSec)
                     if (searchItems.isEmpty()) continue
 
@@ -477,16 +470,10 @@ class LyricsApiManager {
                         }
                         if (titleScore <= 0) continue
 
-                        // 2) 歌手校验
-                        var artistScore = evaluateArtistMatch(artist, item.artist)
-                        if (artistScore < 0) {
-                            // 自媒体/UGC场景容错：若为纯标题降级搜索、曲名100%完全一致且非单字泛音
-                            if (isUgcFallback && titleScore == 100 && (cleanTitle.length >= 3 || title.length >= 3)) {
-                                artistScore = 0 // 中立对待创作者账号名，不予致命淘汰
-                                AppLogger.d(TAG, "[${source.name}] 自媒体/UGC创作者别名容错: reqArtist=$artist, resArtist=${item.artist}, title 100% 命中")
-                            } else {
-                                continue
-                            }
+                        // 2) 歌手校验：若请求方提供了明确歌手，候选曲目歌手若明确不匹配（<0），坚决淘汰，绝不乱匹配同名歌曲
+                        val artistScore = evaluateArtistMatch(artist, item.artist)
+                        if (artist.isNotBlank() && artistScore < 0) {
+                            continue
                         }
 
                         // 3) 时长校验 (如果双方都有时长信息)
@@ -566,6 +553,13 @@ class LyricsApiManager {
      * 单独获取封面 (同样采用严格匹配，严禁随机匹配错误封面)
      */
     suspend fun fetchCover(title: String, artist: String, packageName: String? = null): String? = withContext(Dispatchers.IO) {
+        if (title.isBlank() || com.carlyrics.recognition.MusicRecognitionEngine.isInvalidPlaceholderTrack(title, artist)) {
+            return@withContext null
+        }
+        getCachedLyrics(title, artist)?.coverUrl?.let {
+            if (it.isNotBlank()) return@withContext it
+        }
+
         // 若当前播放器为网易云或偏好源为 netease，优先尝试官方直连
         val actualPkg = packageName ?: try { com.carlyrics.CarLyricsApplication.recognitionEngine.currentTrack.value?.packageName } catch (_: Exception) { null }
         if (actualPkg?.contains("netease") == true || PrefsManager.getPreferredLyricsSource().contains("netease")) {
@@ -592,7 +586,7 @@ class LyricsApiManager {
                         if (s >= 70) s else evaluateTitleMatch(cleanTitle, item.title)
                     }
                     val aScore = evaluateArtistMatch(artist, item.artist)
-                    tScore >= 70 && (aScore >= 0 || (tScore == 100 && (cleanTitle.length >= 3 || title.length >= 3)))
+                    tScore >= 70 && (if (artist.isNotBlank()) aScore >= 0 else true)
                 }
                 if (match != null) {
                     val res = LyricsSourceRunner.getLyrics(source, match.id)

@@ -29,9 +29,19 @@ object LyricsSourceRunner {
 
     val client: OkHttpClient by lazy {
         OkHttpClient.Builder()
-            .connectTimeout(8, TimeUnit.SECONDS)
-            .readTimeout(12, TimeUnit.SECONDS)
+            .connectTimeout(2500, TimeUnit.MILLISECONDS)
+            .readTimeout(3000, TimeUnit.MILLISECONDS)
+            .writeTimeout(3000, TimeUnit.MILLISECONDS)
             .build()
+    }
+
+    /**
+     * 立即取消所有进行中的歌词源 HTTP 网络请求 (切歌时秒级响应，防超时挂起)
+     */
+    fun cancelAll() {
+        try {
+            client.dispatcher.cancelAll()
+        } catch (_: Exception) {}
     }
 
     private const val RUNNER_POLYFILL = """
@@ -187,13 +197,18 @@ object LyricsSourceRunner {
         }
     }
 
-    // 预编译脚本缓存 (基于脚本内容 MD5，避免高频调用时重复 AST 词法语法解析)
-    private val compiledScriptCache = ConcurrentHashMap<String, Script>()
+    // 预编译脚本缓存 (基于脚本内容 MD5，最多缓存 32 个源，超限自动淘汰，防长期运行内存泄漏)
+    private val scriptCacheLock = Any()
+    private val compiledScriptCache = object : java.util.LinkedHashMap<String, Script>(32, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Script>?): Boolean {
+            return size > 32
+        }
+    }
 
     /**
      * Rhino 安全沙箱 ContextFactory：
      * 1. 禁用所有未经白名单许可的原生 Java 类访问，杜绝 RCE、提权与反射逃逸
-     * 2. 注入指令计数器观察，单次执行超 150,000 条指令时自动熔断，防死循环冻结车机
+     * 2. 注入真实墙上时钟超时监控与指令安全上限，防止死循环冻结车机，同时保证复杂 JSON 解析正常完成
      */
     private class SandboxContextFactory : ContextFactory() {
         override fun makeContext(): Context {
@@ -201,7 +216,7 @@ object LyricsSourceRunner {
             cx.optimizationLevel = -1
             cx.languageVersion = Context.VERSION_ES6
             cx.setGenerateObserverCount(true)
-            cx.instructionObserverThreshold = 150_000
+            cx.instructionObserverThreshold = 20_000
 
             // 严格白名单控制暴露给 JS 的 Java 类
             cx.setClassShutter(object : ClassShutter {
@@ -222,7 +237,15 @@ object LyricsSourceRunner {
         }
 
         override fun observeInstructionCount(cx: Context?, instructionCount: Int) {
-            throw IllegalStateException("JS 脚本执行超时或陷入死循环，已被沙箱强制熔断 (count=$instructionCount)")
+            val startTime = cx?.getThreadLocal("startTime") as? Long ?: return
+            val maxDurationMs = cx.getThreadLocal("maxDurationMs") as? Long ?: 3500L
+            val elapsed = System.currentTimeMillis() - startTime
+            if (elapsed > maxDurationMs) {
+                throw IllegalStateException("JS 脚本执行超时已超过 ${maxDurationMs}ms (累计执行指令: $instructionCount)")
+            }
+            if (instructionCount > 10_000_000) {
+                throw IllegalStateException("JS 脚本执行指令数超上限 (10,000,000 条)，已被沙箱强制熔断")
+            }
         }
     }
 
@@ -234,6 +257,9 @@ object LyricsSourceRunner {
     private fun executeJsMethod(script: String, funcName: String, vararg args: Any?): Any? {
         val cx = sandboxFactory.enterContext()
         return try {
+            cx.putThreadLocal("startTime", System.currentTimeMillis())
+            cx.putThreadLocal("maxDurationMs", 3500L)
+
             // 使用安全标准对象 (不暴露 Packages, JavaAdapter, JavaImporter)
             val scope = cx.initSafeStandardObjects()
 
@@ -244,8 +270,10 @@ object LyricsSourceRunner {
 
             // 预编译缓存：同一脚本只编译一次，极大提升切歌与搜索效率
             val scriptHash = JsCrypto.md5(script)
-            val compiled = compiledScriptCache.getOrPut(scriptHash) {
-                cx.compileString(RUNNER_POLYFILL + "\n" + script, "source_$scriptHash.js", 1, null)
+            val compiled = synchronized(scriptCacheLock) {
+                compiledScriptCache[scriptHash] ?: cx.compileString(RUNNER_POLYFILL + "\n" + script, "source_$scriptHash.js", 1, null).also {
+                    compiledScriptCache[scriptHash] = it
+                }
             }
             compiled.exec(cx, scope)
 
@@ -264,16 +292,51 @@ object LyricsSourceRunner {
     // ==================== 注入 JS 宿主 API ====================
 
     object JsHttp {
+
+        private fun isSafePublicUrl(urlStr: String): Boolean {
+            val lower = urlStr.trim().lowercase()
+            if (!lower.startsWith("http://") && !lower.startsWith("https://")) return false
+            return try {
+                val uri = java.net.URI(urlStr)
+                val host = uri.host?.lowercase() ?: return false
+                if (host == "localhost" || host.endsWith(".local") || host.endsWith(".internal")) return false
+                if (host == "127.0.0.1" || host == "::1" || host == "0.0.0.0") return false
+                if (host.startsWith("10.") || host.startsWith("192.168.") || host.startsWith("169.254.")) return false
+                if (host.startsWith("172.")) {
+                    val parts = host.split(".")
+                    if (parts.size >= 2) {
+                        val second = parts[1].toIntOrNull()
+                        if (second != null && second in 16..31) return false
+                    }
+                }
+                if (host.startsWith("100.")) {
+                    val parts = host.split(".")
+                    if (parts.size >= 2) {
+                        val second = parts[1].toIntOrNull()
+                        if (second != null && second in 64..127) return false
+                    }
+                }
+                true
+            } catch (_: Exception) {
+                false
+            }
+        }
+
         @JvmStatic
         @JvmOverloads
         fun get(url: Any?, headersObj: Any? = null): String? {
             val urlStr = url?.toString() ?: return null
+            if (!isSafePublicUrl(urlStr)) {
+                AppLogger.d(TAG, "http.get 拦截私有网段/回环请求 (SSRF 防护): $urlStr")
+                return null
+            }
             val reqBuilder = Request.Builder().url(urlStr)
             val headers = parseHeaders(headersObj)
             headers.forEach { (k, v) -> reqBuilder.header(k, v) }
             return try {
-                val resp = client.newCall(reqBuilder.build()).execute()
-                if (resp.isSuccessful) resp.body?.string() else null
+                client.newCall(reqBuilder.build()).execute().use { resp ->
+                    if (resp.isSuccessful) resp.body?.string() else null
+                }
             } catch (e: Exception) {
                 AppLogger.d(TAG, "http.get 失败: $urlStr, err=${e.message}")
                 null
@@ -284,6 +347,10 @@ object LyricsSourceRunner {
         @JvmOverloads
         fun post(url: Any?, bodyStr: Any?, headersObj: Any? = null): String? {
             val urlStr = url?.toString() ?: return null
+            if (!isSafePublicUrl(urlStr)) {
+                AppLogger.d(TAG, "http.post 拦截私有网段/回环请求 (SSRF 防护): $urlStr")
+                return null
+            }
             val bodyText = bodyStr?.toString() ?: ""
             val headers = parseHeaders(headersObj)
             val cType = headers["Content-Type"] ?: headers["content-type"] ?: "application/json; charset=utf-8"
@@ -291,8 +358,9 @@ object LyricsSourceRunner {
             val reqBuilder = Request.Builder().url(urlStr).post(body)
             headers.forEach { (k, v) -> reqBuilder.header(k, v) }
             return try {
-                val resp = client.newCall(reqBuilder.build()).execute()
-                if (resp.isSuccessful) resp.body?.string() else null
+                client.newCall(reqBuilder.build()).execute().use { resp ->
+                    if (resp.isSuccessful) resp.body?.string() else null
+                }
             } catch (e: Exception) {
                 AppLogger.d(TAG, "http.post 失败: $urlStr, err=${e.message}")
                 null

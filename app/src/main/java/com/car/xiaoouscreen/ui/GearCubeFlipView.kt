@@ -27,6 +27,7 @@ import android.view.View
 import android.view.animation.PathInterpolator
 import com.car.xiaoouscreen.R
 import com.car.xiaoouscreen.util.HmiFontManager
+import com.car.xiaoouscreen.util.SharedHmiAssetManager
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -172,7 +173,8 @@ class GearCubeFlipView @JvmOverloads constructor(
         )
     )
 
-    // 档位切换排队队列 (FIFO，用于 <600ms 快速连续不同档位切换，如 R -> N -> D)
+    // 连环切档目标暂存 (用于 <600ms 快速连续不同档位切换，如 R -> N -> D)
+    private var pendingTargetGear: String? = null
     private val gearQueue = ArrayDeque<String>()
     private var isInterGearFlip = false
 
@@ -294,10 +296,6 @@ class GearCubeFlipView @JvmOverloads constructor(
     private var vignetteLeftShader: LinearGradient? = null
     private var vignetteRightShader: LinearGradient? = null
 
-    // 1920×384 原生 WebP 背景图缓存 (完全 1:1 对齐 HTML CSS 渐变与 130px 物理安全暗角)
-    private val bgBitmaps = mutableMapOf<String, Bitmap>()
-    private var fallbackBgBitmap: Bitmap? = null
-
     // 离线池化 Bitmap
     private var cachedBitmap: Bitmap? = null
     private var cachedCanvas: Canvas? = null
@@ -330,35 +328,7 @@ class GearCubeFlipView @JvmOverloads constructor(
             letterHighlightPaint.typeface = it
         }
 
-        loadBackgroundBitmaps()
         buildStaticShaders()
-        startAmbientLoop()
-    }
-
-    private fun loadBackgroundBitmaps() {
-        val opt = BitmapFactory.Options().apply {
-            inPreferredConfig = Bitmap.Config.ARGB_8888
-        }
-        val gearResMap = mapOf(
-            "P" to R.drawable.bg_gear_p,
-            "R" to R.drawable.bg_gear_r,
-            "N" to R.drawable.bg_gear_n,
-            "D" to R.drawable.bg_gear_d
-        )
-        gearResMap.forEach { (key, resId) ->
-            try {
-                BitmapFactory.decodeResource(resources, resId, opt)?.let { bmp ->
-                    bgBitmaps[key] = bmp
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "加载档位 WebP 背景图失败: $key", e)
-            }
-        }
-        try {
-            fallbackBgBitmap = BitmapFactory.decodeResource(resources, R.drawable.bg_fallback_space, opt)
-        } catch (e: Exception) {
-            Log.w(TAG, "加载 fallback WebP 背景图失败", e)
-        }
     }
 
     private fun buildStaticShaders() {
@@ -445,6 +415,7 @@ class GearCubeFlipView @JvmOverloads constructor(
      * 徽章常驻微动效循环：外环旋转 + 呼吸微脉冲 (在常驻或展现态驱动)
      */
     private fun startAmbientLoop() {
+        if (ambientLoopAnimator != null && ambientLoopAnimator!!.isRunning) return
         ambientLoopAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = 48000L // 48秒大循环周期
             repeatCount = ValueAnimator.INFINITE
@@ -491,25 +462,26 @@ class GearCubeFlipView @JvmOverloads constructor(
         val targetGear = normalizeGear(gear)
         Log.i(TAG, "triggerCubeFlip called: targetGear=$targetGear, currentState=$currentState, currentGear=$currentGear")
         mainHandler.post {
-            // 1. 同一档位连续触发保护：若当前正在展示该档位（入场/驻留/退场），直接忽略
-            if (currentState != AnimState.IDLE && currentGear == targetGear) {
+            // 1. 同一档位连续触发保护：若当前正在展示该档位且无待执行切档，直接忽略
+            if (currentState != AnimState.IDLE && currentGear == targetGear && pendingTargetGear == null) {
                 Log.i(TAG, "忽略相同档位重复触发: $targetGear (当前状态: $currentState)")
                 return@post
             }
 
-            // 2. 在 600ms 入场动画期间（FLIPPING_IN）收到不同档位：加入 FIFO 排队队列
+            // 2. 阶段 1：在 600ms 入场动画期间（FLIPPING_IN）不可中断，暂存最新目标档位
             if (currentState == AnimState.FLIPPING_IN) {
-                if (targetGear != currentGear && gearQueue.lastOrNull() != targetGear) {
-                    gearQueue.addLast(targetGear)
-                    Log.i(TAG, "档位入场中追加排队: $targetGear, 当前队列: $gearQueue")
+                if (targetGear != currentGear) {
+                    pendingTargetGear = targetGear
+                    Log.i(TAG, "600ms入场翻转不可中断，暂存最新目标档位: $targetGear (当前翻入 $currentGear，本轮播完后立即衔接)")
                 }
                 return@post
             }
 
-            // 3. 在停留（HOLDING）或退场（FLIPPING_OUT）期间（间隔>600ms）收到不同档位：
+            // 3. 阶段 2 与阶段 3：在停留（HOLDING）或退场（FLIPPING_OUT）期间可立即被中断！
             // 取消当前驻留倒计时/退场动画，清空排队，立即从当前档位直接启动新档位的 600ms 3D 上翻动画
             if (currentState == AnimState.HOLDING || currentState == AnimState.FLIPPING_OUT) {
                 cancelAllAnimators()
+                pendingTargetGear = null
                 gearQueue.clear()
                 startInterGearFlip(currentGear, targetGear)
                 return@post
@@ -517,6 +489,7 @@ class GearCubeFlipView @JvmOverloads constructor(
 
             // 4. 从 IDLE 常态全新启动：
             cancelAllAnimators()
+            pendingTargetGear = null
             gearQueue.clear()
             isInterGearFlip = false
             previousGear = null
@@ -546,6 +519,7 @@ class GearCubeFlipView @JvmOverloads constructor(
     fun dismiss() {
         mainHandler.post {
             cancelAllAnimators()
+            pendingTargetGear = null
             gearQueue.clear()
             currentState = AnimState.IDLE
             flipProgress = 0f
@@ -577,6 +551,7 @@ class GearCubeFlipView @JvmOverloads constructor(
     private fun startInterGearFlip(fromGear: String, toGear: String) {
         Log.i(TAG, "startInterGearFlip: $fromGear -> $toGear (600ms)")
         cancelAllAnimators()
+        startAmbientLoop()
         isInterGearFlip = true
         previousGear = fromGear
         currentGear = toGear
@@ -596,16 +571,17 @@ class GearCubeFlipView @JvmOverloads constructor(
             addListener(object : AnimatorListenerAdapter() {
                 override fun onAnimationEnd(animation: Animator) {
                     if (currentState != AnimState.FLIPPING_IN) return
-                    Log.i(TAG, "InterGearFlip ended: reached $currentGear")
+                    Log.i(TAG, "InterGearFlip ended: reached $currentGear, pendingTargetGear=$pendingTargetGear")
                     isInterGearFlip = false
                     previousGear = null
 
-                    if (gearQueue.isNotEmpty()) {
-                        val nextGear = gearQueue.removeFirst()
-                        Log.i(TAG, "从排队队列取出下一个档位: $nextGear 紧接着播放 600ms 翻入")
+                    val nextGear = pendingTargetGear
+                    pendingTargetGear = null
+                    if (nextGear != null && nextGear != currentGear) {
+                        Log.i(TAG, "当前档位 $currentGear 翻入完毕，检测到暂存新档位 $nextGear，立即无缝启动棱柱衔接翻转 (跳过2s停留)")
                         startInterGearFlip(currentGear, nextGear)
                     } else {
-                        // 队列清空，进入最终档位的 2.0s 停留展示
+                        // 队列/暂存清空，进入最终档位的 2.0s 停留展示
                         currentState = AnimState.HOLDING
                         flipProgress = 1f
                         startHoldCountdown(DURATION_HOLD_MS)
@@ -622,6 +598,7 @@ class GearCubeFlipView @JvmOverloads constructor(
     private fun executeRollIn() {
         currentState = AnimState.FLIPPING_IN
         flipProgress = 0f
+        startAmbientLoop()
         onFlipStartedListener?.invoke()
 
         flipInAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
@@ -634,13 +611,14 @@ class GearCubeFlipView @JvmOverloads constructor(
             addListener(object : AnimatorListenerAdapter() {
                 override fun onAnimationEnd(animation: Animator) {
                     if (currentState != AnimState.FLIPPING_IN) return
-                    Log.i(TAG, "executeRollIn ended for gear=$currentGear")
+                    Log.i(TAG, "executeRollIn ended for gear=$currentGear, pendingTargetGear=$pendingTargetGear")
                     isInterGearFlip = false
                     previousGear = null
 
-                    if (gearQueue.isNotEmpty()) {
-                        val nextGear = gearQueue.removeFirst()
-                        Log.i(TAG, "从排队队列取出下一个档位: $nextGear 紧接着播放 600ms 翻入")
+                    val nextGear = pendingTargetGear
+                    pendingTargetGear = null
+                    if (nextGear != null && nextGear != currentGear) {
+                        Log.i(TAG, "初始档位 $currentGear 翻入完毕，检测到暂存新档位 $nextGear，立即无缝启动棱柱衔接翻转 (跳过2s停留)")
                         startInterGearFlip(currentGear, nextGear)
                     } else {
                         currentState = AnimState.HOLDING
@@ -705,6 +683,7 @@ class GearCubeFlipView @JvmOverloads constructor(
             addListener(object : AnimatorListenerAdapter() {
                 override fun onAnimationEnd(animation: Animator) {
                     currentState = AnimState.IDLE
+                    cancelAllAnimators()
                     flipProgress = 0f
                     visibility = GONE
                     onFlipCompleteListener?.invoke()
@@ -715,10 +694,31 @@ class GearCubeFlipView @JvmOverloads constructor(
     }
 
     private fun cancelAllAnimators() {
+        flipInAnimator?.removeAllListeners()
         flipInAnimator?.cancel()
+        flipInAnimator = null
+
+        holdAnimator?.removeAllListeners()
         holdAnimator?.cancel()
+        holdAnimator = null
+
+        flipOutAnimator?.removeAllListeners()
         flipOutAnimator?.cancel()
+        flipOutAnimator = null
+
+        wayBAnimator?.removeAllListeners()
         wayBAnimator?.cancel()
+        wayBAnimator = null
+
+        ambientLoopAnimator?.removeAllListeners()
+        ambientLoopAnimator?.cancel()
+        ambientLoopAnimator = null
+    }
+
+    override fun onDetachedFromWindow() {
+        dismiss()
+        cancelAllAnimators()
+        super.onDetachedFromWindow()
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -728,10 +728,6 @@ class GearCubeFlipView @JvmOverloads constructor(
         val w = width.toFloat()
         val h = height.toFloat()
         if (w <= 0f || h <= 0f) return
-
-        if (logFrameCounter++ % 30 == 0) {
-            Log.d(TAG, "onDraw: state=$currentState, gear=$currentGear, flip=$flipProgress, hold=$holdProgress, w=$w, h=$h")
-        }
 
         // 保持 1920×384 严格比例居中适配
         val targetAspect = LOGICAL_WIDTH / LOGICAL_HEIGHT
@@ -876,12 +872,13 @@ class GearCubeFlipView @JvmOverloads constructor(
         val aInt = (alpha * 255).toInt()
         if (aInt <= 0) return
 
+        val fallbackBmp = SharedHmiAssetManager.getFallbackGearBitmap(resources)
         if (hasValidSnapshot && cachedBitmap != null) {
             bitmapPaint.alpha = aInt
             canvas.drawBitmap(cachedBitmap!!, 0f, 0f, bitmapPaint)
-        } else if (fallbackBgBitmap != null) {
+        } else if (fallbackBmp != null) {
             bitmapPaint.alpha = aInt
-            canvas.drawBitmap(fallbackBgBitmap!!, 0f, 0f, bitmapPaint)
+            canvas.drawBitmap(fallbackBmp, 0f, 0f, bitmapPaint)
         } else {
             // 纯净深空暗底 (坚决不绘制任何虚假时钟车速测试小部件)
             fallbackBasePaint.shader = fallbackBaseShader
@@ -904,8 +901,8 @@ class GearCubeFlipView @JvmOverloads constructor(
         val cx = LOGICAL_WIDTH / 2f
         val cy = LOGICAL_HEIGHT / 2f
 
-        // 1. 大气背景：优先使用 HTML 1:1 像素级 1920×384 WebP 渐变背景大图 (带物理安全暗角)
-        val bgBmp = bgBitmaps[theme.code]
+        // 1. 大气背景：优先使用 HTML 1:1 像素级 1920×384 WebP 渐变背景大图 (带物理安全暗角，共享RGB_565池)
+        val bgBmp = SharedHmiAssetManager.getGearBitmap(resources, theme.code)
         if (bgBmp != null) {
             bgPaint.shader = null
             bgPaint.alpha = (alphaMod * 255).toInt()

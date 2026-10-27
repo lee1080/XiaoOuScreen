@@ -14,6 +14,22 @@ class NotificationListenerService : NotificationListenerService() {
 
     companion object {
         private const val TAG = "NotifListener"
+
+        fun isIgnoredPackage(pkg: String): Boolean {
+            val lower = pkg.lowercase()
+            return lower == "android" ||
+                lower == "com.android.systemui" ||
+                lower == "com.android.welcome" ||
+                lower.startsWith("com.mediatek.") ||
+                lower.startsWith("com.car.xiaoouscreen") ||
+                lower.startsWith("com.changan.oushang") ||
+                lower == "com.chinatsp.automate" ||
+                lower == "com.chinatsp.etc" ||
+                lower == "com.chinatsp.gesturerecognition" ||
+                lower == "com.chinatsp.onecall" ||
+                lower == "com.mojoxing.light"
+        }
+
         var instance: NotificationListenerService? = null
             private set
         var onNotificationPosted: ((StatusBarNotification) -> Unit)? = null
@@ -36,6 +52,7 @@ class NotificationListenerService : NotificationListenerService() {
             val active = activeNotifications
             AppLogger.d(TAG, "onListenerConnected: ${active?.size ?: 0} active notifications")
             active?.forEach { sbn ->
+                if (isIgnoredPackage(sbn.packageName)) return@forEach
                 AppLogger.d(TAG, "  existing: pkg=${sbn.packageName} category=${sbn.notification.category}")
                 com.carlyrics.CarLyricsApplication.recognitionEngine.processNotification(sbn)
             }
@@ -60,8 +77,19 @@ class NotificationListenerService : NotificationListenerService() {
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         super.onNotificationPosted(sbn)
-        AppLogger.d(TAG, "onNotificationPosted: pkg=${sbn.packageName}, category=${sbn.notification.category}, title=${sbn.notification.extras.getString(android.app.Notification.EXTRA_TITLE)}")
-        onNotificationPosted?.invoke(sbn)
+        val pkg = sbn.packageName
+        if (isIgnoredPackage(pkg)) {
+            return
+        }
+        AppLogger.d(TAG, "onNotificationPosted: pkg=$pkg, category=${sbn.notification.category}, title=${sbn.notification.extras.getString(android.app.Notification.EXTRA_TITLE)}")
+        val callback = onNotificationPosted
+        if (callback != null) {
+            callback.invoke(sbn)
+        } else {
+            try {
+                com.carlyrics.CarLyricsApplication.recognitionEngine.processNotification(sbn)
+            } catch (_: Exception) {}
+        }
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification) {
@@ -74,7 +102,7 @@ class NotificationListenerService : NotificationListenerService() {
     override fun onDestroy() {
         super.onDestroy()
         instance = null
-        onNotificationPosted = null
+        // 关键防护：绝不置空 onNotificationPosted，确保服务在系统弱内存回收重启后仍能稳定向引擎分发通知
         AppLogger.d(TAG, "NotificationListenerService onDestroy")
     }
 }

@@ -40,12 +40,16 @@ data class LyricLine(
     val text: String,
     val words: List<LyricWord> = emptyList()
 ) {
+    @Transient
+    private var cachedGeneratedWords: List<LyricWord>? = null
+
     /**
      * 获取原生字级时间戳；若当前歌词为普通LRC，则根据该行持续时间平滑估算各字符节奏
      */
     fun getOrGenerateWords(nextLineTimestamp: Long? = null): List<LyricWord> {
         if (words.isNotEmpty()) return words
         if (text.isBlank()) return emptyList()
+        cachedGeneratedWords?.let { return it }
 
         val lineDuration = if (nextLineTimestamp != null && nextLineTimestamp > timestamp) {
             (nextLineTimestamp - timestamp).coerceIn(1200L, 10000L)
@@ -57,13 +61,15 @@ data class LyricLine(
         if (trimmed.isEmpty()) return emptyList()
         val wordDuration = (lineDuration / trimmed.length.coerceAtLeast(1)).coerceAtLeast(50L)
 
-        return trimmed.mapIndexed { i, char ->
+        val result = trimmed.mapIndexed { i, char ->
             LyricWord(
                 text = char.toString(),
                 startTime = timestamp + i * wordDuration,
                 duration = wordDuration
             )
         }
+        cachedGeneratedWords = result
+        return result
     }
 }
 

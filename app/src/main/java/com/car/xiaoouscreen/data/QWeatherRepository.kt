@@ -38,19 +38,32 @@ class QWeatherRepository(private val context: Context) {
         loadCacheFromDisk()
     }
 
-    private fun createApi(customHost: String? = null): QWeatherApi {
-        val host = customHost ?: configManager.getBaseUrl()
-        val client = OkHttpClient.Builder()
+    private val client: OkHttpClient by lazy {
+        OkHttpClient.Builder()
             .connectTimeout(6, TimeUnit.SECONDS)
             .readTimeout(6, TimeUnit.SECONDS)
             .build()
+    }
 
-        return Retrofit.Builder()
+    private var cachedHost: String? = null
+    private var cachedApi: QWeatherApi? = null
+
+    private fun createApi(customHost: String? = null): QWeatherApi {
+        val host = customHost ?: configManager.getBaseUrl()
+        if (customHost == null && cachedApi != null && cachedHost == host) {
+            return cachedApi!!
+        }
+        val api = Retrofit.Builder()
             .baseUrl(host)
             .client(client)
             .addConverterFactory(GsonConverterFactory.create())
             .build()
             .create(QWeatherApi::class.java)
+        if (customHost == null) {
+            cachedHost = host
+            cachedApi = api
+        }
+        return api
     }
 
     /**

@@ -1,7 +1,7 @@
 /**
  * @name GD Studio (聚合源)
  * @id gdstudio_proxy
- * @version 1.0.1
+ * @version 1.0.2
  * @author Community
  * @description 第三方聚合 API 备用源，覆盖网易聚合检索；支持常见中英文曲名/艺人别名补搜。
  */
@@ -99,9 +99,11 @@ function search(title, artist, duration) {
     var queries = buildQueries(title, artist);
     var seen = {};
     var results = [];
+    var maxQueries = Math.min(queries.length, 2);
 
-    for (var q = 0; q < queries.length; q++) {
+    for (var q = 0; q < maxQueries; q++) {
         var batch = doSearch(queries[q]);
+        if (batch.length === 0 && q > 0) break;
         for (var i = 0; i < batch.length; i++) {
             var item = batch[i];
             if (seen[item.id]) continue;

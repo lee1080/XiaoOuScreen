@@ -295,6 +295,11 @@ class LyricsNormalizedContainerView @JvmOverloads constructor(
         return handled
     }
 
+    override fun onDetachedFromWindow() {
+        pause()
+        super.onDetachedFromWindow()
+    }
+
     /**
      * 将歌词内容绘制到指定的严格 1920×384 Canvas 上
      */

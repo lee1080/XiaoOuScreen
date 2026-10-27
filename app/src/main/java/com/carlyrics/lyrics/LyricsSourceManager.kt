@@ -37,15 +37,23 @@ object LyricsSourceManager {
     private var cachedSources: MutableList<LyricsSource> = mutableListOf()
     private val lock = Any()
 
+    @Volatile
+    private var isInitialized = false
+
     fun init(context: Context) {
-        appContext = context.applicationContext
-        prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        sourcesDir = File(appContext.filesDir, "lyrics_sources")
-        if (!sourcesDir.exists()) {
-            sourcesDir.mkdirs()
+        if (isInitialized) return
+        synchronized(lock) {
+            if (isInitialized) return
+            appContext = context.applicationContext
+            prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            sourcesDir = File(appContext.filesDir, "lyrics_sources")
+            if (!sourcesDir.exists()) {
+                sourcesDir.mkdirs()
+            }
+            syncBuiltinSourcesFromAssets()
+            reloadSources()
+            isInitialized = true
         }
-        syncBuiltinSourcesFromAssets()
-        reloadSources()
     }
 
     /**
@@ -124,7 +132,17 @@ object LyricsSourceManager {
                     val defaultId = file.nameWithoutExtension
                     val meta = LyricsSourceRunner.parseMetadata(script, defaultId)
                     val isEnabled = prefs.getBoolean(KEY_ENABLED_PREFIX + meta.id, true)
-                    val orderIndex = orderList.indexOf(meta.id).let { if (it >= 0) it else 999 }
+                    val defaultOrder = when {
+                        meta.id.contains("netease", true) -> 10
+                        meta.id.contains("qq", true) -> 20
+                        meta.id.contains("kugou", true) -> 30
+                        meta.id.contains("kuwo", true) -> 40
+                        meta.id.contains("qishui", true) || meta.id.contains("luna", true) -> 50
+                        meta.id.contains("gdstudio", true) -> 80
+                        meta.id.contains("lrclib", true) -> 90
+                        else -> 100
+                    }
+                    val orderIndex = orderList.indexOf(meta.id).let { if (it >= 0) it else defaultOrder }
 
                     list.add(meta.copy(isEnabled = isEnabled, order = orderIndex))
                 } catch (e: Exception) {
@@ -136,6 +154,13 @@ object LyricsSourceManager {
             cachedSources = list
             return cachedSources.toList()
         }
+    }
+
+    /**
+     * 极速快照获取已安装源 (无锁非阻塞，若尚未完成首次扫描则返回当前轻量缓存或空，绝不阻塞 UI 主线程)
+     */
+    fun getCachedSourcesFast(): List<LyricsSource> {
+        return cachedSources.toList()
     }
 
     /**
@@ -665,16 +690,17 @@ object LyricsSourceManager {
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
                 .header("Accept", "*/*")
                 .build()
-            val resp = LyricsSourceRunner.client.newCall(req).execute()
-            if (resp.isSuccessful) {
-                val str = resp.body?.string()
-                if (!str.isNullOrBlank()) {
-                    Result.success(str)
+            LyricsSourceRunner.client.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val str = resp.body?.string()
+                    if (!str.isNullOrBlank()) {
+                        Result.success(str)
+                    } else {
+                        Result.failure(Exception("服务器响应内容为空 (HTTP ${resp.code})"))
+                    }
                 } else {
-                    Result.failure(Exception("服务器响应内容为空 (HTTP ${resp.code})"))
+                    Result.failure(Exception("HTTP ${resp.code} ${resp.message}"))
                 }
-            } else {
-                Result.failure(Exception("HTTP ${resp.code} ${resp.message}"))
             }
         } catch (e: Exception) {
             AppLogger.e(TAG, "fetchUrlResult failed ($url): ${e.message}", e)
@@ -696,11 +722,12 @@ object LyricsSourceManager {
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
                 .header("Accept", "*/*")
                 .build()
-            val resp = LyricsSourceRunner.client.newCall(req).execute()
-            if (resp.isSuccessful) {
-                resp.body?.bytes()
-            } else {
-                null
+            LyricsSourceRunner.client.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    resp.body?.bytes()
+                } else {
+                    null
+                }
             }
         } catch (e: Exception) {
             AppLogger.e(TAG, "fetchUrlBytes failed ($url): ${e.message}", e)

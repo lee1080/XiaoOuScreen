@@ -105,7 +105,7 @@ class SkinImmersive(context: Context) : LyricsSkin(context) {
         }
         artistText = com.carlyrics.display.BouncingTitleView(context).apply {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-            typeface = Typeface.create(Typeface.DEFAULT, 300)
+            typeface = com.car.xiaoouscreen.util.HmiFontManager.getWeightedTypeface(300, fallbackBold = false)
             setTextColor(Color.parseColor("#B3FFFFFF"))
             setShadowLayer(dp(4).toFloat(), 0f, dp(2).toFloat(), Color.parseColor("#66000000"))
             gravity = Gravity.START or Gravity.CENTER_VERTICAL
@@ -128,7 +128,7 @@ class SkinImmersive(context: Context) : LyricsSkin(context) {
         }
         noLyricsText = GradientTV(context).apply {
             text = "等待播放音乐..."
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp * 1.4f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp)
             setTextColor(Color.WHITE)
             typeface = Typeface.DEFAULT_BOLD
             letterSpacing = -0.015f
@@ -267,7 +267,7 @@ class SkinImmersive(context: Context) : LyricsSkin(context) {
                 layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             }
             val tv = GradientTV(context).apply {
-                text = line.text; setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp)
+                text = line.text; setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp / CURRENT_SCALE)
                 setTextColor(Color.parseColor("#33FFFFFF")); alpha = 0.2f
                 typeface = Typeface.DEFAULT_BOLD; letterSpacing = 0.01f
                 setPadding(dp(16), dp(8), dp(16), dp(8))
@@ -316,7 +316,7 @@ class SkinImmersive(context: Context) : LyricsSkin(context) {
             when {
                 dist == 0 -> {
                     lyLineViews[i].apply {
-                        alpha = 1f; setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp * CURRENT_SCALE)
+                        alpha = 1f; setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp)
                         typeface = Typeface.DEFAULT_BOLD; letterSpacing = -0.015f
                         clearTextShader()
                         setPadding(dp(24), dp(8), dp(16), dp(8))
@@ -337,7 +337,7 @@ class SkinImmersive(context: Context) : LyricsSkin(context) {
                 }
                 dist == 1 -> lyLineViews[i].apply {
                     KaraokeHelper.resetKaraoke(this, lyricLines[i].text)
-                    alpha = 0.45f; setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp * 1.19f)
+                    alpha = 0.45f; setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp * (1.19f / CURRENT_SCALE))
                     typeface = Typeface.DEFAULT_BOLD; setTextColor(Color.parseColor("#73FFFFFF"))
                     gradientStart = null; clearTextShader(); accentLineColor = null
                     letterSpacing = 0.01f
@@ -346,7 +346,7 @@ class SkinImmersive(context: Context) : LyricsSkin(context) {
                 }
                 dist == 2 -> lyLineViews[i].apply {
                     KaraokeHelper.resetKaraoke(this, lyricLines[i].text)
-                    alpha = 0.20f; setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp)
+                    alpha = 0.20f; setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp / CURRENT_SCALE)
                     typeface = Typeface.DEFAULT_BOLD; setTextColor(Color.parseColor("#33FFFFFF"))
                     gradientStart = null; clearTextShader(); accentLineColor = null
                     letterSpacing = 0.01f
@@ -356,7 +356,7 @@ class SkinImmersive(context: Context) : LyricsSkin(context) {
                 }
                 else -> lyLineViews[i].apply {
                     KaraokeHelper.resetKaraoke(this, lyricLines[i].text)
-                    alpha = 0.20f; setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp * 0.875f)
+                    alpha = 0.20f; setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp * (0.875f / CURRENT_SCALE))
                     typeface = Typeface.DEFAULT_BOLD; setTextColor(Color.parseColor("#33FFFFFF"))
                     gradientStart = null; clearTextShader(); accentLineColor = null
                     letterSpacing = 0.01f
@@ -374,10 +374,14 @@ class SkinImmersive(context: Context) : LyricsSkin(context) {
     override fun setPlaceholderText(text: String) { noLyricsText.text = text }
 
     override fun onFontSizeChanged(sp: Float) {
+        noLyricsText.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp)
         lyLineViews.forEachIndexed { i, tv ->
             val dist = Math.abs(i - currentIndex)
             tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, when {
-                dist == 0 -> sp * CURRENT_SCALE; dist == 1 -> sp * 1.19f; dist == 2 -> sp; else -> sp * 0.875f
+                dist == 0 -> sp
+                dist == 1 -> sp * (1.19f / CURRENT_SCALE)
+                dist == 2 -> sp / CURRENT_SCALE
+                else -> sp * (0.875f / CURRENT_SCALE)
             })
         }
     }

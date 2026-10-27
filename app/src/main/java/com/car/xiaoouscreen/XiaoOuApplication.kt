@@ -12,6 +12,10 @@ import com.carlyrics.util.AppLogger
 import com.carlyrics.util.LyricsCacheManager
 import com.carlyrics.util.PrefsManager
 import com.carlyrics.util.PresetManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 class XiaoOuApplication : Application() {
 
@@ -21,32 +25,43 @@ class XiaoOuApplication : Application() {
             private set
     }
 
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     override fun onCreate() {
         super.onCreate()
         instance = this
 
-        // 1. 初始化歌词模块相关的持久化与管理器
+        // 0. 初始化车规级全局未捕获异常处理器
+        com.carlyrics.util.CrashHandler.init(this)
+
+        // 1. 初始化基础轻量配置与异步日志
         PrefsManager.init(this)
-        PresetManager.init(this)
-        LyricsCacheManager.init(this)
-        LyricsSourceManager.init(this)
         AppLogger.init(this)
 
-        // 2. 初始化全局音乐识别引擎并注入兼容单例
+        // 2. 初始化全局音乐识别引擎并注入单例
         val engine = MusicRecognitionEngine(this)
         CarLyricsApplication.instance = this
         CarLyricsApplication.recognitionEngine = engine
 
-        // 3. 尝试静默向系统设置写入通知监听白名单 (适用于车机系统/平台签名环境)
-        com.car.xiaoouscreen.util.NotificationPermissionHelper.tryAutoGrantNotificationListener(this)
+        createNotificationChannels()
 
-        // 4. 启动媒体监听并桥接通知监听
+        // 3. 启动媒体与通知监听桥接
         engine.startMediaSessionListening()
         NotificationListenerService.onNotificationPosted = { sbn ->
             engine.processNotification(sbn)
         }
 
-        createNotificationChannels()
+        // 4. 重型 I/O、歌词源同步、通知白名单授权全量放入 IO 线程，彻底解除主线程冷启卡顿
+        appScope.launch {
+            try {
+                PresetManager.init(this@XiaoOuApplication)
+                LyricsCacheManager.init(this@XiaoOuApplication)
+                LyricsSourceManager.init(this@XiaoOuApplication)
+                com.car.xiaoouscreen.util.NotificationPermissionHelper.tryAutoGrantNotificationListener(this@XiaoOuApplication)
+            } catch (e: Exception) {
+                AppLogger.w("XiaoOuApp", "后台异步初始化部分组件异常: ${e.message}")
+            }
+        }
     }
 
     private fun createNotificationChannels() {

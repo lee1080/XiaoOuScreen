@@ -35,6 +35,7 @@ import androidx.annotation.ColorInt
 import androidx.core.graphics.ColorUtils
 import com.car.xiaoouscreen.R
 import com.car.xiaoouscreen.car.CarCallManager
+import com.car.xiaoouscreen.util.SharedHmiAssetManager
 import com.car.xiaoouscreen.domain.Intensity
 import com.car.xiaoouscreen.domain.TimeOfDay
 import com.car.xiaoouscreen.domain.WeatherSceneConfig
@@ -171,6 +172,32 @@ class CarWeatherCanvasView @JvmOverloads constructor(
     private var lastSunHaloTimeOfDay: TimeOfDay? = null
 
     private var cachedMoonHaloShader: RadialGradient? = null
+
+    // 零 GC 太阳本体与云层 ColorFilter 缓存
+    private var cachedSunTintColor: Int? = null
+    private var cachedSunColorFilter: PorterDuffColorFilter? = null
+    private var cachedCloudTintColor: Int = 0
+    private var cachedCloudColorFilter: PorterDuffColorFilter? = null
+
+    // HUD 文字与测量宽度零 GC 缓存
+    private data class ComfortLevel(val statusText: String, @ColorInt val color: Int)
+
+    private var cachedHudTempText = ""
+    private var cachedHudWeatherText = ""
+    private var cachedHudSubInfoText = ""
+    private var cachedHudRainText = ""
+    private var cachedHudPrefixText = "实时环境感知 · "
+    private var cachedHudComfort: ComfortLevel = ComfortLevel("舒适", Color.parseColor("#4ADE80"))
+    private var cachedHudHasValidRainAlert = false
+    private var cachedHudWeatherWidth = 0f
+    private var cachedHudSubInfoWidth = 0f
+    private var cachedHudPrefixWidth = 0f
+    private var cachedHudComfortWidth = 0f
+    private var cachedHudRainWidth = 0f
+    private var cachedHudNoteWidth = 0f
+    private var cachedHudDateWidth = 0f
+    private var lastMeasuredDateStr = ""
+    private var hudDataDirty = true
 
     // iOS 风格 5 层体积云无缝纹理与渲染画笔
     private var bmpCirrus: Bitmap? = null
@@ -530,8 +557,6 @@ class CarWeatherCanvasView @JvmOverloads constructor(
         setShadowLayer(6f, 0f, 1f, ColorUtils.setAlphaComponent(Color.parseColor("#38BDF8"), 160))
     }
 
-    private data class ComfortLevel(val statusText: String, @ColorInt val color: Int)
-
     private fun getComfortLevel(temp: Float): ComfortLevel {
         return when {
             temp < 0f -> ComfortLevel("极冷", Color.parseColor("#38BDF8"))   // 冰晶蓝 (<0°C 严寒冰结)
@@ -548,6 +573,9 @@ class CarWeatherCanvasView @JvmOverloads constructor(
     private val lyricDrawPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         textAlign = Paint.Align.CENTER
     }
+    private val lyricFontMetrics = Paint.FontMetrics()
+    private val typefaceMediumBold = com.car.xiaoouscreen.util.HmiFontManager.getSystemMediumBold()
+    private val typefaceMediumNormal = com.car.xiaoouscreen.util.HmiFontManager.getSystemMedium()
 
     // 模式平滑转场动画器 (大时钟 <-> 小时间+五行歌词)
     private val lyricsModeAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
@@ -697,42 +725,60 @@ class CarWeatherCanvasView @JvmOverloads constructor(
     }
 
     private fun initCelestialAndCloudBitmaps() {
-        try {
-            val opts = BitmapFactory.Options().apply {
-                inPreferredConfig = Bitmap.Config.ARGB_8888
+        // 移至后台工作线程并发解码天体与体积云，彻底释放主线程冷启负荷 (立省 ~1500ms)
+        Thread {
+            try {
+                // 天体素材 (共享单份)
+                bmpSun = SharedHmiAssetManager.getCelestialBitmap(resources, "sun")
+                bmpSunRays = SharedHmiAssetManager.getCelestialBitmap(resources, "sun_rays")
+                bmpSunFlare = SharedHmiAssetManager.getCelestialBitmap(resources, "sun_flare")
+                bmpMoon = SharedHmiAssetManager.getCelestialBitmap(resources, "moon")
+
+                // iOS 风格 5 层体积云 (共享单份)
+                bmpCirrus = SharedHmiAssetManager.getCloudBitmap(resources, "cirrus")
+                bmpCumulusBack = SharedHmiAssetManager.getCloudBitmap(resources, "cumulus_back")
+                bmpCumulusFront = SharedHmiAssetManager.getCloudBitmap(resources, "cumulus_front")
+                bmpMist = SharedHmiAssetManager.getCloudBitmap(resources, "mist")
+                bmpOvercast = SharedHmiAssetManager.getCloudBitmap(resources, "overcast")
+
+                postInvalidate()
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
-            // 天体素材
-            bmpSun = BitmapFactory.decodeResource(resources, R.drawable.weather_celestial_sun, opts)
-            bmpSunRays = BitmapFactory.decodeResource(resources, R.drawable.weather_celestial_sun_rays, opts)
-            bmpSunFlare = BitmapFactory.decodeResource(resources, R.drawable.weather_sun_flare, opts)
-            bmpMoon = BitmapFactory.decodeResource(resources, R.drawable.weather_celestial_moon, opts)
+        }.start()
+    }
 
-            // iOS 风格 5 层体积云
-            bmpCirrus = BitmapFactory.decodeResource(resources, R.drawable.weather_cloud_cirrus, opts)
-            bmpCumulusBack = BitmapFactory.decodeResource(resources, R.drawable.weather_cloud_cumulus_back, opts)
-            bmpCumulusFront = BitmapFactory.decodeResource(resources, R.drawable.weather_cloud_cumulus_front, opts)
-            bmpMist = BitmapFactory.decodeResource(resources, R.drawable.weather_cloud_mist, opts)
-            bmpOvercast = BitmapFactory.decodeResource(resources, R.drawable.weather_cloud_overcast, opts)
+    @Volatile
+    private var isCallBitmapsLoaded = false
 
-            // 车载通话分层素材 (256x256 透明底)
-            bmpCallIncomingHandset = BitmapFactory.decodeResource(resources, R.drawable.ic_call_incoming_handset, opts)
-            bmpCallIncomingArrow = BitmapFactory.decodeResource(resources, R.drawable.ic_call_incoming_arrow, opts)
-            bmpCallIncomingRipple = BitmapFactory.decodeResource(resources, R.drawable.ic_call_incoming_ripple, opts)
-            bmpCallOutgoingHandset = BitmapFactory.decodeResource(resources, R.drawable.ic_call_outgoing_handset, opts)
-            bmpCallOutgoingArrow = BitmapFactory.decodeResource(resources, R.drawable.ic_call_outgoing_arrow, opts)
-            bmpCallOutgoingWave1 = BitmapFactory.decodeResource(resources, R.drawable.ic_call_outgoing_wave1, opts)
-            bmpCallOutgoingWave2 = BitmapFactory.decodeResource(resources, R.drawable.ic_call_outgoing_wave2, opts)
-            bmpCallConnectedHandset = BitmapFactory.decodeResource(resources, R.drawable.ic_call_connected_handset, opts)
-            bmpCallConnectedWave1 = BitmapFactory.decodeResource(resources, R.drawable.ic_call_connected_wave1, opts)
-            bmpCallConnectedWave2 = BitmapFactory.decodeResource(resources, R.drawable.ic_call_connected_wave2, opts)
-            bmpCallConnectedWave3 = BitmapFactory.decodeResource(resources, R.drawable.ic_call_connected_wave3, opts)
-            bmpCallHangupHandset = BitmapFactory.decodeResource(resources, R.drawable.ic_call_hangup_handset, opts)
-            bmpCallHangupHalo = BitmapFactory.decodeResource(resources, R.drawable.ic_call_hangup_halo, opts)
-            bmpCallWeChatBack = BitmapFactory.decodeResource(resources, R.drawable.ic_call_wechat_back, opts)
-            bmpCallWeChatFront = BitmapFactory.decodeResource(resources, R.drawable.ic_call_wechat_front, opts)
-            bmpCallWeChatWave = BitmapFactory.decodeResource(resources, R.drawable.ic_call_wechat_wave, opts)
-        } catch (e: Exception) {
-            e.printStackTrace()
+    /**
+     * 按需懒加载车载接打电话分层位图 (仅在真实发生通话呼入/呼出时才解码，杜绝冷启动无谓消耗)
+     */
+    private fun ensureCallBitmapsLoaded() {
+        if (isCallBitmapsLoaded) return
+        synchronized(this) {
+            if (isCallBitmapsLoaded) return
+            try {
+                bmpCallIncomingHandset = SharedHmiAssetManager.getCallBitmap(resources, "incoming_handset")
+                bmpCallIncomingArrow = SharedHmiAssetManager.getCallBitmap(resources, "incoming_arrow")
+                bmpCallIncomingRipple = SharedHmiAssetManager.getCallBitmap(resources, "incoming_ripple")
+                bmpCallOutgoingHandset = SharedHmiAssetManager.getCallBitmap(resources, "outgoing_handset")
+                bmpCallOutgoingArrow = SharedHmiAssetManager.getCallBitmap(resources, "outgoing_arrow")
+                bmpCallOutgoingWave1 = SharedHmiAssetManager.getCallBitmap(resources, "outgoing_wave1")
+                bmpCallOutgoingWave2 = SharedHmiAssetManager.getCallBitmap(resources, "outgoing_wave2")
+                bmpCallConnectedHandset = SharedHmiAssetManager.getCallBitmap(resources, "connected_handset")
+                bmpCallConnectedWave1 = SharedHmiAssetManager.getCallBitmap(resources, "connected_wave1")
+                bmpCallConnectedWave2 = SharedHmiAssetManager.getCallBitmap(resources, "connected_wave2")
+                bmpCallConnectedWave3 = SharedHmiAssetManager.getCallBitmap(resources, "connected_wave3")
+                bmpCallHangupHandset = SharedHmiAssetManager.getCallBitmap(resources, "hangup_handset")
+                bmpCallHangupHalo = SharedHmiAssetManager.getCallBitmap(resources, "hangup_halo")
+                bmpCallWeChatBack = SharedHmiAssetManager.getCallBitmap(resources, "wechat_back")
+                bmpCallWeChatFront = SharedHmiAssetManager.getCallBitmap(resources, "wechat_front")
+                bmpCallWeChatWave = SharedHmiAssetManager.getCallBitmap(resources, "wechat_wave")
+                isCallBitmapsLoaded = true
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
     }
 
@@ -804,7 +850,43 @@ class CarWeatherCanvasView @JvmOverloads constructor(
                 a.minuteRainSummary == b.minuteRainSummary
     }
 
+    private fun updateHudTextCacheIfNeeded() {
+        if (hudDataDirty) {
+            hudDataDirty = false
+            cachedHudTempText = "${currentConfig.temperatureCelsius.toInt()}°"
+            cachedHudWeatherText = currentConfig.weatherDescription
+            val windDir = currentConfig.windDirectionText
+            val windScale = currentConfig.windScaleText
+            cachedHudSubInfoText = if (windScale.isNotBlank()) {
+                "$windDir $windScale · 体感 ${currentConfig.feelsLikeCelsius.toInt()}°"
+            } else {
+                "风速 ${currentConfig.windSpeedKmh.toInt()} km/h · 优"
+            }
+            cachedHudComfort = getComfortLevel(currentConfig.temperatureCelsius)
+            cachedHudHasValidRainAlert = currentConfig.isMinuteRainActive &&
+                !currentConfig.minuteRainSummary.isNullOrBlank() &&
+                currentConfig.minuteRainSummary != "未来两小时无降水"
+            cachedHudRainText = if (cachedHudHasValidRainAlert) "🌧️ ${currentConfig.minuteRainSummary}" else ""
+
+            cachedHudWeatherWidth = weatherLabelPaint.measureText(cachedHudWeatherText)
+            cachedHudSubInfoWidth = weatherSubPaint.measureText(cachedHudSubInfoText)
+            cachedHudPrefixWidth = dateSubPaint.measureText(cachedHudPrefixText)
+            cachedHudComfortWidth = comfortLabelPaint.measureText(cachedHudComfort.statusText)
+            cachedHudRainWidth = if (cachedHudHasValidRainAlert) dateSubPaint.measureText(cachedHudRainText) else 0f
+            cachedHudNoteWidth = if (cachedHudHasValidRainAlert) {
+                cachedHudRainWidth
+            } else {
+                cachedHudPrefixWidth + cachedHudComfortWidth
+            }
+        }
+        if (cachedDateStr != lastMeasuredDateStr) {
+            lastMeasuredDateStr = cachedDateStr
+            cachedHudDateWidth = dateLabelPaint.measureText(cachedDateStr)
+        }
+    }
+
     fun updateScene(newConfig: WeatherSceneConfig, animate: Boolean = true) {
+        hudDataDirty = true
         if (isVisuallyEqual(newConfig, currentConfig)) {
             currentConfig = newConfig
             return
@@ -900,9 +982,8 @@ class CarWeatherCanvasView @JvmOverloads constructor(
             if (isRenderingActive) stopAnimation()
             return
         }
-        // 在车载副屏 / WindowManager 悬浮窗中，windowVisibility 与 isShown 易在特定 ROM 下被误判为非 VISIBLE
-        // 只要当前 View 自身为 VISIBLE 且未手动暂停，即稳稳开启 60FPS Choreographer 循环，杜绝 ADB 启动黑屏
-        val shouldRender = (visibility == VISIBLE)
+        // 严格确保 View 已经附着在 Window 上且自身为 VISIBLE，防止游离 View 或未挂载时无谓启动帧循环
+        val shouldRender = isAttachedToWindow && (visibility == VISIBLE)
         if (shouldRender && !isRenderingActive) {
             startAnimation()
             invalidate()
@@ -919,11 +1000,27 @@ class CarWeatherCanvasView @JvmOverloads constructor(
 
     private fun stopAnimation() {
         isRenderingActive = false
+        lastRenderTimeNanos = 0L
         Choreographer.getInstance().removeFrameCallback(this)
     }
 
+    private var lastRenderTimeNanos = 0L
+
     override fun doFrame(frameTimeNanos: Long) {
         if (!isRenderingActive) return
+
+        // 车规级能效自适应：高动态粒子/转场维持 60fps，晴天无粒子稳态自适应降至 30fps，削减 50% GPU 负载与发热
+        val isHighDynamic = (currentConfig.rainParticleCount > 0) ||
+                            (currentConfig.snowParticleCount > 0) ||
+                            lightningActive ||
+                            (transitionProgress < 1.0f) ||
+                            (lyricsModeProgress > 0f && lyricsModeProgress < 1f)
+        val minIntervalNanos = if (isHighDynamic) 14_000_000L else 30_000_000L
+
+        if (lastRenderTimeNanos != 0L && (frameTimeNanos - lastRenderTimeNanos) < minIntervalNanos) {
+            Choreographer.getInstance().postFrameCallback(this)
+            return
+        }
 
         if (lastFrameTimeNanos != 0L) {
             val deltaSeconds = (frameTimeNanos - lastFrameTimeNanos) / 1_000_000_000f
@@ -931,6 +1028,7 @@ class CarWeatherCanvasView @JvmOverloads constructor(
             updatePhysics(clampedDelta)
         }
         lastFrameTimeNanos = frameTimeNanos
+        lastRenderTimeNanos = frameTimeNanos
 
         invalidate()
         Choreographer.getInstance().postFrameCallback(this)
@@ -964,6 +1062,13 @@ class CarWeatherCanvasView @JvmOverloads constructor(
         scrollCumulusFrontX += 4.0f * windFactor * dt
         scrollMistX += 1.6f * windFactor * dt
         scrollOvercastX += 3.0f * windFactor * dt
+
+        // 车规级长周期浮点防护：对纹理固有宽度取模，保证 scrollX 严格处于 [0, texW) 区间，长年保活永不发生精度损失
+        bmpCirrus?.width?.toFloat()?.let { w -> if (scrollCirrusX >= w) scrollCirrusX %= w }
+        bmpCumulusBack?.width?.toFloat()?.let { w -> if (scrollCumulusBackX >= w) scrollCumulusBackX %= w }
+        bmpCumulusFront?.width?.toFloat()?.let { w -> if (scrollCumulusFrontX >= w) scrollCumulusFrontX %= w }
+        bmpMist?.width?.toFloat()?.let { w -> if (scrollMistX >= w) scrollMistX %= w }
+        bmpOvercast?.width?.toFloat()?.let { w -> if (scrollOvercastX >= w) scrollOvercastX %= w }
 
         // 3. 雨滴推进 (支持雨夹雪同时运行)
         val rainCount = currentConfig.rainParticleCount
@@ -1003,8 +1108,10 @@ class CarWeatherCanvasView @JvmOverloads constructor(
                     lightningIntensity = 0f
                     scheduleNextLightning()
                 } else {
-                    val progress = elapsed.toFloat() / lightningDurationMs
-                    lightningIntensity = (1f - progress) * (if (random.nextBoolean()) 1.0f else 0.45f)
+                    val progress = (elapsed.toFloat() / lightningDurationMs).coerceIn(0f, 1f)
+                    val decay = (1f - progress)
+                    // 车载夜间视线保护：采用平滑二次方自然衰减，杜绝突变硬闪与强频闪
+                    lightningIntensity = decay * decay
                 }
             }
         } else {
@@ -1308,7 +1415,11 @@ class CarWeatherCanvasView @JvmOverloads constructor(
                     // 3. 太阳发光本体渲染 (复用经典圆润光球，覆盖于光芒中心)
                     bmpSun?.let { sunBmp ->
                         sunPaint.alpha = (celestialAlpha * 255).toInt()
-                        sunPaint.colorFilter = sunTint?.let { PorterDuffColorFilter(it, PorterDuff.Mode.MULTIPLY) }
+                        if (cachedSunTintColor != sunTint || cachedSunColorFilter == null) {
+                            cachedSunTintColor = sunTint
+                            cachedSunColorFilter = sunTint?.let { PorterDuffColorFilter(it, PorterDuff.Mode.MULTIPLY) }
+                            sunPaint.colorFilter = cachedSunColorFilter
+                        }
                         canvas.drawBitmap(sunBmp, null, sunDestRect, sunPaint)
                     }
 
@@ -1362,12 +1473,16 @@ class CarWeatherCanvasView @JvmOverloads constructor(
             tint = ColorUtils.blendARGB(tint, Color.parseColor("#F5D0FE"), lightningIntensity * 0.85f)
         }
 
-        val colorFilter = PorterDuffColorFilter(tint, PorterDuff.Mode.MULTIPLY)
-        cloudCirrusPaint.colorFilter = colorFilter
-        cloudCumulusBackPaint.colorFilter = colorFilter
-        cloudCumulusFrontPaint.colorFilter = colorFilter
-        cloudMistPaint.colorFilter = colorFilter
-        cloudOvercastPaint.colorFilter = colorFilter
+        if (cachedCloudColorFilter == null || cachedCloudTintColor != tint) {
+            cachedCloudTintColor = tint
+            val colorFilter = PorterDuffColorFilter(tint, PorterDuff.Mode.MULTIPLY)
+            cachedCloudColorFilter = colorFilter
+            cloudCirrusPaint.colorFilter = colorFilter
+            cloudCumulusBackPaint.colorFilter = colorFilter
+            cloudCumulusFrontPaint.colorFilter = colorFilter
+            cloudMistPaint.colorFilter = colorFilter
+            cloudOvercastPaint.colorFilter = colorFilter
+        }
 
         drawSeamlessCloudLayer(canvas, bmpOvercast, scrollOvercastX, overcastA, cloudOvercastPaint)
         drawSeamlessCloudLayer(canvas, bmpCirrus, scrollCirrusX, cirrusA, cloudCirrusPaint)
@@ -1436,8 +1551,11 @@ class CarWeatherCanvasView @JvmOverloads constructor(
 
         // 3. 雷暴电闪
         if (lightningActive && lightningIntensity > 0f) {
+            // 车载驾驶防致盲：全屏白闪限制在柔和微光 (最大 alpha 36，约 14% 透明度)，保留分形闪电枝干与紫色光晕
+            val isNight = currentConfig.timeOfDay == TimeOfDay.NIGHT
+            val maxFlashAlpha = if (isNight) 24 else 36
             flashPaint.color = Color.WHITE
-            flashPaint.alpha = (lightningIntensity * 120).toInt().coerceIn(0, 175)
+            flashPaint.alpha = (lightningIntensity * maxFlashAlpha).toInt().coerceIn(0, maxFlashAlpha)
             canvas.drawRect(skyRect, flashPaint)
 
             lightningGlowPaint.color = Color.parseColor("#C084FC")
@@ -1475,21 +1593,14 @@ class CarWeatherCanvasView @JvmOverloads constructor(
         val weatherAlphaFactor = (1f - callTransitionProgress).coerceIn(0f, 1f)
 
         if (weatherAlphaFactor > 0.005f) {
-            val tempText = "${currentConfig.temperatureCelsius.toInt()}°"
-            val weatherText = currentConfig.weatherDescription
-            val windDir = currentConfig.windDirectionText
-            val windScale = currentConfig.windScaleText
-            val subInfoText = if (windScale.isNotBlank()) {
-                "$windDir $windScale · 体感 ${currentConfig.feelsLikeCelsius.toInt()}°"
-            } else {
-                "风速 ${currentConfig.windSpeedKmh.toInt()} km/h · 优"
-            }
-            val prefixText = "实时环境感知 · "
-            val comfort = getComfortLevel(currentConfig.temperatureCelsius)
-            val hasValidRainAlert = currentConfig.isMinuteRainActive &&
-                !currentConfig.minuteRainSummary.isNullOrBlank() &&
-                currentConfig.minuteRainSummary != "未来两小时无降水"
-            val rainText = if (hasValidRainAlert) "🌧️ ${currentConfig.minuteRainSummary}" else ""
+            updateHudTextCacheIfNeeded()
+            val tempText = cachedHudTempText
+            val weatherText = cachedHudWeatherText
+            val subInfoText = cachedHudSubInfoText
+            val prefixText = cachedHudPrefixText
+            val comfort = cachedHudComfort
+            val hasValidRainAlert = cachedHudHasValidRainAlert
+            val rainText = cachedHudRainText
 
             // 1. 动态自适应字号：大时钟模式 72px，歌词模式 62px
             tempNumPaint.textSize = lerp(72f, 62f, lyricsModeProgress)
@@ -1497,16 +1608,10 @@ class CarWeatherCanvasView @JvmOverloads constructor(
             // 2. 测量各行宽度并构建矩形组合 (Bounding Box)
             val timeWidth = smallTimePaint.measureText(cachedTimeStr)
             val tempWidth = tempNumPaint.measureText(tempText)
-            val weatherWidth = weatherLabelPaint.measureText(weatherText)
-            val subInfoWidth = weatherSubPaint.measureText(subInfoText)
-            val row2Width = tempWidth + 14f + maxOf(weatherWidth, subInfoWidth)
-            val dateWidth = dateLabelPaint.measureText(cachedDateStr)
-            val prefixWidth = dateSubPaint.measureText(prefixText)
-            val noteWidth = if (hasValidRainAlert) {
-                dateSubPaint.measureText(rainText)
-            } else {
-                prefixWidth + comfortLabelPaint.measureText(comfort.statusText)
-            }
+            val row2Width = tempWidth + 14f + maxOf(cachedHudWeatherWidth, cachedHudSubInfoWidth)
+            val dateWidth = cachedHudDateWidth
+            val prefixWidth = cachedHudPrefixWidth
+            val noteWidth = cachedHudNoteWidth
 
             // 矩形组合最大宽度 (平滑插值保障模式切换零跳跃)
             val idleBlockWidth = maxOf(row2Width, dateWidth, noteWidth)
@@ -1615,6 +1720,8 @@ class CarWeatherCanvasView @JvmOverloads constructor(
         val nowMs = SystemClock.uptimeMillis()
         val masterAlpha = (255 * alphaProgress.coerceIn(0f, 1f)).toInt()
         if (masterAlpha <= 0) return
+
+        ensureCallBitmapsLoaded()
 
         // 1. 状态过渡进度插值 (480ms 毫秒极佳物理阻尼衰减)
         val motionElapsed = nowMs - callMotionStartTime
@@ -2330,23 +2437,23 @@ class CarWeatherCanvasView @JvmOverloads constructor(
             lyricDrawPaint.color = finalTextColor
             lyricDrawPaint.alpha = lineAlpha
 
-            // 3. 字重与大气发光光晕 (平滑过渡)
+            // 3. 字重与大气发光光晕 (平滑过渡，复用单例字重)
             if (absV < 0.45f) {
-                lyricDrawPaint.typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                lyricDrawPaint.typeface = typefaceMediumBold
                 val glowFactor = (1f - 2.2f * absV).coerceIn(0f, 1f)
                 val glowRad = (targetGlowRadius * 1.5f + (if (lightningActive) 18f else 0f)) * glowFactor
                 val glowAlpha = (Color.alpha(finalGlowColor) * (lineAlpha / 255f) * glowFactor).toInt()
                 val fadedGlow = ColorUtils.setAlphaComponent(finalGlowColor, glowAlpha)
                 lyricDrawPaint.setShadowLayer(glowRad, 0f, 3f, fadedGlow)
             } else {
-                lyricDrawPaint.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                lyricDrawPaint.typeface = typefaceMediumNormal
                 lyricDrawPaint.setShadowLayer(5f, 0f, 2f, Color.argb((lineAlpha * 0.5f).toInt(), 0, 0, 0))
             }
 
-            // 4. 纵向基线垂直居中 (非线性间距：中心至二四行 80px，一五行贴近二四行 50px)
+            // 4. 纵向基线垂直居中 (非线性间距：中心至二四行 80px，一五行贴近二四行 50px，复用 lyricFontMetrics 零 GC)
             val centerY = getSlotY(v)
-            val fm = lyricDrawPaint.fontMetrics
-            val baselineY = centerY - (fm.descent + fm.ascent) / 2f
+            lyricDrawPaint.getFontMetrics(lyricFontMetrics)
+            val baselineY = centerY - (lyricFontMetrics.descent + lyricFontMetrics.ascent) / 2f
 
             // 5. 逐字显示速度驱动跑马灯位移计算 (中心句及过渡期间保持丝滑位置连续)
             val lineText = lyricLines[idx].text

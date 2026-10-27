@@ -104,7 +104,7 @@ class SkinMinimalNeon(context: Context) : LyricsSkin(context) {
         }
         artistText = com.carlyrics.display.BouncingTitleView(context).apply {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            typeface = Typeface.create(Typeface.DEFAULT, 300)
+            typeface = com.car.xiaoouscreen.util.HmiFontManager.getWeightedTypeface(300, fallbackBold = false)
             setTextColor(Color.parseColor("#8892B0")); letterSpacing = 0.08f; includeFontPadding = false
         }
 
@@ -113,7 +113,7 @@ class SkinMinimalNeon(context: Context) : LyricsSkin(context) {
             setPadding(0, dp(50), 0, dp(50))
             clipChildren = false; clipToPadding = false
         }
-        noLyricsText = createTV(fontSizeSp * 1.3f, Typeface.DEFAULT_BOLD, Color.parseColor(NEON_COLOR)).apply {
+        noLyricsText = createTV(fontSizeSp, Typeface.DEFAULT_BOLD, Color.parseColor(NEON_COLOR)).apply {
             text = "等待播放音乐..."
             letterSpacing = -0.015f
             setShadowLayer(dp(15).toFloat(), 0f, 0f, Color.parseColor(NEON_GLOW))
@@ -296,7 +296,7 @@ class SkinMinimalNeon(context: Context) : LyricsSkin(context) {
             }
             val tv = TextView(context).apply {
                 text = it.text; setTextColor(Color.parseColor(DIM_COLOR)); alpha = 0.6f
-                gravity = Gravity.CENTER; setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp)
+                gravity = Gravity.CENTER; setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp / CURRENT_SCALE)
                 letterSpacing = 0.01f
                 minHeight = dp(30); setPadding(dp(8), dp(3), dp(8), dp(3))
                 maxLines = if (marqueeEnabled) 1 else Integer.MAX_VALUE; ellipsize = null
@@ -339,13 +339,13 @@ class SkinMinimalNeon(context: Context) : LyricsSkin(context) {
 
         if (currentIndex in lyLineViews.indices) lyLineViews[currentIndex].apply {
             KaraokeHelper.resetKaraoke(this, lyricLines[currentIndex].text)
-            alpha = 0.6f; setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp)
+            alpha = 0.6f; setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp / CURRENT_SCALE)
             setTextColor(Color.parseColor(DIM_COLOR)); typeface = Typeface.DEFAULT_BOLD
             letterSpacing = 0.01f; setShadowLayer(0f, 0f, 0f, 0)
         }
         currentIndex = target
         if (currentIndex in lyLineViews.indices) lyLineViews[currentIndex].apply {
-            alpha = 1f; setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp * CURRENT_SCALE)
+            alpha = 1f; setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSizeSp)
             typeface = Typeface.DEFAULT_BOLD; setTextColor(Color.parseColor(NEON_COLOR))
             letterSpacing = -0.015f
             setShadowLayer(dp(15).toFloat(), 0f, 0f, Color.parseColor(NEON_GLOW))
@@ -366,8 +366,9 @@ class SkinMinimalNeon(context: Context) : LyricsSkin(context) {
     override fun setPlaceholderText(text: String) { noLyricsText.text = text }
 
     override fun onFontSizeChanged(sp: Float) {
+        noLyricsText.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp)
         lyLineViews.forEachIndexed { i, tv ->
-            tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (i == currentIndex) sp * CURRENT_SCALE else sp)
+            tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (i == currentIndex) sp else sp / CURRENT_SCALE)
         }
     }
 

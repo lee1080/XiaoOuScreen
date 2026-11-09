@@ -45,11 +45,11 @@ class SkinMinimalNeon(context: Context) : LyricsSkin(context) {
     private val lyricsContainer: LinearLayout
     private val noLyricsText: TextView
     // 左面板引用（两栏架构）
-    private lateinit var coverSectionView: FrameLayout
-    private lateinit var leftPanel: FrameLayout
-    private lateinit var lyricsArea: FrameLayout
-    private lateinit var discFrame: FrameLayout
-    private lateinit var contentRowLayout: LinearLayout
+    private val coverSectionView: FrameLayout
+    private val leftPanel: FrameLayout
+    private val lyricsArea: FrameLayout
+    private val discFrame: FrameLayout
+    private val contentRowLayout: LinearLayout
     private val baseLeftWeight: Float = 1f
     private val baseDiscSizeDp = 140
     private val baseDiscDotSizeDp = 18
@@ -58,7 +58,7 @@ class SkinMinimalNeon(context: Context) : LyricsSkin(context) {
     private val baseLeftPaddingDp = intArrayOf(30, 20, 20, 20)
     private val baseInfoTopPaddingDp = 12
 
-    private lateinit var lyricsScrollView: ScrollView
+    private val lyricsScrollView: ScrollView
     private var lyLineViews: List<TextView> = emptyList()
     private var lyricLines: List<LyricLine> = emptyList()
     private var currentIndex = -1
@@ -440,7 +440,7 @@ class SkinMinimalNeon(context: Context) : LyricsSkin(context) {
             dp((baseLeftPaddingDp[3] * scale).toInt())
         )
         // infoCol topPadding
-        val infoCol = (leftContent as? ViewGroup)?.getChildAt(1) as? ViewGroup
+        val infoCol = leftContent?.getChildAt(1) as? ViewGroup
         infoCol?.setPadding(0, dp((baseInfoTopPaddingDp * scale).toInt()), 0, 0)
     }
 

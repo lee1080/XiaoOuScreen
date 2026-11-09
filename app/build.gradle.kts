@@ -57,17 +57,42 @@ android {
         versionName = currentVersionName
     }
 
+    signingConfigs {
+        create("aospPlatform") {
+            storeFile = rootProject.file("key/aosp_platform.jks")
+            storePassword = "android"
+            keyAlias = "android"
+            keyPassword = "android"
+            enableV1Signing = true
+            enableV2Signing = true
+        }
+    }
+
     buildTypes {
         debug {
             isMinifyEnabled = false
         }
         release {
-            isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
+            isMinifyEnabled = true
+            isShrinkResources = true
+            signingConfig = signingConfigs.getByName("aospPlatform")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+        }
+    }
+
+    applicationVariants.all {
+        outputs.all {
+            val outputImpl = this as? com.android.build.gradle.internal.api.ApkVariantOutputImpl
+            if (outputImpl != null) {
+                if (buildType.name == "release") {
+                    outputImpl.outputFileName = "XiaoOuScreen-v${versionName}.apk"
+                } else {
+                    outputImpl.outputFileName = "XiaoOuScreen-v${versionName}-${buildType.name}.apk"
+                }
+            }
         }
     }
 

@@ -27,7 +27,9 @@ import com.carlyrics.util.CoverColorUtil
 import com.carlyrics.util.LyricsCacheManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.cancel
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -156,7 +158,9 @@ class LyricsDisplayView(context: Context) : LyricsSkin(context) {
     private var lyLineViews: List<TextView> = emptyList()
     private var lyricLines: List<LyricLine> = emptyList()
     private var currentIndex: Int = -1
-    private val uiScope = CoroutineScope(Dispatchers.Main)
+    private var viewJob = SupervisorJob()
+    private var uiScope = CoroutineScope(Dispatchers.Main + viewJob)
+    private var coverColorJob: Job? = null
 
     // raw list for updating (no weight)
     private var currentRows: MutableList<TextView> = mutableListOf()
@@ -306,8 +310,6 @@ class LyricsDisplayView(context: Context) : LyricsSkin(context) {
             return targetIndex
         }
 
-        val effSize = fontSizeSp
-
         // 还原上一个
         if (currentIndex in lyLineViews.indices) {
             lyLineViews[currentIndex].apply {
@@ -353,12 +355,13 @@ class LyricsDisplayView(context: Context) : LyricsSkin(context) {
             return
         }
 
+        coverColorJob?.cancel()
         LyricsCacheManager.loadCoverBitmap(context, url) { bitmap ->
             if (bitmap != null) {
                 val drawable = android.graphics.drawable.BitmapDrawable(resources, bitmap)
                 coverImage.setImageDrawable(drawable)
 
-                uiScope.launch {
+                coverColorJob = uiScope.launch {
                     val colors = withContext(Dispatchers.IO) {
                         CoverColorUtil.extractColors(bitmap)
                     }
@@ -500,9 +503,18 @@ class LyricsDisplayView(context: Context) : LyricsSkin(context) {
         ).toInt()
     }
 
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        if (!viewJob.isActive) {
+            viewJob = SupervisorJob()
+            uiScope = CoroutineScope(Dispatchers.Main + viewJob)
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
-        uiScope.cancel()
+        coverColorJob?.cancel()
+        viewJob.cancelChildren()
     }
 
     override fun onDetachedFromWindow() {

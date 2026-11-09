@@ -9,7 +9,11 @@ import java.util.Calendar
  */
 object WeatherSceneMapper {
 
-    private const val TWILIGHT_WINDOW_SECONDS = 2700L // 45 分钟过渡窗口
+    // 现实民用晨昏与大气物理光学非对称过渡窗口 (贴合人体肉眼对晨曦晚霞与黑夜初临的实际感知)
+    private const val DAWN_BEFORE_SUNRISE_SECONDS = 25 * 60L // 日出前 25 分钟：东方天际微露鱼肚白、晨光初透
+    private const val DAWN_AFTER_SUNRISE_SECONDS = 20 * 60L  // 日出后 20 分钟：旭日跃出地平线、阳光普照，转入白天
+    private const val DUSK_BEFORE_SUNSET_SECONDS = 20 * 60L  // 日落前 20 分钟：夕阳金光斜射、晚霞火烧云初现
+    private const val DUSK_AFTER_SUNSET_SECONDS = 25 * 60L   // 日落后 25 分钟：民用昏影结束、天空暮色彻底消退，切入黑夜
 
     /**
      * 重载入口 1：直接通过 WeatherState × TimeOfDay 进行 28 状态模拟（供主屏 4×7 矩阵控制台）
@@ -415,29 +419,47 @@ object WeatherSceneMapper {
 
     /**
      * 精准判断 DAWN / DAY / DUSK / NIGHT (4 时段)
+     * 1. 优先使用实车经纬度天文日出日落 + 非对称民用晨昏窗口计算 (日落后 25 分钟准时切入夜晚，天黑透不再显示傍晚)
+     * 2. 无天文数据时，采用区分秋冬季 (10~3月) 与春夏季 (4~9月) 的智能动态钟表兜底
      */
     fun resolveTimeOfDay(nowUnix: Long, sunriseUnix: Long, sunsetUnix: Long): TimeOfDay {
         if (sunriseUnix <= 0L || sunsetUnix <= 0L || sunsetUnix <= sunriseUnix) {
-            val hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
-            return when (hour) {
-                in 5..6 -> TimeOfDay.DAWN
-                in 7..17 -> TimeOfDay.DAY
-                in 18..19 -> TimeOfDay.DUSK
-                else -> TimeOfDay.NIGHT
+            val cal = Calendar.getInstance()
+            val month = cal.get(Calendar.MONTH) + 1 // 1 ~ 12
+            val minuteOfDay = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
+
+            // 区分秋冬季 (10月~3月，昼短夜长) 与春夏季 (4月~9月，昼长夜短)
+            val isWinterHalf = (month in 10..12 || month in 1..3)
+            return if (isWinterHalf) {
+                // 秋冬季：清晨 06:30~07:15, 白天 07:15~17:30, 傍晚 17:30~18:15, 夜晚 18:15~06:30 (18:15 准时切入夜景，彻底告别粗糙拖延至20点)
+                when (minuteOfDay) {
+                    in (6 * 60 + 30) until (7 * 60 + 15) -> TimeOfDay.DAWN
+                    in (7 * 60 + 15) until (17 * 60 + 30) -> TimeOfDay.DAY
+                    in (17 * 60 + 30) until (18 * 60 + 15) -> TimeOfDay.DUSK
+                    else -> TimeOfDay.NIGHT
+                }
+            } else {
+                // 春夏季：清晨 05:15~06:00, 白天 06:00~18:45, 傍晚 18:45~19:30, 夜晚 19:30~05:15
+                when (minuteOfDay) {
+                    in (5 * 60 + 15) until (6 * 60 + 0) -> TimeOfDay.DAWN
+                    in (6 * 60 + 0) until (18 * 60 + 45) -> TimeOfDay.DAY
+                    in (18 * 60 + 45) until (19 * 60 + 30) -> TimeOfDay.DUSK
+                    else -> TimeOfDay.NIGHT
+                }
             }
         }
 
         return when {
-            // 拂晓/凌晨：日出前后 45 分钟
-            nowUnix in (sunriseUnix - TWILIGHT_WINDOW_SECONDS)..(sunriseUnix + TWILIGHT_WINDOW_SECONDS) -> TimeOfDay.DAWN
+            // 清晨：日出前 25 分钟至日出后 20 分钟 (东方破晓 -> 旭日完全升起，共 45 分钟)
+            nowUnix in (sunriseUnix - DAWN_BEFORE_SUNRISE_SECONDS)..(sunriseUnix + DAWN_AFTER_SUNRISE_SECONDS) -> TimeOfDay.DAWN
 
-            // 傍晚/黄昏：日落前后 45 分钟
-            nowUnix in (sunsetUnix - TWILIGHT_WINDOW_SECONDS)..(sunsetUnix + TWILIGHT_WINDOW_SECONDS) -> TimeOfDay.DUSK
+            // 傍晚：日落前 20 分钟至日落后 25 分钟 (夕阳斜照晚霞 -> 民用暮光结束，天黑透准时切夜景，共 45 分钟)
+            nowUnix in (sunsetUnix - DUSK_BEFORE_SUNSET_SECONDS)..(sunsetUnix + DUSK_AFTER_SUNSET_SECONDS) -> TimeOfDay.DUSK
 
-            // 白天：在拂晓后到黄昏前
-            nowUnix in (sunriseUnix + TWILIGHT_WINDOW_SECONDS)..(sunsetUnix - TWILIGHT_WINDOW_SECONDS) -> TimeOfDay.DAY
+            // 白天：清晨结束后至傍晚开始前
+            nowUnix in (sunriseUnix + DAWN_AFTER_SUNRISE_SECONDS)..(sunsetUnix - DUSK_BEFORE_SUNSET_SECONDS) -> TimeOfDay.DAY
 
-            // 其余为夜晚
+            // 其余时段一律为黑夜
             else -> TimeOfDay.NIGHT
         }
     }

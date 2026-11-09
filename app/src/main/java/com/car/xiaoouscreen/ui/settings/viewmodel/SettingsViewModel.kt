@@ -23,6 +23,7 @@ import com.car.xiaoouscreen.ui.settings.model.MenuItemId
 import com.car.xiaoouscreen.ui.settings.model.SettingsState
 import com.car.xiaoouscreen.util.NotificationPermissionHelper
 import com.carlyrics.CarLyricsApplication
+import com.carlyrics.lyrics.LyricsApiManager
 import com.carlyrics.lyrics.LyricsSource
 import com.carlyrics.lyrics.LyricsSourceManager
 import com.carlyrics.skin.SkinType
@@ -142,8 +143,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                     id = src.id,
                     name = src.name,
                     category = if (isDefault) "默认内置源"
-                    else if (src.script.contains("krc", true) || src.name.contains("krc", true)) "逐字KRC"
-                    else if (src.script.contains("qrc", true) || src.name.contains("qrc", true)) "逐字QRC"
+                    else if (src.name.contains("krc", true) || src.description.contains("krc", true)) "逐字KRC"
+                    else if (src.name.contains("qrc", true) || src.description.contains("qrc", true)) "逐字QRC"
                     else "逐字增强",
                     url = src.url.ifBlank { "plugin://${src.id}" },
                     enabled = src.isEnabled,
@@ -509,6 +510,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             }
 
             result.onSuccess { msg ->
+                qWeatherRepo.resetCircuitBreaker()
                 qWeatherConfig.saveConfig(key, host)
                 qWeatherConfig.isEnabled = true
                 qWeatherConfig.isConnected = true
@@ -590,6 +592,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             if (canUseQWeather) {
                 val host = weatherState.apiHost.trim().ifBlank { "devapi.qweather.com" }
                 val key = weatherState.apiKey.trim()
+                qWeatherRepo.resetCircuitBreaker()
                 val result = withContext(Dispatchers.IO) {
                     qWeatherRepo.testConnection(key = key, host = host, lat = lat, lon = lon)
                 }
@@ -651,16 +654,15 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun toggleLongMarquee(enabled: Boolean) {
-        _uiState.update { it.copy(lyrics = it.lyrics.copy(longMarquee = true)) }
+        _uiState.update { it.copy(lyrics = it.lyrics.copy(longMarquee = enabled)) }
         try {
-            PrefsManager.setMarqueeEnabled(true)
+            PrefsManager.setMarqueeEnabled(enabled)
             WeatherOverlayService.instance?.updateLyricsRuntimeSettings()
         } catch (_: Exception) {}
     }
 
     fun setAlignMode(mode: String) {
-        val currentSkin = try { SkinType.valueOf(_uiState.value.lyrics.skinTheme) } catch (_: Exception) { SkinType.DEFAULT }
-        val effectiveAlign = if (currentSkin == SkinType.VIBRANT_WAVE) "center" else "left"
+        val effectiveAlign = if (mode.equals("center", ignoreCase = true)) "center" else "left"
         _uiState.update { it.copy(lyrics = it.lyrics.copy(alignMode = effectiveAlign)) }
         val alignInt = if (effectiveAlign == "center") 0 else -1
         try {
@@ -764,6 +766,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun onSourcesImported(importedList: List<LyricsSource>) {
+        if (importedList.isNotEmpty()) {
+            showToast("成功导入 ${importedList.size} 个歌词源")
+        }
         val refreshed = loadSourcesFromManager()
         _uiState.update { it.copy(sources = refreshed) }
     }
@@ -828,7 +833,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             val sizeBytes = withContext(Dispatchers.IO) {
                 try {
-                    LyricsCacheManager.getCacheSize()
+                    LyricsCacheManager.getTotalCacheSizeBytes(context)
                 } catch (_: Exception) { 0L }
             }
             val sizeMB = sizeBytes / (1024f * 1024f)
@@ -850,14 +855,21 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
                 try {
-                    LyricsCacheManager.clearAll()
+                    // 1. 彻底清理歌词与封面私有磁盘缓存及 cacheDir 碎片
+                    LyricsCacheManager.clearAll(context)
+                    // 2. 清理内存中已解析歌词对象 (杜绝脏歌词残留)
+                    LyricsApiManager.clearPreloadCache()
+                    // 3. 清理 Glide 磁盘图片缓存
                     Glide.get(context).clearDiskCache()
                 } catch (e: Exception) {
                     AppLogger.e("SettingsViewModel", "清理缓存异常: ${e.message}")
                 }
             }
             try {
+                // 4. 清理 Glide 内存 Bitmap 池 (必须在主线程)
                 Glide.get(context).clearMemory()
+                // 5. 清理共享 HMI 位图引用
+                com.car.xiaoouscreen.util.SharedHmiAssetManager.clearAll()
             } catch (_: Exception) {}
 
             refreshCacheSize()

@@ -37,7 +37,6 @@ import androidx.compose.ui.unit.sp
 import com.car.xiaoouscreen.ui.settings.components.NeuButton
 import com.car.xiaoouscreen.ui.settings.components.NeuInfoButton
 import com.car.xiaoouscreen.ui.settings.model.AnnotationInfo
-import com.car.xiaoouscreen.ui.settings.model.MenuItemId
 import com.car.xiaoouscreen.ui.settings.model.PermissionItem
 import com.car.xiaoouscreen.ui.settings.model.WelcomeState
 import com.car.xiaoouscreen.ui.settings.theme.NeuColors
@@ -51,7 +50,6 @@ import com.car.xiaoouscreen.ui.settings.theme.neuInset
 @Composable
 fun WelcomePage(
     state: WelcomeState,
-    onNavigate: (MenuItemId) -> Unit,
     onGrantAllPermissions: () -> Unit,
     onTogglePermission: (String) -> Unit,
     onShowInfo: (AnnotationInfo) -> Unit,

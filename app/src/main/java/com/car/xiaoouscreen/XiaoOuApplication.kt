@@ -3,15 +3,18 @@ package com.car.xiaoouscreen
 import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.content.ComponentCallbacks2
 import android.os.Build
 import com.carlyrics.CarLyricsApplication
 import com.carlyrics.lyrics.LyricsSourceManager
+import com.carlyrics.lyrics.LyricsSourceRunner
 import com.carlyrics.recognition.MusicRecognitionEngine
 import com.carlyrics.recognition.NotificationListenerService
 import com.carlyrics.util.AppLogger
 import com.carlyrics.util.LyricsCacheManager
 import com.carlyrics.util.PrefsManager
 import com.carlyrics.util.PresetManager
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -25,7 +28,11 @@ class XiaoOuApplication : Application() {
             private set
     }
 
-    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val coroutineExceptionHandler = CoroutineExceptionHandler { _, throwable ->
+        AppLogger.e("XiaoOuApp", "全局协程未捕获异常: ${throwable.message}", throwable)
+    }
+
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO + coroutineExceptionHandler)
 
     override fun onCreate() {
         super.onCreate()
@@ -62,6 +69,40 @@ class XiaoOuApplication : Application() {
                 AppLogger.w("XiaoOuApp", "后台异步初始化部分组件异常: ${e.message}")
             }
         }
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        AppLogger.d("XiaoOuApp", "系统触发 onTrimMemory: level=$level")
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_MODERATE || 
+            level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL || 
+            level >= ComponentCallbacks2.TRIM_MEMORY_COMPLETE) {
+            com.car.xiaoouscreen.util.SharedHmiAssetManager.clearAll()
+            try {
+                com.bumptech.glide.Glide.get(this).clearMemory()
+            } catch (_: Exception) {}
+            try {
+                LyricsSourceRunner.cancelAll()
+                LyricsSourceRunner.clearScriptCache()
+                com.carlyrics.skin.KaraokeHelper.clearWordSpanCache()
+                com.carlyrics.lyrics.LyricsApiManager.clearPreloadCache()
+            } catch (_: Exception) {}
+        }
+    }
+
+    override fun onLowMemory() {
+        super.onLowMemory()
+        AppLogger.w("XiaoOuApp", "系统触发 onLowMemory，紧急释放全部共享位图、歌词请求与图片缓存")
+        com.car.xiaoouscreen.util.SharedHmiAssetManager.clearAll()
+        try {
+            com.bumptech.glide.Glide.get(this).clearMemory()
+        } catch (_: Exception) {}
+        try {
+            LyricsSourceRunner.cancelAll()
+            LyricsSourceRunner.clearScriptCache()
+            com.carlyrics.skin.KaraokeHelper.clearWordSpanCache()
+            com.carlyrics.lyrics.LyricsApiManager.clearPreloadCache()
+        } catch (_: Exception) {}
     }
 
     private fun createNotificationChannels() {

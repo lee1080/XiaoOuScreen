@@ -23,6 +23,8 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
+import android.widget.ImageView
+import android.widget.TextView
 import com.car.xiaoouscreen.R
 import com.car.xiaoouscreen.domain.WeatherSceneConfig
 import com.car.xiaoouscreen.car.CarCallManager
@@ -32,6 +34,7 @@ import com.car.xiaoouscreen.ui.GearCubeFlipView
 import com.car.xiaoouscreen.ui.CarBottomLeftGearHudView
 import com.carlyrics.display.LyricsNormalizedContainerView
 import com.carlyrics.model.LyricLine
+import com.carlyrics.recognition.MusicRecognitionEngine
 import com.carlyrics.skin.SkinType
 import com.carlyrics.util.AppLogger
 import com.carlyrics.util.PrefsManager
@@ -67,6 +70,9 @@ class WeatherOverlayWindow(
     private var gearCubeView: GearCubeFlipView? = null
     private var driveModeView: DriveModeWipeView? = null
     private var bottomLeftGearHudView: CarBottomLeftGearHudView? = null
+    private var lastMusicTitle: String = ""
+    private var lastMusicArtist: String = ""
+    private var isMusicPlaying: Boolean = false
 
     // 画面层级优先级管理与双向覆盖挂起控制器：
     // 1. 当触发档位动画后接着触发模式动画：模式动画覆盖档位页面，模式动画完毕后直接展示档位页面，2秒后档位页面退出动画回到主页面。
@@ -109,6 +115,9 @@ class WeatherOverlayWindow(
         closeButtonContainer?.visibility = View.GONE
     }
 
+    val targetDisplayId: Int
+        get() = targetDisplay.displayId
+
     fun isShowing(): Boolean = isAttached
 
     fun show(): Boolean {
@@ -150,14 +159,33 @@ class WeatherOverlayWindow(
                 WindowManager.LayoutParams.TYPE_SYSTEM_ALERT
             }
 
+            val isDefaultDisplay = (targetDisplay.displayId == Display.DEFAULT_DISPLAY)
+            // 方案 B（桌面悬浮条带模式）：单屏调试时窗口物理高度精确约束为 1920×384 等比条带，悬浮在最上方
+            val windowHeight = if (isDefaultDisplay) {
+                val dm = displayContext.resources.displayMetrics
+                (dm.widthPixels * 384f / 1920f).toInt().coerceAtLeast(1)
+            } else {
+                WindowManager.LayoutParams.MATCH_PARENT
+            }
+
+            // 单屏模式配置 FLAG_NOT_TOUCH_MODAL，小欧条带内部正常触控唤出退出按钮，条带下方全屏点击 100% 自然直通底层，既不盲点也不吞噬触控！
+            val windowFlags = if (isDefaultDisplay) {
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                        WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
+            } else {
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                        WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
+            }
+
             val params = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.MATCH_PARENT,
+                windowHeight,
                 layoutType,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                        or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-                        or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-                        or WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+                windowFlags,
                 PixelFormat.TRANSLUCENT
             ).apply {
                 gravity = Gravity.LEFT or Gravity.TOP
@@ -216,6 +244,9 @@ class WeatherOverlayWindow(
             driveModeView = pres.driveModeView
             bottomLeftGearHudView = pres.bottomLeftGearHudView
             closeButtonContainer = pres.closeContainer
+            if (isMusicPlaying && lastMusicTitle.isNotEmpty()) {
+                setTopMusicTrackInfo(lastMusicTitle, lastMusicArtist, true)
+            }
             setupNativeAnimationViews()
             setupBottomLeftGearHudView()
             resetCloseButtonTimer()
@@ -253,6 +284,9 @@ class WeatherOverlayWindow(
         driveModeView = view.findViewById(R.id.driveModeView)
         bottomLeftGearHudView = view.findViewById(R.id.bottomLeftGearHudView)
         closeButtonContainer = view.findViewById(R.id.closeButtonContainer)
+        if (isMusicPlaying && lastMusicTitle.isNotEmpty()) {
+            setTopMusicTrackInfo(lastMusicTitle, lastMusicArtist, true)
+        }
         view.findViewById<View>(R.id.tvCloseButton).setOnClickListener {
             onCloseListener?.invoke()
         }
@@ -328,12 +362,28 @@ class WeatherOverlayWindow(
     }
 
     /**
+     * 静默同步左下角微型常驻档位 HUD (开机就绪、自愈重启或免扰保护期调用，仅平滑更新左下角 HUD 指示，绝不弹起 3D 大翻转)
+     */
+    fun syncGearSilently(gear: String) {
+        autoHideHandler.post {
+            try {
+                bottomLeftGearHudView?.setGear(gear, animate = false)
+                bottomLeftGearHudView?.bringToFront()
+                Log.d(TAG, "小欧屏左下角 HUD 静默同步档位: $gear")
+            } catch (t: Throwable) {
+                Log.w(TAG, "静默同步左下角 HUD 档位异常: ${t.message}")
+            }
+        }
+    }
+
+    /**
      * 触发小欧屏 3D 正方体向上翻转档位动效 (100% 纯原生)
      * - 用户规范：先模式再档位，档位退出后直接显示主界面，绝不复活展示模式
      */
     fun triggerGearFlip(gear: String) {
         val gearV = gearCubeView ?: return
         autoHideHandler.post {
+            if (!isAttached) return@post
             try {
                 if (isDriveModeActive || driveModeView?.visibility == View.VISIBLE) {
                     isDriveModeActive = false
@@ -364,6 +414,7 @@ class WeatherOverlayWindow(
     fun triggerDriveModeSwitch(mode: String) {
         val modeV = driveModeView ?: return
         autoHideHandler.post {
+            if (!isAttached) return@post
             try {
                 if (isGearActive || gearCubeView?.visibility == View.VISIBLE) {
                     isGearActive = false
@@ -401,8 +452,14 @@ class WeatherOverlayWindow(
      * 平滑切入车载歌词页面
      */
     fun switchToLyricsPage(smooth: Boolean = true) {
-        if (currentPage == ActivePage.LYRICS && lyricsContainerView?.visibility == View.VISIBLE && lyricsContainerView?.alpha == 1f) return
+        if (currentPage == ActivePage.LYRICS && lyricsContainerView?.visibility == View.VISIBLE && lyricsContainerView?.alpha == 1f) {
+            weatherCanvasView?.setTopMusicTrackInfo("", "", isPlaying = false)
+            return
+        }
         currentPage = ActivePage.LYRICS
+
+        // 全屏歌词状态下：隐藏顶部居中常驻音乐胶囊
+        weatherCanvasView?.setTopMusicTrackInfo("", "", isPlaying = false)
 
         val lyrics = lyricsContainerView ?: return
         val weather = weatherCanvasView
@@ -452,11 +509,16 @@ class WeatherOverlayWindow(
      * 平滑回退至默认时间天气页面
      */
     fun switchToWeatherPage(smooth: Boolean = true) {
-        if (currentPage == ActivePage.WEATHER && weatherCanvasView?.visibility == View.VISIBLE && weatherCanvasView?.alpha == 1f) return
+        if (currentPage == ActivePage.WEATHER && weatherCanvasView?.visibility == View.VISIBLE && weatherCanvasView?.alpha == 1f) {
+            checkAndRestoreTopMusicInfo(smooth)
+            return
+        }
         currentPage = ActivePage.WEATHER
 
         val weather = weatherCanvasView ?: return
         val lyrics = lyricsContainerView
+
+        checkAndRestoreTopMusicInfo(smooth)
 
         weather.resumeAnimation()
         weather.visibility = View.VISIBLE
@@ -499,10 +561,58 @@ class WeatherOverlayWindow(
         }
     }
 
+    /**
+     * 平滑隐藏顶部音乐播放信息胶囊 (岛)
+     */
+    fun hideTopMusicTrackInfo(smooth: Boolean = true) {
+        weatherCanvasView?.setTopMusicTrackInfo("", "", isPlaying = false)
+    }
+
+    /**
+     * 评估并恢复天气主界面的顶部常驻音乐信息胶囊
+     * - 仅在非全屏歌词模式且音乐正在播放时展示
+     * - 如果没有音乐播放，即天气界面恢复时间显示时，必须严格隐藏！
+     */
+    private fun checkAndRestoreTopMusicInfo(smooth: Boolean) {
+        val cleanTitle = lastMusicTitle.trim()
+        val cleanArtist = lastMusicArtist.trim()
+
+        val shouldShow = isMusicPlaying &&
+            cleanTitle.isNotEmpty() &&
+            !MusicRecognitionEngine.isInvalidPlaceholderTrack(cleanTitle, cleanArtist) &&
+            !PrefsManager.isStandaloneLyricsEnabled() &&
+            currentPage != ActivePage.LYRICS
+
+        if (shouldShow) {
+            weatherCanvasView?.setTopMusicTrackInfo(cleanTitle, cleanArtist, isPlaying = true)
+        } else {
+            weatherCanvasView?.setTopMusicTrackInfo("", "", isPlaying = false)
+        }
+    }
+
     // ==================== 歌词数据透传 ====================
 
     fun setLyricsTrackInfo(title: String, artist: String) {
         lyricsContainerView?.setTrackInfo(title, artist)
+    }
+
+    /**
+     * 设置并更新小欧屏最顶部居中高亮音乐播放信息 (‘音乐图标’ 歌名-歌手名)
+     * - 居中对齐，超出边界自动以省略号截断
+     * - 播放时淡入展示；无音乐播放或恢复时间显示时优雅淡出收敛隐藏
+     */
+    fun setTopMusicTrackInfo(title: String, artist: String, isPlaying: Boolean) {
+        lastMusicTitle = title
+        lastMusicArtist = artist
+        this.isMusicPlaying = isPlaying
+
+        // 全屏歌词状态下 (ActivePage.LYRICS 或系统启用了全屏歌词且音乐正在播放)，不显示顶部的歌名等
+        if (currentPage == ActivePage.LYRICS || PrefsManager.isStandaloneLyricsEnabled()) {
+            weatherCanvasView?.setTopMusicTrackInfo("", "", isPlaying = false)
+            return
+        }
+
+        weatherCanvasView?.setTopMusicTrackInfo(title, artist, isPlaying)
     }
 
     fun setLyricsCoverUrl(url: String?) {
@@ -654,8 +764,12 @@ class WeatherOverlayWindow(
         overlayRootView?.let { root ->
             windowManager?.let { wm ->
                 try {
-                    wm.removeView(root)
-                } catch (ignored: Throwable) {}
+                    wm.removeViewImmediate(root)
+                } catch (_: Throwable) {
+                    try {
+                        wm.removeView(root)
+                    } catch (_: Throwable) {}
+                }
             }
             overlayRootView = null
             windowManager = null
@@ -688,18 +802,18 @@ class WeatherOverlayWindow(
      * 通过创建新 Presentation 并在显示就绪后立即 dismiss 旧 Presentation，
      * 视觉上 0 闪黑、0 割裂，重新将我方界面排回 2037 最顶层！
      */
-    fun reassertTop(): Boolean {
+    fun reassertTop(force: Boolean = false): Boolean {
         if (!isAttached) return false
         val now = SystemClock.elapsedRealtime()
-        if (now - lastReassertTime < 2000L) {
-            AppLogger.d(TAG, "🛡️ 置顶重登节流保护 (2s 内已执行)，跳过重复调用")
+        if (!force && now - lastReassertTime < 800L) {
+            AppLogger.d(TAG, "🛡️ 置顶重登节流保护 (800ms 内已执行)，跳过重复调用")
             return false
         }
-        if (consecutiveReassertCount >= 3 && now - lastReassertTime < 15000L) {
-            AppLogger.w(TAG, "🛡️ 连续失焦重登已达上限 (3次)，为防死循环暂停自动重登")
+        if (!force && consecutiveReassertCount >= 4 && now - lastReassertTime < 15000L) {
+            AppLogger.w(TAG, "🛡️ 连续失焦重登已达上限 (4次)，为防死循环暂停自动重登")
             return false
         }
-        if (now - lastReassertTime > 15000L) {
+        if (now - lastReassertTime > 15000L || force) {
             consecutiveReassertCount = 0
         }
         lastReassertTime = now
@@ -722,6 +836,9 @@ class WeatherOverlayWindow(
                 driveModeView = newPres.driveModeView
                 bottomLeftGearHudView = newPres.bottomLeftGearHudView
                 closeButtonContainer = newPres.closeContainer
+                if (isMusicPlaying && lastMusicTitle.isNotEmpty()) {
+                    setTopMusicTrackInfo(lastMusicTitle, lastMusicArtist, true)
+                }
                 setupNativeAnimationViews()
                 setupBottomLeftGearHudView()
                 resetCloseButtonTimer()
@@ -729,6 +846,7 @@ class WeatherOverlayWindow(
                 pendingSceneConfig?.let { weatherCanvasView?.updateScene(it) }
                 pendingCanvasLyricLines?.let { weatherCanvasView?.setLyrics(it) }
                 pendingCanvasLyricsActive?.let { weatherCanvasView?.setLyricsActive(it, smooth = false) }
+                pendingCallInfo?.let { weatherCanvasView?.setCallInfo(it) }
                 val shouldAvoid = PrefsManager.isXiaoOuAvatarEnabled()
                 lyricsContainerView?.xiaoOuAvoidanceEnabled = shouldAvoid
                 weatherCanvasView?.setXiaoOuAvoidance(shouldAvoid)
@@ -746,12 +864,15 @@ class WeatherOverlayWindow(
                     lyricsContainerView?.pause()
                 }
 
-                // 销毁旧 Presentation，因为新 Presentation 已经先一步 show 出在顶层，视觉上 0 闪黑
-                try {
-                    oldPres?.canvasView?.pauseAnimation()
-                    oldPres?.lyricsView?.pause()
-                    oldPres?.dismiss()
-                } catch (_: Throwable) {}
+                // 销毁旧 Presentation：延迟 150ms 等新 Presentation 窗口与画布完全渲染上屏后再 dismiss 旧窗口，
+                // 彻底杜绝同步 dismiss 导致底色/原生画面瞬透的闪烁！
+                newPres.canvasView.postDelayed({
+                    try {
+                        oldPres?.canvasView?.pauseAnimation()
+                        oldPres?.lyricsView?.pause()
+                        oldPres?.dismiss()
+                    } catch (_: Throwable) {}
+                }, 150L)
 
                 AppLogger.i(TAG, "🛡️ 小欧副屏 2037 Presentation 无缝重新置顶完成！")
                 true

@@ -40,7 +40,7 @@
 
     <application
         android:name=".XiaoOuApplication"
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"
@@ -61,10 +61,10 @@
             </intent-filter>
         </activity>
 
-        <!-- 车载歌词二级设置 Activity -->
+        <!-- 车载歌词二级设置 Activity (内部重定向，关闭外部非必要导出) -->
         <activity
             android:name=".ui.LyricsSettingsActivity"
-            android:exported="true"
+            android:exported="false"
             android:screenOrientation="sensorLandscape"
             android:theme="@style/Theme.CarLyrics"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize" />
@@ -112,11 +112,11 @@
             </intent-filter>
         </receiver>
 
-        <!-- 小欧屏 Presentation / Overlay 前台投屏服务 (支持 ADB 与外部调度，任务移除时不中断运行) -->
+        <!-- 小欧屏 Presentation / Overlay 前台投屏服务 (由内部及系统启动接收器调度，关闭外部无鉴权拉起) -->
         <service
             android:name=".service.WeatherOverlayService"
             android:stopWithTask="false"
-            android:exported="true" />
+            android:exported="false" />
 
         <!-- 通知监听服务 (用于兜底媒体识别与广播捕获) -->
         <service

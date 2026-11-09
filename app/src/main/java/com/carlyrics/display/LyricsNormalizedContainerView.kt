@@ -148,7 +148,7 @@ class LyricsNormalizedContainerView @JvmOverloads constructor(
         }
         currentSkinType = skinType
         val oldSkin = currentSkin
-        try { (oldSkin as? LyricsSkin)?.onDestroy() } catch (_: Exception) {}
+        try { oldSkin?.onDestroy() } catch (_: Exception) {}
 
         val newSkin = SkinFactory.create(skinType, normalizedContext)
 

@@ -1,6 +1,5 @@
 package com.car.xiaoouscreen.ui.settings.dialogs
 
-import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -27,7 +26,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -42,7 +40,6 @@ import com.car.xiaoouscreen.ui.settings.theme.neuButton
 import com.car.xiaoouscreen.ui.settings.theme.neuCard
 import com.car.xiaoouscreen.ui.settings.theme.neuFloatingShell
 import com.car.xiaoouscreen.ui.settings.theme.neuInset
-import java.io.File
 
 /**
  * 联系作者与交流共创弹窗
@@ -52,25 +49,6 @@ import java.io.File
 fun ContactAuthorDialog(
     onDismiss: () -> Unit
 ) {
-    // 优先加载本地开发路径图片，若不可用则回退至打包的 Drawable 资源
-    val wechatBitmap = remember {
-        try {
-            val f = File("/Users/liyafei/Desktop/liyafei/车机研究/微信.png")
-            if (f.exists()) BitmapFactory.decodeFile(f.absolutePath) else null
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    val douyinBitmap = remember {
-        try {
-            val f = File("/Users/liyafei/Desktop/liyafei/车机研究/抖音.png")
-            if (f.exists()) BitmapFactory.decodeFile(f.absolutePath) else null
-        } catch (e: Exception) {
-            null
-        }
-    }
-
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
@@ -168,25 +146,14 @@ fun ContactAuthorDialog(
                             badgeBg = Color(0xFFDCFCE7),
                             badgeColor = Color(0xFF15803D)
                         ) {
-                            if (wechatBitmap != null) {
-                                Image(
-                                    bitmap = wechatBitmap.asImageBitmap(),
-                                    contentDescription = "作者微信二维码",
-                                    modifier = Modifier
-                                        .size(148.dp)
-                                        .clip(RoundedCornerShape(8.dp)),
-                                    contentScale = ContentScale.Fit
-                                )
-                            } else {
-                                Image(
-                                    painter = painterResource(id = R.drawable.qrcode_wechat),
-                                    contentDescription = "作者微信二维码",
-                                    modifier = Modifier
-                                        .size(148.dp)
-                                        .clip(RoundedCornerShape(8.dp)),
-                                    contentScale = ContentScale.Fit
-                                )
-                            }
+                            Image(
+                                painter = painterResource(id = R.drawable.qrcode_wechat),
+                                contentDescription = "作者微信二维码",
+                                modifier = Modifier
+                                    .size(148.dp)
+                                    .clip(RoundedCornerShape(8.dp)),
+                                contentScale = ContentScale.Fit
+                            )
                         }
 
                         // 右侧：抖音二维码卡片
@@ -198,25 +165,14 @@ fun ContactAuthorDialog(
                             badgeBg = Color(0xFFFEE2E2),
                             badgeColor = Color(0xFFDC2626)
                         ) {
-                            if (douyinBitmap != null) {
-                                Image(
-                                    bitmap = douyinBitmap.asImageBitmap(),
-                                    contentDescription = "抖音二维码",
-                                    modifier = Modifier
-                                        .size(148.dp)
-                                        .clip(RoundedCornerShape(8.dp)),
-                                    contentScale = ContentScale.Fit
-                                )
-                            } else {
-                                Image(
-                                    painter = painterResource(id = R.drawable.qrcode_douyin),
-                                    contentDescription = "抖音二维码",
-                                    modifier = Modifier
-                                        .size(148.dp)
-                                        .clip(RoundedCornerShape(8.dp)),
-                                    contentScale = ContentScale.Fit
-                                )
-                            }
+                            Image(
+                                painter = painterResource(id = R.drawable.qrcode_douyin),
+                                contentDescription = "抖音二维码",
+                                modifier = Modifier
+                                    .size(148.dp)
+                                    .clip(RoundedCornerShape(8.dp)),
+                                contentScale = ContentScale.Fit
+                            )
                         }
                     }
 

@@ -3,6 +3,7 @@ package com.carlyrics.lyrics
 import com.carlyrics.util.AppLogger
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
+import okhttp3.Dns
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -14,6 +15,8 @@ import org.mozilla.javascript.Function
 import org.mozilla.javascript.NativeObject
 import org.mozilla.javascript.Script
 import org.mozilla.javascript.ScriptableObject
+import java.net.InetAddress
+import java.net.UnknownHostException
 import java.security.MessageDigest
 import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
@@ -29,9 +32,35 @@ object LyricsSourceRunner {
 
     val client: OkHttpClient by lazy {
         OkHttpClient.Builder()
-            .connectTimeout(2500, TimeUnit.MILLISECONDS)
-            .readTimeout(3000, TimeUnit.MILLISECONDS)
+            .dns(object : Dns {
+                override fun lookup(hostname: String): List<InetAddress> {
+                    val addresses = Dns.SYSTEM.lookup(hostname)
+                    for (addr in addresses) {
+                        if (addr.isLoopbackAddress || addr.isSiteLocalAddress || addr.isLinkLocalAddress || addr.isAnyLocalAddress) {
+                            throw UnknownHostException("SSRF/DNS-Rebinding blocked: $hostname resolves to private/local address ${addr.hostAddress}")
+                        }
+                    }
+                    return addresses
+                }
+            })
+            // 物理连接与 302 重定向全链路 SSRF 防御拦截器
+            .addNetworkInterceptor { chain ->
+                val request = chain.request()
+                val socket = chain.connection()?.socket()
+                val inetAddress = socket?.inetAddress
+                if (inetAddress != null && (inetAddress.isLoopbackAddress ||
+                            inetAddress.isSiteLocalAddress ||
+                            inetAddress.isLinkLocalAddress ||
+                            inetAddress.isAnyLocalAddress)) {
+                    throw java.io.IOException("SSRF 拦截: 禁止访问私有/本地 IP (${request.url.host} -> ${inetAddress.hostAddress})")
+                }
+                chain.proceed(request)
+            }
+            .connectTimeout(3000, TimeUnit.MILLISECONDS)
+            .readTimeout(4000, TimeUnit.MILLISECONDS)
             .writeTimeout(3000, TimeUnit.MILLISECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
             .build()
     }
 
@@ -206,6 +235,16 @@ object LyricsSourceRunner {
     }
 
     /**
+     * 清理脚本预编译缓存 (TrimMemory 阶段调用)
+     */
+    fun clearScriptCache() {
+        synchronized(scriptCacheLock) {
+            compiledScriptCache.clear()
+        }
+        AppLogger.d(TAG, "JS 脚本预编译缓存已清空")
+    }
+
+    /**
      * Rhino 安全沙箱 ContextFactory：
      * 1. 禁用所有未经白名单许可的原生 Java 类访问，杜绝 RCE、提权与反射逃逸
      * 2. 注入真实墙上时钟超时监控与指令安全上限，防止死循环冻结车机，同时保证复杂 JSON 解析正常完成
@@ -218,10 +257,15 @@ object LyricsSourceRunner {
             cx.setGenerateObserverCount(true)
             cx.instructionObserverThreshold = 20_000
 
-            // 严格白名单控制暴露给 JS 的 Java 类
+            // 严格白名单控制暴露给 JS 的 Java 类 (禁止直接暴露宿主单例，仅开放专用桥接类与只读标准类型)
             cx.setClassShutter(object : ClassShutter {
                 override fun visibleToScripts(fullClassName: String): Boolean {
-                    return fullClassName.startsWith("com.carlyrics.lyrics.LyricsSourceRunner") ||
+                    return fullClassName == JsHttp::class.java.name ||
+                           fullClassName == JsCrypto::class.java.name ||
+                           fullClassName == JsConsole::class.java.name ||
+                           fullClassName.endsWith("\$JsHttp") ||
+                           fullClassName.endsWith("\$JsCrypto") ||
+                           fullClassName.endsWith("\$JsConsole") ||
                            fullClassName.startsWith("java.lang.String") ||
                            fullClassName.startsWith("java.lang.Number") ||
                            fullClassName.startsWith("java.lang.Boolean") ||
@@ -229,6 +273,8 @@ object LyricsSourceRunner {
                            fullClassName.startsWith("java.lang.Integer") ||
                            fullClassName.startsWith("java.lang.Long") ||
                            fullClassName.startsWith("java.lang.Float") ||
+                           fullClassName.startsWith("java.lang.Character") ||
+                           fullClassName.startsWith("java.lang.CharSequence") ||
                            fullClassName.startsWith("java.util.Map") ||
                            fullClassName.startsWith("java.util.List")
                 }
@@ -258,7 +304,7 @@ object LyricsSourceRunner {
         val cx = sandboxFactory.enterContext()
         return try {
             cx.putThreadLocal("startTime", System.currentTimeMillis())
-            cx.putThreadLocal("maxDurationMs", 3500L)
+            cx.putThreadLocal("maxDurationMs", 4000L)
 
             // 使用安全标准对象 (不暴露 Packages, JavaAdapter, JavaImporter)
             val scope = cx.initSafeStandardObjects()
@@ -300,8 +346,12 @@ object LyricsSourceRunner {
                 val uri = java.net.URI(urlStr)
                 val host = uri.host?.lowercase() ?: return false
                 if (host == "localhost" || host.endsWith(".local") || host.endsWith(".internal")) return false
-                if (host == "127.0.0.1" || host == "::1" || host == "0.0.0.0") return false
+                if (host == "127.0.0.1" || host == "::1" || host == "0.0.0.0" || host == "[::1]") return false
                 if (host.startsWith("10.") || host.startsWith("192.168.") || host.startsWith("169.254.")) return false
+                if (host.endsWith(".nip.io") || host.endsWith(".sslip.io") || host.endsWith(".xip.io")) return false
+                if (host.startsWith("127.") || host.startsWith("0.")) return false
+                if (host.startsWith("0x") || host.all { it.isDigit() }) return false // 拦截纯数字或十六进制 IP 变形绕过
+                if (host.startsWith("fe80:") || host.startsWith("[fe80:") || host.startsWith("fc00:") || host.startsWith("[fc00:") || host.startsWith("fd00:") || host.startsWith("[fd00:")) return false
                 if (host.startsWith("172.")) {
                     val parts = host.split(".")
                     if (parts.size >= 2) {
@@ -338,7 +388,11 @@ object LyricsSourceRunner {
                     if (resp.isSuccessful) resp.body?.string() else null
                 }
             } catch (e: Exception) {
-                AppLogger.d(TAG, "http.get 失败: $urlStr, err=${e.message}")
+                if (e is java.io.InterruptedIOException || e.message?.contains("Canceled", ignoreCase = true) == true) {
+                    AppLogger.d(TAG, "http.get 已取消")
+                } else {
+                    AppLogger.d(TAG, "http.get 失败: $urlStr, err=${e.message}")
+                }
                 null
             }
         }
@@ -362,7 +416,11 @@ object LyricsSourceRunner {
                     if (resp.isSuccessful) resp.body?.string() else null
                 }
             } catch (e: Exception) {
-                AppLogger.d(TAG, "http.post 失败: $urlStr, err=${e.message}")
+                if (e is java.io.InterruptedIOException || e.message?.contains("Canceled", ignoreCase = true) == true) {
+                    AppLogger.d(TAG, "http.post 已取消")
+                } else {
+                    AppLogger.d(TAG, "http.post 失败: $urlStr, err=${e.message}")
+                }
                 null
             }
         }

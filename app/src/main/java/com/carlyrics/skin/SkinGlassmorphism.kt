@@ -38,7 +38,7 @@ import com.carlyrics.util.LyricsCacheManager
  */
 class SkinGlassmorphism(context: Context) : LyricsSkin(context) {
 
-    private lateinit var bgImageView: ImageView
+    private val bgImageView: ImageView
     private var pulseAnimator: ValueAnimator? = null
     private val container: FrameLayout
     private val coverImage: ImageView
@@ -53,8 +53,8 @@ class SkinGlassmorphism(context: Context) : LyricsSkin(context) {
     private val coverFrame: FrameLayout
     private val contentRowLayout: LinearLayout
     // 两栏架构容器
-    private lateinit var leftPanel: FrameLayout
-    private lateinit var lyricsArea: FrameLayout
+    private val leftPanel: FrameLayout
+    private val lyricsArea: FrameLayout
     private val baseCoverSizeDp = 240
     private val baseCoverCornerDp = 16
     private val baseTitleSp = 18f

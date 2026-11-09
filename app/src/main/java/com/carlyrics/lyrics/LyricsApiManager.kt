@@ -4,10 +4,13 @@ import com.carlyrics.model.LyricData
 import com.carlyrics.model.LyricLine
 import com.carlyrics.model.LyricWord
 import com.carlyrics.util.AppLogger
+import com.carlyrics.util.LyricsCacheManager
 import com.carlyrics.util.PrefsManager
 import com.carlyrics.util.T2SUtil
 import com.google.gson.Gson
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import okhttp3.FormBody
 import okhttp3.OkHttpClient
@@ -32,24 +35,42 @@ class LyricsApiManager {
         val sharedClient: OkHttpClient by lazy {
             LyricsSourceRunner.client
         }
+
+        private val preloadCache = object : LinkedHashMap<String, LyricData>(3, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, LyricData>?): Boolean {
+                return size > 3
+            }
+        }
+        private val cacheLock = Any()
+
+        fun clearPreloadCache() {
+            synchronized(cacheLock) {
+                preloadCache.clear()
+            }
+        }
     }
 
     private val gson = Gson()
-
-    private val preloadCache = object : LinkedHashMap<String, LyricData>(3, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, LyricData>?): Boolean {
-            return size > 3
-        }
-    }
-    private val cacheLock = Any()
 
     fun cancelAllRequests() {
         LyricsSourceRunner.cancelAll()
     }
 
+    private fun storeLyricsCache(title: String, artist: String, data: LyricData) {
+        synchronized(cacheLock) {
+            preloadCache["$title|$artist"] = data
+        }
+        LyricsCacheManager.cacheLyrics(title, artist, data)
+    }
+
     fun getCachedLyrics(title: String, artist: String): LyricData? {
         synchronized(cacheLock) {
-            return preloadCache["$title|$artist"]
+            preloadCache["$title|$artist"]?.let { return it }
+        }
+        return LyricsCacheManager.getCachedLyrics(title, artist)?.also { diskData ->
+            synchronized(cacheLock) {
+                preloadCache["$title|$artist"] = diskData
+            }
         }
     }
 
@@ -63,9 +84,7 @@ class LyricsApiManager {
         try {
             val result = fetchLyrics(title, artist, duration, mediaId, packageName)
             result.onSuccess { data ->
-                synchronized(cacheLock) {
-                    preloadCache["$title|$artist"] = data
-                }
+                storeLyricsCache(title, artist, data)
             }
         } catch (_: Exception) {}
     }
@@ -166,7 +185,7 @@ class LyricsApiManager {
                 sourceName = "网易云音乐(官方直连)",
                 rawLrc = rawLrc
             )
-            synchronized(cacheLock) { preloadCache["$title|$artist"] = data }
+            storeLyricsCache(title, artist, data)
             return data
         } catch (e: Exception) {
             AppLogger.d(TAG, "fetchFromNeteaseOfficial 异常: ${e.message}")
@@ -296,16 +315,17 @@ class LyricsApiManager {
      * -100: 歌手明确不匹配（彻底排除翻唱或同名歌曲）
      */
     fun evaluateArtistMatch(reqArtist: String, resArtist: String): Int {
+        if (reqArtist.isBlank()) return 0 // 请求方未提供歌手，不惩罚也不加分
+        if (resArtist.isBlank()) return 0 // 搜索结果未返回歌手，中立
+
         val req = normalizeText(reqArtist)
         val res = normalizeText(resArtist)
-        if (req.isEmpty()) return 0 // 请求方未提供歌手，不惩罚也不加分
-        if (res.isEmpty()) return 0 // 搜索结果未返回歌手，中立
 
         val sReq = T2SUtil.convert(req)
         val sRes = T2SUtil.convert(res)
 
         // 1. 完全一致
-        if (sReq == sRes) return 30
+        if (sReq.isNotEmpty() && sReq == sRes) return 30
 
         // 2. 知名艺名映射
         val aliases = mapOf(
@@ -324,9 +344,11 @@ class LyricsApiManager {
         if (reqAlias != null && (normalizeText(reqAlias) == sRes || sRes.contains(normalizeText(reqAlias)))) return 30
         if (resAlias != null && (normalizeText(resAlias) == sReq || sReq.contains(normalizeText(resAlias)))) return 30
 
-        // 3. 多歌手拆分匹配 (如 "周杰伦 & 蔡依林" vs "周杰伦")
-        val reqArtists = sReq.split(Regex("""[&、/,\+，]""")).map { it.trim() }.filter { it.isNotEmpty() }
-        val resArtists = sRes.split(Regex("""[&、/,\+，]""")).map { it.trim() }.filter { it.isNotEmpty() }
+        // 3. 多歌手拆分匹配 (支持 "YOON MIRAE, Tiger JK & Bizzy", "周杰伦 & 蔡依林", "A / B", "A feat. B")
+        // 注意：必须在进行 normalizeText 去除非字母数字前，按分隔符完成多歌手拆分！
+        val delimiter = Regex("""(?i)\s*(?:feat\.?|ft\.?|with|vs\.?|[&、/,\+，;；])\s*""")
+        val reqArtists = reqArtist.split(delimiter).map { T2SUtil.convert(normalizeText(it)) }.filter { it.isNotEmpty() }
+        val resArtists = resArtist.split(delimiter).map { T2SUtil.convert(normalizeText(it)) }.filter { it.isNotEmpty() }
 
         val anyMatch = reqArtists.any { r ->
             resArtists.any { a ->
@@ -386,6 +408,7 @@ class LyricsApiManager {
         mediaId: String? = null,
         packageName: String? = null
     ): Result<LyricData> = withContext(Dispatchers.IO) {
+        coroutineContext.ensureActive()
         if (title.isBlank() || com.carlyrics.recognition.MusicRecognitionEngine.isInvalidPlaceholderTrack(title, artist)) {
             AppLogger.d(TAG, "fetchLyrics 忽略无效/占位符曲名: title=$title, artist=$artist")
             return@withContext Result.failure(IllegalArgumentException("无效的曲目标题"))
@@ -399,9 +422,10 @@ class LyricsApiManager {
         // 若当前播放器为网易云或偏好源为 netease，优先尝试官方直连
         val actualPkg = packageName ?: try { com.carlyrics.CarLyricsApplication.recognitionEngine.currentTrack.value?.packageName } catch (_: Exception) { null }
         if (actualPkg?.contains("netease") == true || PrefsManager.getPreferredLyricsSource().contains("netease")) {
+            coroutineContext.ensureActive()
             val neteaseDirect = fetchFromNeteaseOfficial(title, artist)
             if (neteaseDirect != null && neteaseDirect.lines.isNotEmpty()) {
-                synchronized(cacheLock) { preloadCache["$title|$artist"] = neteaseDirect }
+                storeLyricsCache(title, artist, neteaseDirect)
                 return@withContext Result.success(neteaseDirect)
             }
         }
@@ -419,10 +443,13 @@ class LyricsApiManager {
 
         // 瀑布流遍历已启用源
         for (source in enabledSources) {
+            coroutineContext.ensureActive()
             try {
                 // 1. 若支持 match 且 mediaId 存在，优先尝试直连
                 if (!mediaId.isNullOrBlank()) {
+                    coroutineContext.ensureActive()
                     val directMatch = LyricsSourceRunner.match(source, title, artist, durationSec, mediaId)
+                    coroutineContext.ensureActive()
                     if (directMatch != null && !directMatch.lrc.isNullOrBlank()) {
                         val parsedLines = parseLrcText(directMatch.lrc)
                         if (parsedLines.isNotEmpty()) {
@@ -433,7 +460,7 @@ class LyricsApiManager {
                                 sourceName = source.name,
                                 rawLrc = directMatch.lrc
                             )
-                            synchronized(cacheLock) { preloadCache["$title|$artist"] = data }
+                            storeLyricsCache(title, artist, data)
                             return@withContext Result.success(data)
                         }
                     }
@@ -457,7 +484,9 @@ class LyricsApiManager {
                 var matchedScore = -1
 
                 for ((qTitle, qArtist, _) in queries) {
+                    coroutineContext.ensureActive()
                     val searchItems = LyricsSourceRunner.search(source, qTitle, qArtist, durationSec)
+                    coroutineContext.ensureActive()
                     if (searchItems.isEmpty()) continue
 
                     var bestCandidate: SourceSearchItem? = null
@@ -517,7 +546,9 @@ class LyricsApiManager {
                 }
 
                 // 4. 获取具体歌词内容与封面
+                coroutineContext.ensureActive()
                 val lyricResult = LyricsSourceRunner.getLyrics(source, candidate.id) ?: continue
+                coroutineContext.ensureActive()
                 if (lyricResult.lrc.isNullOrBlank()) continue
 
                 val lines = parseLrcText(lyricResult.lrc)
@@ -525,6 +556,7 @@ class LyricsApiManager {
                     AppLogger.d(TAG, "[${source.name}] 成功匹配并获取歌词: ${candidate.title} - ${candidate.artist} (${lines.size}行, 匹配评分: $matchedScore)")
                     var coverUrl = lyricResult.cover
                     if (coverUrl.isNullOrBlank() || coverUrl.contains("artistpicserver.kuwo.cn") || coverUrl.contains("NO_PIC")) {
+                        coroutineContext.ensureActive()
                         coverUrl = fetchCover(candidate.title, candidate.artist)
                     }
                     val data = LyricData(
@@ -533,16 +565,18 @@ class LyricsApiManager {
                         sourceName = source.name,
                         rawLrc = lyricResult.lrc
                     )
-                    synchronized(cacheLock) { preloadCache["$title|$artist"] = data }
+                    storeLyricsCache(title, artist, data)
                     return@withContext Result.success(data)
                 }
             } catch (e: Exception) {
+                if (e is CancellationException) throw e
                 AppLogger.d(TAG, "[${source.name}] 检索失败: ${e.message}")
             }
         }
 
+        coroutineContext.ensureActive()
         fetchFromNeteaseOfficial(title, artist)?.let { data ->
-            synchronized(cacheLock) { preloadCache["$title|$artist"] = data }
+            storeLyricsCache(title, artist, data)
             return@withContext Result.success(data)
         }
 
@@ -553,6 +587,7 @@ class LyricsApiManager {
      * 单独获取封面 (同样采用严格匹配，严禁随机匹配错误封面)
      */
     suspend fun fetchCover(title: String, artist: String, packageName: String? = null): String? = withContext(Dispatchers.IO) {
+        coroutineContext.ensureActive()
         if (title.isBlank() || com.carlyrics.recognition.MusicRecognitionEngine.isInvalidPlaceholderTrack(title, artist)) {
             return@withContext null
         }
@@ -563,6 +598,7 @@ class LyricsApiManager {
         // 若当前播放器为网易云或偏好源为 netease，优先尝试官方直连
         val actualPkg = packageName ?: try { com.carlyrics.CarLyricsApplication.recognitionEngine.currentTrack.value?.packageName } catch (_: Exception) { null }
         if (actualPkg?.contains("netease") == true || PrefsManager.getPreferredLyricsSource().contains("netease")) {
+            coroutineContext.ensureActive()
             val neteaseDirect = fetchFromNeteaseOfficial(title, artist)
             if (!neteaseDirect?.coverUrl.isNullOrBlank()) {
                 return@withContext neteaseDirect?.coverUrl

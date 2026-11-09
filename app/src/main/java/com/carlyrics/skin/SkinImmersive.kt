@@ -51,11 +51,11 @@ class SkinImmersive(context: Context) : LyricsSkin(context) {
     private val fadeMaskTop: View
     private val fadeMaskBottom: View
     // 左面板引用（两栏架构）
-    private lateinit var leftPanelView: LinearLayout
-    private lateinit var leftPanel: FrameLayout
-    private lateinit var lyricsArea: FrameLayout
-    private lateinit var coverFrame: FrameLayout
-    private lateinit var contentRowLayout: LinearLayout
+    private val leftPanelView: LinearLayout
+    private val leftPanel: FrameLayout
+    private val lyricsArea: FrameLayout
+    private val coverFrame: FrameLayout
+    private val contentRowLayout: LinearLayout
     private val baseLeftWidthPercent: Float = 0.35f
     private val baseCoverSizeDp = 240
     private val baseCoverCornerDp = 16

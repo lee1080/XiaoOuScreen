@@ -380,7 +380,7 @@ object LyricsSourceManager {
     }
 
     /**
-     * 从 ZIP 输入流中解析歌词源合集
+     * 从 ZIP 输入流中解析歌词源合集 (车规级防 Zip 炸弹安全保护)
      * 自动遍历 ZIP 内所有的 .js 文件（忽略 __MACOSX、.DS_Store 等无关条目）
      * 若 ZIP 内包含 index.json 或 sources.json，也会与 .js 文件自动关联元数据
      */
@@ -391,16 +391,36 @@ object LyricsSourceManager {
             val jsFiles = mutableMapOf<String, String>() // baseName -> script content
             var collectionJsonStr: String? = null
 
+            // 安全防范：限制最大解压文件数与最大解压字节数，防止 Zip Bomb 击穿车机内存
+            val maxFiles = 64
+            val maxSingleFileBytes = 512 * 1024L // 512 KB
+            val maxTotalBytes = 10 * 1024 * 1024L // 10 MB
+            var processedFiles = 0
+            var totalBytesRead = 0L
+
             while (entry != null) {
                 val name = entry.name
                 // 忽略 macOS 压缩包中的临时文件、隐藏文件以及目录
                 if (!entry.isDirectory && !name.startsWith("__MACOSX") && !name.contains("/.") && !name.startsWith(".")) {
                     val baseName = File(name).name
                     if (baseName.endsWith(".js", ignoreCase = true)) {
+                        processedFiles++
+                        if (processedFiles > maxFiles) {
+                            return Result.failure(IllegalStateException("ZIP 压缩包内文件数量超限 (上限 $maxFiles 个)，已终止解压"))
+                        }
                         val baos = ByteArrayOutputStream()
                         val buffer = ByteArray(4096)
                         var len: Int
+                        var fileBytes = 0L
                         while (zipStream.read(buffer).also { len = it } > 0) {
+                            fileBytes += len
+                            totalBytesRead += len
+                            if (fileBytes > maxSingleFileBytes) {
+                                return Result.failure(IllegalStateException("单个脚本文件超过大小限制 (512KB): $baseName"))
+                            }
+                            if (totalBytesRead > maxTotalBytes) {
+                                return Result.failure(IllegalStateException("ZIP 解压总字节超过安全上限 (10MB)"))
+                            }
                             baos.write(buffer, 0, len)
                         }
                         val content = baos.toString("UTF-8")
@@ -409,7 +429,13 @@ object LyricsSourceManager {
                         val baos = ByteArrayOutputStream()
                         val buffer = ByteArray(4096)
                         var len: Int
+                        var fileBytes = 0L
                         while (zipStream.read(buffer).also { len = it } > 0) {
+                            fileBytes += len
+                            totalBytesRead += len
+                            if (fileBytes > maxSingleFileBytes || totalBytesRead > maxTotalBytes) {
+                                return Result.failure(IllegalStateException("合集描述 JSON 文件过大"))
+                            }
                             baos.write(buffer, 0, len)
                         }
                         val content = baos.toString("UTF-8")
@@ -643,9 +669,9 @@ object LyricsSourceManager {
             }
         }
 
-        // 4. 若无合集 URL，默认拼接到官方 jsDelivr CDN
-        val finalFileName = targetFile.substringAfterLast("/")
-        return "https://cdn.jsdelivr.net/gh/lee1080/carlyrics-hub@main/sources/$finalFileName"
+        // 4. 若无合集 URL，不进行任何硬编码保底，严格仅允许用户手动填写的地址
+        AppLogger.w(TAG, "源 [${itemName ?: itemId}] 缺少有效远程下载链接且未指定合集 BaseURL，已跳过")
+        return ""
     }
 
     /**

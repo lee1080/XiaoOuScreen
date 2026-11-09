@@ -58,7 +58,7 @@ enum class SkinType(val label: String, val defaultParams: SkinDefaultParams) {
 
 object SkinFactory {
     fun create(type: SkinType, context: Context): LyricsSkin = when (type) {
-        SkinType.DEFAULT -> com.carlyrics.display.LyricsDisplayView(context) as LyricsSkin
+        SkinType.DEFAULT -> com.carlyrics.display.LyricsDisplayView(context)
         SkinType.GLASSMORPHISM -> SkinGlassmorphism(context)
         SkinType.MINIMAL_NEON -> SkinMinimalNeon(context)
         SkinType.VIBRANT_WAVE -> SkinVibrantWave(context)

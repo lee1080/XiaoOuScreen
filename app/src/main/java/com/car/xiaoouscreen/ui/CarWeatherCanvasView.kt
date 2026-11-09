@@ -32,6 +32,7 @@ import android.view.View
 import android.view.animation.DecelerateInterpolator
 import android.view.animation.PathInterpolator
 import androidx.annotation.ColorInt
+import androidx.core.content.ContextCompat
 import androidx.core.graphics.ColorUtils
 import com.car.xiaoouscreen.R
 import com.car.xiaoouscreen.car.CarCallManager
@@ -41,6 +42,7 @@ import com.car.xiaoouscreen.domain.TimeOfDay
 import com.car.xiaoouscreen.domain.WeatherSceneConfig
 import com.car.xiaoouscreen.domain.WeatherState
 import com.carlyrics.model.LyricLine
+import com.carlyrics.recognition.MusicRecognitionEngine
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -679,6 +681,36 @@ class CarWeatherCanvasView @JvmOverloads constructor(
     private val branchPointsX = FloatArray(5)
     private val branchPointsY = FloatArray(5)
 
+    // ==========================================
+    // 顶部居中常驻音乐播放信息胶囊 (纯原生 1920×384 黄金比例自适应)
+    // ==========================================
+    private val topMusicBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0x4D000000.toInt()
+        style = Paint.Style.FILL
+    }
+    private val topMusicStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0x33FFFFFF.toInt()
+        style = Paint.Style.STROKE
+        strokeWidth = 1.2f
+    }
+    private val topMusicTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        textSize = 23f
+        typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+        setShadowLayer(3.5f, 0f, 1.5f, 0xE6000000.toInt())
+    }
+    private val topMusicIconPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    private var topMusicIconBmp: Bitmap? = null
+    private val topMusicCapsuleRect = RectF()
+
+    private var topMusicTitle: String = ""
+    private var topMusicArtist: String = ""
+    private var topMusicDisplayText: String = ""
+    private var isTopMusicPlaying: Boolean = false
+    private var topMusicAlpha: Float = 0f
+    private var topMusicTargetAlpha: Float = 0f
+    private var topMusicAlphaAnimator: ValueAnimator? = null
+
     init {
         val fm = clockTimePaint.fontMetrics
         clockBaselineY = (LOGICAL_HEIGHT / 2f) - (fm.descent + fm.ascent) / 2f
@@ -688,6 +720,7 @@ class CarWeatherCanvasView @JvmOverloads constructor(
         initCelestialAndCloudBitmaps()
         initParticlePools()
         initStars()
+        initTopMusicIsland()
 
         try {
             isLiquidGlassEnabled = PrefsManager.isLiquidGlassClockEnabled()
@@ -695,6 +728,21 @@ class CarWeatherCanvasView @JvmOverloads constructor(
         } catch (_: Throwable) {
             isLiquidGlassEnabled = false
             liquidGlassProgress = 0f
+        }
+    }
+
+    private fun initTopMusicIsland() {
+        try {
+            val drawable = ContextCompat.getDrawable(context, R.drawable.ic_music_note)
+            if (drawable != null) {
+                val bmp = Bitmap.createBitmap(22, 22, Bitmap.Config.ARGB_8888)
+                val c = Canvas(bmp)
+                drawable.setBounds(0, 0, 22, 22)
+                drawable.draw(c)
+                topMusicIconBmp = bmp
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "加载顶部音乐胶囊图标失败: ${t.message}")
         }
     }
 
@@ -1064,11 +1112,11 @@ class CarWeatherCanvasView @JvmOverloads constructor(
         scrollOvercastX += 3.0f * windFactor * dt
 
         // 车规级长周期浮点防护：对纹理固有宽度取模，保证 scrollX 严格处于 [0, texW) 区间，长年保活永不发生精度损失
-        bmpCirrus?.width?.toFloat()?.let { w -> if (scrollCirrusX >= w) scrollCirrusX %= w }
-        bmpCumulusBack?.width?.toFloat()?.let { w -> if (scrollCumulusBackX >= w) scrollCumulusBackX %= w }
-        bmpCumulusFront?.width?.toFloat()?.let { w -> if (scrollCumulusFrontX >= w) scrollCumulusFrontX %= w }
-        bmpMist?.width?.toFloat()?.let { w -> if (scrollMistX >= w) scrollMistX %= w }
-        bmpOvercast?.width?.toFloat()?.let { w -> if (scrollOvercastX >= w) scrollOvercastX %= w }
+        bmpCirrus?.takeIf { !it.isRecycled }?.width?.toFloat()?.let { w -> if (scrollCirrusX >= w) scrollCirrusX %= w }
+        bmpCumulusBack?.takeIf { !it.isRecycled }?.width?.toFloat()?.let { w -> if (scrollCumulusBackX >= w) scrollCumulusBackX %= w }
+        bmpCumulusFront?.takeIf { !it.isRecycled }?.width?.toFloat()?.let { w -> if (scrollCumulusFrontX >= w) scrollCumulusFrontX %= w }
+        bmpMist?.takeIf { !it.isRecycled }?.width?.toFloat()?.let { w -> if (scrollMistX >= w) scrollMistX %= w }
+        bmpOvercast?.takeIf { !it.isRecycled }?.width?.toFloat()?.let { w -> if (scrollOvercastX >= w) scrollOvercastX %= w }
 
         // 3. 雨滴推进 (支持雨夹雪同时运行)
         val rainCount = currentConfig.rainParticleCount
@@ -1202,7 +1250,10 @@ class CarWeatherCanvasView @JvmOverloads constructor(
         drawHugeAtmosphericClock(canvas, 1f - lyricsModeProgress)
         drawFiveLineLyrics(canvas, lyricsModeProgress)
 
-        // 第 7 层：左右 130px 物理安全黑边渐变融合遮罩 (最顶层)
+        // 第 7 层：顶部居中高亮音乐胶囊 (播放音乐时中心高亮展示，车规级 1920×384 黄金比例自适应)
+        drawTopMusicIsland(canvas)
+
+        // 第 8 层：左右 130px 物理安全黑边渐变融合遮罩 (最顶层)
         drawEdgeVignette(canvas)
 
         canvas.restore()
@@ -1230,6 +1281,7 @@ class CarWeatherCanvasView @JvmOverloads constructor(
         drawLeftHudCluster(c)
         drawHugeAtmosphericClock(c, 1f - lyricsModeProgress)
         drawFiveLineLyrics(c, lyricsModeProgress)
+        drawTopMusicIsland(c)
         c.restore()
     }
 
@@ -1379,7 +1431,8 @@ class CarWeatherCanvasView @JvmOverloads constructor(
                     }
 
                     if (rayMultiplier > 0.01f) {
-                        bmpSunRays?.let { raysBmp ->
+                        val raysBmp = bmpSunRays?.takeIf { !it.isRecycled } ?: SharedHmiAssetManager.getCelestialBitmap(resources, "sun_rays")?.also { bmpSunRays = it }
+                        if (raysBmp != null) {
                             // 正向慢速层 (约 150 秒自转一圈)
                             val r1Size = (135f + breathing * 1.5f) * 2f
                             sunRayRect.set(
@@ -1413,7 +1466,8 @@ class CarWeatherCanvasView @JvmOverloads constructor(
                     }
 
                     // 3. 太阳发光本体渲染 (复用经典圆润光球，覆盖于光芒中心)
-                    bmpSun?.let { sunBmp ->
+                    val sunBmp = bmpSun?.takeIf { !it.isRecycled } ?: SharedHmiAssetManager.getCelestialBitmap(resources, "sun")?.also { bmpSun = it }
+                    if (sunBmp != null) {
                         sunPaint.alpha = (celestialAlpha * 255).toInt()
                         if (cachedSunTintColor != sunTint || cachedSunColorFilter == null) {
                             cachedSunTintColor = sunTint
@@ -1447,7 +1501,8 @@ class CarWeatherCanvasView @JvmOverloads constructor(
                     canvas.drawCircle(CELESTIAL_CENTER_X, CELESTIAL_CENTER_Y, 65f, moonHaloPaint)
 
                     // 真实缺月月牙渲染 (顺时针旋转 30 度预制，带环形山明暗与月海地貌)
-                    bmpMoon?.let { moonBmp ->
+                    val moonBmp = bmpMoon?.takeIf { !it.isRecycled } ?: SharedHmiAssetManager.getCelestialBitmap(resources, "moon")?.also { bmpMoon = it }
+                    if (moonBmp != null) {
                         moonPaint.alpha = (celestialAlpha * 255).toInt()
                         canvas.drawBitmap(moonBmp, null, moonDestRect, moonPaint)
                     }
@@ -1484,11 +1539,17 @@ class CarWeatherCanvasView @JvmOverloads constructor(
             cloudOvercastPaint.colorFilter = colorFilter
         }
 
-        drawSeamlessCloudLayer(canvas, bmpOvercast, scrollOvercastX, overcastA, cloudOvercastPaint)
-        drawSeamlessCloudLayer(canvas, bmpCirrus, scrollCirrusX, cirrusA, cloudCirrusPaint)
-        drawSeamlessCloudLayer(canvas, bmpCumulusBack, scrollCumulusBackX, cumBackA, cloudCumulusBackPaint)
-        drawSeamlessCloudLayer(canvas, bmpCumulusFront, scrollCumulusFrontX, cumFrontA, cloudCumulusFrontPaint)
-        drawSeamlessCloudLayer(canvas, bmpMist, scrollMistX, mistA, cloudMistPaint)
+        val overcastBmp = bmpOvercast?.takeIf { !it.isRecycled } ?: SharedHmiAssetManager.getCloudBitmap(resources, "overcast")?.also { bmpOvercast = it }
+        val cirrusBmp = bmpCirrus?.takeIf { !it.isRecycled } ?: SharedHmiAssetManager.getCloudBitmap(resources, "cirrus")?.also { bmpCirrus = it }
+        val cumBackBmp = bmpCumulusBack?.takeIf { !it.isRecycled } ?: SharedHmiAssetManager.getCloudBitmap(resources, "cumulus_back")?.also { bmpCumulusBack = it }
+        val cumFrontBmp = bmpCumulusFront?.takeIf { !it.isRecycled } ?: SharedHmiAssetManager.getCloudBitmap(resources, "cumulus_front")?.also { bmpCumulusFront = it }
+        val mistBmp = bmpMist?.takeIf { !it.isRecycled } ?: SharedHmiAssetManager.getCloudBitmap(resources, "mist")?.also { bmpMist = it }
+
+        drawSeamlessCloudLayer(canvas, overcastBmp, scrollOvercastX, overcastA, cloudOvercastPaint)
+        drawSeamlessCloudLayer(canvas, cirrusBmp, scrollCirrusX, cirrusA, cloudCirrusPaint)
+        drawSeamlessCloudLayer(canvas, cumBackBmp, scrollCumulusBackX, cumBackA, cloudCumulusBackPaint)
+        drawSeamlessCloudLayer(canvas, cumFrontBmp, scrollCumulusFrontX, cumFrontA, cloudCumulusFrontPaint)
+        drawSeamlessCloudLayer(canvas, mistBmp, scrollMistX, mistA, cloudMistPaint)
     }
 
     private fun drawSeamlessCloudLayer(
@@ -1498,7 +1559,7 @@ class CarWeatherCanvasView @JvmOverloads constructor(
         alpha: Float,
         paint: Paint
     ) {
-        if (bitmap == null || alpha <= 0.006f) return
+        if (bitmap == null || bitmap.isRecycled || alpha <= 0.006f) return
         paint.alpha = (alpha * 255f).toInt().coerceIn(0, 255)
         val texW = bitmap.width.toFloat()
         var startX = scrollX % texW
@@ -1975,7 +2036,7 @@ class CarWeatherCanvasView @JvmOverloads constructor(
         callMatrix.postScale(baseScale * handsetCurrentScale, baseScale * handsetCurrentScale)
         callMatrix.postTranslate(cx, cy)
         callIconPaint.alpha = alpha
-        bmpCallIncomingHandset?.let { canvas.drawBitmap(it, callMatrix, callIconPaint) }
+        bmpCallIncomingHandset?.takeIf { !it.isRecycled }?.let { canvas.drawBitmap(it, callMatrix, callIconPaint) }
     }
 
     private fun drawIncomingAccompanyingLayers(
@@ -1989,7 +2050,7 @@ class CarWeatherCanvasView @JvmOverloads constructor(
         callLayerMatrix.postScale(baseScale, baseScale)
         callLayerMatrix.postTranslate(cx, cy)
         callLayerPaint.alpha = rippleAlpha
-        bmpCallIncomingRipple?.let { canvas.drawBitmap(it, callLayerMatrix, callLayerPaint) }
+        bmpCallIncomingRipple?.takeIf { !it.isRecycled }?.let { canvas.drawBitmap(it, callLayerMatrix, callLayerPaint) }
 
         // 2. 呼入箭头朝听筒中心斜向推入滑移并渐变脉冲
         val cycle = (nowMs % 900) / 900f
@@ -2003,7 +2064,7 @@ class CarWeatherCanvasView @JvmOverloads constructor(
         callLayerMatrix.postScale(baseScale, baseScale)
         callLayerMatrix.postTranslate(cx, cy)
         callLayerPaint.alpha = arrowAlpha
-        bmpCallIncomingArrow?.let { canvas.drawBitmap(it, callLayerMatrix, callLayerPaint) }
+        bmpCallIncomingArrow?.takeIf { !it.isRecycled }?.let { canvas.drawBitmap(it, callLayerMatrix, callLayerPaint) }
     }
 
     private fun drawOutgoingAccompanyingLayers(
@@ -2020,7 +2081,7 @@ class CarWeatherCanvasView @JvmOverloads constructor(
         callLayerMatrix.postScale(baseScale, baseScale)
         callLayerMatrix.postTranslate(cx, cy)
         callLayerPaint.alpha = (masterAlpha * outgoingAlpha).toInt()
-        bmpCallOutgoingArrow?.let { canvas.drawBitmap(it, callLayerMatrix, callLayerPaint) }
+        bmpCallOutgoingArrow?.takeIf { !it.isRecycled }?.let { canvas.drawBitmap(it, callLayerMatrix, callLayerPaint) }
 
         val w1Alpha = ((140 + 110 * sin(nowMs / 200.0)).toInt().coerceIn(0, 255) * (masterAlpha / 255f) * outgoingAlpha).toInt()
         val w2Alpha = ((120 + 130 * sin(nowMs / 200.0 - 1.2)).toInt().coerceIn(0, 255) * (masterAlpha / 255f) * outgoingAlpha).toInt()
@@ -2030,10 +2091,10 @@ class CarWeatherCanvasView @JvmOverloads constructor(
         callLayerMatrix.postTranslate(cx, cy)
 
         callLayerPaint.alpha = w1Alpha
-        bmpCallOutgoingWave1?.let { canvas.drawBitmap(it, callLayerMatrix, callLayerPaint) }
+        bmpCallOutgoingWave1?.takeIf { !it.isRecycled }?.let { canvas.drawBitmap(it, callLayerMatrix, callLayerPaint) }
 
         callLayerPaint.alpha = w2Alpha
-        bmpCallOutgoingWave2?.let { canvas.drawBitmap(it, callLayerMatrix, callLayerPaint) }
+        bmpCallOutgoingWave2?.takeIf { !it.isRecycled }?.let { canvas.drawBitmap(it, callLayerMatrix, callLayerPaint) }
     }
 
     private fun drawActiveWavesLayers(
@@ -2056,7 +2117,7 @@ class CarWeatherCanvasView @JvmOverloads constructor(
             callLayerMatrix.postScale(s1, s1)
             callLayerMatrix.postTranslate(cx, cy)
             callLayerPaint.alpha = (w1 * bloom1).toInt()
-            bmpCallConnectedWave1?.let { canvas.drawBitmap(it, callLayerMatrix, callLayerPaint) }
+            bmpCallConnectedWave1?.takeIf { !it.isRecycled }?.let { canvas.drawBitmap(it, callLayerMatrix, callLayerPaint) }
         }
 
         if (bloom2 > 0f) {
@@ -2066,7 +2127,7 @@ class CarWeatherCanvasView @JvmOverloads constructor(
             callLayerMatrix.postScale(s2, s2)
             callLayerMatrix.postTranslate(cx, cy)
             callLayerPaint.alpha = (w2 * bloom2).toInt()
-            bmpCallConnectedWave2?.let { canvas.drawBitmap(it, callLayerMatrix, callLayerPaint) }
+            bmpCallConnectedWave2?.takeIf { !it.isRecycled }?.let { canvas.drawBitmap(it, callLayerMatrix, callLayerPaint) }
         }
 
         if (bloom3 > 0f) {
@@ -2076,7 +2137,7 @@ class CarWeatherCanvasView @JvmOverloads constructor(
             callLayerMatrix.postScale(s3, s3)
             callLayerMatrix.postTranslate(cx, cy)
             callLayerPaint.alpha = (w3 * bloom3).toInt()
-            bmpCallConnectedWave3?.let { canvas.drawBitmap(it, callLayerMatrix, callLayerPaint) }
+            bmpCallConnectedWave3?.takeIf { !it.isRecycled }?.let { canvas.drawBitmap(it, callLayerMatrix, callLayerPaint) }
         }
     }
 
@@ -2093,7 +2154,7 @@ class CarWeatherCanvasView @JvmOverloads constructor(
         callLayerMatrix.postScale(s, s)
         callLayerMatrix.postTranslate(cx, cy)
         callLayerPaint.alpha = finalAlpha
-        bmpCallHangupHalo?.let { canvas.drawBitmap(it, callLayerMatrix, callLayerPaint) }
+        bmpCallHangupHalo?.takeIf { !it.isRecycled }?.let { canvas.drawBitmap(it, callLayerMatrix, callLayerPaint) }
     }
 
     private fun drawWeChatIcon(canvas: Canvas, cx: Float, cy: Float, baseScale: Float, nowMs: Long, masterAlpha: Int) {
@@ -2103,8 +2164,8 @@ class CarWeatherCanvasView @JvmOverloads constructor(
         callMatrix.postTranslate(-128f, -128f)
         callMatrix.postScale(baseScale * bScale, baseScale * bScale)
         callMatrix.postTranslate(cx, cy)
-        bmpCallWeChatBack?.let { canvas.drawBitmap(it, callMatrix, callIconPaint) }
-        bmpCallWeChatFront?.let { canvas.drawBitmap(it, callMatrix, callIconPaint) }
+        bmpCallWeChatBack?.takeIf { !it.isRecycled }?.let { canvas.drawBitmap(it, callMatrix, callIconPaint) }
+        bmpCallWeChatFront?.takeIf { !it.isRecycled }?.let { canvas.drawBitmap(it, callMatrix, callIconPaint) }
 
         // 2. 右上角语音播报角标波纹规律脉冲
         val waveAlpha = ((140 + 115 * sin(nowMs / 180.0)).toInt().coerceIn(0, 255) * (masterAlpha / 255f)).toInt()
@@ -2113,7 +2174,7 @@ class CarWeatherCanvasView @JvmOverloads constructor(
         callLayerMatrix.postScale(baseScale, baseScale)
         callLayerMatrix.postTranslate(cx, cy)
         callLayerPaint.alpha = waveAlpha
-        bmpCallWeChatWave?.let { canvas.drawBitmap(it, callLayerMatrix, callLayerPaint) }
+        bmpCallWeChatWave?.takeIf { !it.isRecycled }?.let { canvas.drawBitmap(it, callLayerMatrix, callLayerPaint) }
     }
 
     // ----------------------------------------------------
@@ -2351,7 +2412,9 @@ class CarWeatherCanvasView @JvmOverloads constructor(
 
         // (A) 绘制加大模糊 28px 与饱和度 170% 的背景底图
         glassBitmapPaint.alpha = (255 * glassAlpha).toInt()
-        canvas.drawBitmap(glassBgBitmap, glassSrcRect, glassCropRect, glassBitmapPaint)
+        if (!glassBgBitmap.isRecycled) {
+            canvas.drawBitmap(glassBgBitmap, glassSrcRect, glassCropRect, glassBitmapPaint)
+        }
 
         // (B) 叠一层白色（rgb255 255 255 / 10%）
         glassOverlayPaint.color = Color.argb((26 * glassAlpha).toInt(), 255, 255, 255)
@@ -2495,7 +2558,7 @@ class CarWeatherCanvasView @JvmOverloads constructor(
         val currentLine = lyricLines[lineIndex]
         val lineStartMs = currentLine.timestamp
         val nextLineStartMs = if (lineIndex + 1 < lyricLines.size) {
-            lyricLines[lineIndex + 1].timestamp
+            minOf(lyricLines[lineIndex + 1].timestamp, lineStartMs + 8000L)
         } else {
             lineStartMs + 5000L
         }
@@ -2617,8 +2680,117 @@ class CarWeatherCanvasView @JvmOverloads constructor(
         }
     }
 
+    /**
+     * 设置并更新小欧屏最顶部居中高亮音乐播放信息 (‘音乐图标’ 歌名-歌手名)
+     * - 纯原生 1920×384 黄金基准坐标系直接渲染，实车与 PAD 缩放比例 100% 绝对一致
+     * - 居中对齐，超出边界自动以省略号截断
+     * - 播放时淡入展示；无音乐播放或恢复时间显示时优雅淡出收敛隐藏
+     * - 具备幂等性保护，播放状态下重复上报进度绝对不打断动画、杜绝频闪
+     */
+    fun setTopMusicTrackInfo(title: String, artist: String, isPlaying: Boolean) {
+        val cleanTitle = title.trim()
+        val cleanArtist = artist.trim()
+        val shouldShow = isPlaying && cleanTitle.isNotEmpty() && !MusicRecognitionEngine.isInvalidPlaceholderTrack(cleanTitle, cleanArtist)
+
+        val displayText = if (cleanArtist.isNotEmpty() &&
+            !cleanArtist.equals("未知歌手", ignoreCase = true) &&
+            !cleanArtist.equals("Unknown", ignoreCase = true) &&
+            !cleanTitle.contains(cleanArtist, ignoreCase = true)
+        ) {
+            "$cleanTitle - $cleanArtist"
+        } else {
+            cleanTitle
+        }
+
+        val isNewText = (this.topMusicDisplayText != displayText)
+        this.topMusicTitle = cleanTitle
+        this.topMusicArtist = cleanArtist
+        this.topMusicDisplayText = displayText
+        this.isTopMusicPlaying = shouldShow
+
+        val target = if (shouldShow) 1f else 0f
+        if (target == topMusicTargetAlpha) {
+            if (isNewText && topMusicAlpha > 0f) {
+                invalidate()
+            }
+            return
+        }
+
+        topMusicTargetAlpha = target
+        topMusicAlphaAnimator?.cancel()
+        val anim = ValueAnimator.ofFloat(topMusicAlpha, target).apply {
+            duration = 350L
+            interpolator = DecelerateInterpolator()
+            addUpdateListener { a ->
+                topMusicAlpha = a.animatedValue as Float
+                invalidate()
+            }
+        }
+        topMusicAlphaAnimator = anim
+        anim.start()
+    }
+
     // ----------------------------------------------------
-    // 第 7 层：左右 130px 物理安全黑边渐变遮罩 (顶层融合)
+    // 第 7 层：顶部居中高亮音乐胶囊 (播放音乐时中心高亮展示，车规级 1920×384 黄金比例自适应)
+    // ----------------------------------------------------
+    private fun drawTopMusicIsland(canvas: Canvas) {
+        val a = topMusicAlpha
+        if (a <= 0.005f || topMusicDisplayText.isEmpty()) return
+
+        updateSafeBounds()
+        // 歌词安全显示范围为 [CLOCK_CENTER_X - safeHalfWidth, CLOCK_CENTER_X + safeHalfWidth] (535px ~ 1385px，全宽 850px，舒适内衬 786px)
+        // 顶部音乐胶囊岛最长严格不能超过歌词显示的边界，因此将胶囊最大宽度限制在歌词安全区内 (最大 760px，左右各留 45px 呼吸余量)
+        val maxCapsuleWidth = (safeHalfWidth * 2f - 90f).coerceAtMost(760f)
+
+        val paddingStartEnd = 16f
+        val iconWidth = 22f
+        val iconSpacing = 8f
+        val capsuleHeight = 42f
+        val capsuleTop = 6f
+        val capsuleBottom = capsuleTop + capsuleHeight
+
+        val maxTextWidth = (maxCapsuleWidth - (paddingStartEnd * 2f + iconWidth + iconSpacing)).coerceAtLeast(100f)
+        val text = topMusicDisplayText
+        val textToDraw = TextUtils.ellipsize(text, topMusicTextPaint, maxTextWidth, TextUtils.TruncateAt.END).toString()
+        val textWidth = topMusicTextPaint.measureText(textToDraw)
+
+        val totalWidth = (paddingStartEnd * 2f + iconWidth + iconSpacing + textWidth).coerceAtMost(maxCapsuleWidth)
+        val cx = LOGICAL_WIDTH / 2f
+        val left = cx - totalWidth / 2f
+        val right = cx + totalWidth / 2f
+
+        topMusicCapsuleRect.set(left, capsuleTop, right, capsuleBottom)
+        val cornerRadius = 21f
+
+        val alphaInt = (a * 255f).toInt().coerceIn(0, 255)
+
+        // 1. 半透明暗色磨砂底胶囊
+        topMusicBgPaint.alpha = (alphaInt * 0.35f).toInt()
+        canvas.drawRoundRect(topMusicCapsuleRect, cornerRadius, cornerRadius, topMusicBgPaint)
+
+        // 2. 微光精致边框
+        topMusicStrokePaint.alpha = (alphaInt * 0.20f).toInt()
+        canvas.drawRoundRect(topMusicCapsuleRect, cornerRadius, cornerRadius, topMusicStrokePaint)
+
+        // 3. 音乐小图标
+        val iconBmp = topMusicIconBmp
+        val iconLeft = left + paddingStartEnd
+        val iconTop = capsuleTop + (capsuleHeight - iconWidth) / 2f
+        if (iconBmp != null && !iconBmp.isRecycled) {
+            topMusicIconPaint.alpha = alphaInt
+            canvas.drawBitmap(iconBmp, iconLeft, iconTop, topMusicIconPaint)
+        }
+
+        // 4. 高亮歌名 - 歌手名居中字样
+        topMusicTextPaint.alpha = alphaInt
+        val textLeft = iconLeft + iconWidth + iconSpacing
+        val fm = topMusicTextPaint.fontMetrics
+        val textBaseline = capsuleTop + (capsuleHeight - (fm.bottom - fm.top)) / 2f - fm.top
+        canvas.drawText(textToDraw, textLeft, textBaseline, topMusicTextPaint)
+    }
+
+    // ----------------------------------------------------
+    // 第 8 层：左右 130px 物理安全黑边渐变遮罩 (顶层融合)
     // ----------------------------------------------------
     private fun drawEdgeVignette(canvas: Canvas) {
         canvas.drawRect(vignetteLeftRect, vignetteLeftPaint)

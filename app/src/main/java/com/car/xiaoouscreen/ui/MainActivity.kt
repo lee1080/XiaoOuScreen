@@ -71,6 +71,10 @@ class MainActivity : ComponentActivity(), WeatherOverlayService.ServiceCallback 
         window.decorView.postDelayed({
             try {
                 if (PrefsManager.getOverlayVisible() && WeatherOverlayService.instance?.isShowing() != true) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !android.provider.Settings.canDrawOverlays(this)) {
+                        Log.w(TAG, "无悬浮窗权限，跳过自动拉起投屏服务，防止在单屏/手机上发生崩溃或触控遮挡")
+                        return@postDelayed
+                    }
                     val showAvatar = PrefsManager.isXiaoOuAvatarEnabled()
                     val targetAction = if (showAvatar) WeatherOverlayService.ACTION_SHOW_FITNESS else WeatherOverlayService.ACTION_SHOW_TOP
                     val serviceIntent = Intent(this, WeatherOverlayService::class.java).apply {
@@ -93,7 +97,7 @@ class MainActivity : ComponentActivity(), WeatherOverlayService.ServiceCallback 
     override fun onResume() {
         super.onResume()
         applyCarFullscreenImmersive()
-        viewModel.refreshPermissionStates()
+        viewModel.refreshPermissionStatesAsync()
         val isShowing = (WeatherOverlayService.instance?.isShowing() == true) || PrefsManager.getOverlayVisible()
         viewModel.onOverlayStateChanged(isShowing)
 

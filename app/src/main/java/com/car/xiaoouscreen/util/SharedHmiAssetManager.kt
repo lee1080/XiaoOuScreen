@@ -175,17 +175,16 @@ object SharedHmiAssetManager {
     }
 
     /**
-     * 释放所有缓存位图 (通常在应用退出或系统低内存警报时调用)
+     * 释放所有缓存位图引用 (通常在应用退出或系统低内存警报时调用)
+     * 注意：严禁在 Android 8.0+ 手动对共享位图调用 bmp.recycle()！
+     * 因为硬件加速渲染线程 (HWUI RenderThread) 与自定义 View 的 onDraw 存在并发绘制可能，
+     * 若强行 recycle() 会导致正在参与帧绘制的 Canvas 抛出 "trying to use a recycled bitmap" 致命崩溃。
+     * 仅清空引用字典，交由 JVM GC 与底层 Native Finalizer 安全平滑回收显存。
      */
     fun clearAll() {
         synchronized(this) {
-            bitmapCache.values.forEach { bmp ->
-                try {
-                    if (!bmp.isRecycled) bmp.recycle()
-                } catch (_: Throwable) {}
-            }
             bitmapCache.clear()
-            Log.i(TAG, "已清空所有共享 HMI 位图内存")
+            Log.i(TAG, "已清空所有共享 HMI 位图缓存引用")
         }
     }
 }

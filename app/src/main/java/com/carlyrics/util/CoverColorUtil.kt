@@ -23,14 +23,23 @@ object CoverColorUtil {
      * 车规级优化：预先缩小至 64x64 极小尺寸进行 Palette 分析，分析速度提升 30 倍且保证色彩提取一致
      */
     suspend fun extractColors(bitmap: Bitmap): CoverColors = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
-        val scaledBmp = if (bitmap.width > 64 || bitmap.height > 64) {
-            Bitmap.createScaledBitmap(bitmap, 64, 64, false)
-        } else {
-            bitmap
+        if (bitmap.isRecycled) return@withContext defaultColors
+        val scaledBmp = try {
+            if (bitmap.width > 64 || bitmap.height > 64) {
+                Bitmap.createScaledBitmap(bitmap, 64, 64, false)
+            } else {
+                bitmap
+            }
+        } catch (_: Throwable) {
+            return@withContext defaultColors
         }
-        val palette = Palette.from(scaledBmp).maximumColorCount(12).generate()
+        val palette = try {
+            Palette.from(scaledBmp).maximumColorCount(12).generate()
+        } catch (_: Throwable) {
+            null
+        }
         if (scaledBmp != bitmap) {
-            scaledBmp.recycle()
+            try { scaledBmp.recycle() } catch (_: Throwable) {}
         }
 
         val vibrant = palette?.vibrantSwatch?.rgb

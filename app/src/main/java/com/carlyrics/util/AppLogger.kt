@@ -46,7 +46,8 @@ object AppLogger {
 
     fun init(context: Context) {
         if (logFile != null) return
-        val dir = context.getExternalFilesDir(null) ?: context.filesDir
+        // 隐私安全增强：日志存储于内部私有目录，杜绝外部三方应用任意读取
+        val dir = File(context.filesDir, "logs")
         val file = File(dir, "app_log.txt")
         file.parentFile?.mkdirs()
         logFile = file

@@ -4,6 +4,7 @@
     <domain-config cleartextTrafficPermitted="false">
         <domain includeSubdomains="true">open-meteo.com</domain>
         <domain includeSubdomains="true">qweather.com</domain>
+        <domain includeSubdomains="true">qweatherapi.com</domain>
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>

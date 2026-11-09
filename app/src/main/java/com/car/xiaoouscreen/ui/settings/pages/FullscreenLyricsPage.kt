@@ -28,7 +28,6 @@ import com.car.xiaoouscreen.ui.settings.components.NeuButton
 import com.car.xiaoouscreen.ui.settings.components.NeuCenteredSlider
 import com.car.xiaoouscreen.ui.settings.components.NeuDropdown
 import com.car.xiaoouscreen.ui.settings.components.NeuInfoButton
-import com.car.xiaoouscreen.ui.settings.components.NeuSegmentedAlign
 import com.car.xiaoouscreen.ui.settings.components.NeuSwitch
 import com.car.xiaoouscreen.ui.settings.model.LyricsState
 import com.car.xiaoouscreen.ui.settings.theme.NeuColors
@@ -47,8 +46,6 @@ fun FullscreenLyricsPage(
     state: LyricsState,
     onToggleMasterEnabled: (Boolean) -> Unit,
     onSkinThemeChange: (String) -> Unit,
-    onToggleLongMarquee: (Boolean) -> Unit = {},
-    onAlignModeChange: (String) -> Unit = {},
     onSplitRatioChange: (Int) -> Unit,
     onCoverScaleChange: (Int) -> Unit,
     onTitleFontSizeChange: (Int) -> Unit,

@@ -320,7 +320,7 @@ class GearCubeFlipView @JvmOverloads constructor(
         cachedCanvas = Canvas(cachedBitmap!!)
 
         // 加载 Orbitron Bold 字体
-        HmiFontManager.getOrbitronBold(context)?.let {
+        HmiFontManager.getOrbitronBold(context).let {
             letterPaint.typeface = it
             letterShadowPaint.typeface = it
             letterFloorShadowPaint.typeface = it
@@ -517,7 +517,7 @@ class GearCubeFlipView @JvmOverloads constructor(
      * 立即取消并隐藏档位动效 (被驾驶模式打断时彻底退出，绝不再次恢复)
      */
     fun dismiss() {
-        mainHandler.post {
+        val action = Runnable {
             cancelAllAnimators()
             pendingTargetGear = null
             gearQueue.clear()
@@ -526,6 +526,11 @@ class GearCubeFlipView @JvmOverloads constructor(
             holdProgress = 0f
             visibility = GONE
             Log.i(TAG, "档位动效已被打断并彻底终结 (dismiss)")
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            action.run()
+        } else {
+            mainHandler.post(action)
         }
     }
 
@@ -539,7 +544,7 @@ class GearCubeFlipView @JvmOverloads constructor(
     /**
      * 从挂起中恢复档位动效 (用户要求：打断后直接回到主页面，绝不再展示档位页面)
      */
-    fun resumeFromSuspension(holdMs: Long = DURATION_HOLD_MS) {
+    fun resumeFromSuspension(@Suppress("UNUSED_PARAMETER") holdMs: Long = DURATION_HOLD_MS) {
         // no-op: 彻底杜绝打断后再次复活展示
         Log.i(TAG, "resumeFromSuspension 忽略：按用户规范，打断后直接保持主页面，不复活展示")
     }
@@ -872,8 +877,8 @@ class GearCubeFlipView @JvmOverloads constructor(
         val aInt = (alpha * 255).toInt()
         if (aInt <= 0) return
 
-        val fallbackBmp = SharedHmiAssetManager.getFallbackGearBitmap(resources)
-        if (hasValidSnapshot && cachedBitmap != null) {
+        val fallbackBmp = SharedHmiAssetManager.getFallbackGearBitmap(resources)?.takeIf { !it.isRecycled }
+        if (hasValidSnapshot && cachedBitmap != null && !cachedBitmap!!.isRecycled) {
             bitmapPaint.alpha = aInt
             canvas.drawBitmap(cachedBitmap!!, 0f, 0f, bitmapPaint)
         } else if (fallbackBmp != null) {
@@ -902,7 +907,7 @@ class GearCubeFlipView @JvmOverloads constructor(
         val cy = LOGICAL_HEIGHT / 2f
 
         // 1. 大气背景：优先使用 HTML 1:1 像素级 1920×384 WebP 渐变背景大图 (带物理安全暗角，共享RGB_565池)
-        val bgBmp = SharedHmiAssetManager.getGearBitmap(resources, theme.code)
+        val bgBmp = SharedHmiAssetManager.getGearBitmap(resources, theme.code)?.takeIf { !it.isRecycled }
         if (bgBmp != null) {
             bgPaint.shader = null
             bgPaint.alpha = (alphaMod * 255).toInt()

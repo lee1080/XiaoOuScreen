@@ -10,6 +10,7 @@ import com.carlyrics.util.AppLogger
 import java.lang.reflect.Method
 import java.lang.reflect.Proxy
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.Executors
 
 /**
  * 长安欧尚 Z6 iDD / B561 智能座舱档位信号接入管理器
@@ -97,12 +98,21 @@ class CarGearManager private constructor(private val context: Context) {
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val workerExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "CarGear-Worker").apply { isDaemon = true }
+    }
     private val listeners = CopyOnWriteArrayList<GearListener>()
     private val driveModeListeners = CopyOnWriteArrayList<DriveModeListener>()
+
+    @Volatile private var cachedGetPropertyIdMethod: Method? = null
+    @Volatile private var cachedGetValueMethod: Method? = null
 
     private var carInstance: Any? = null
     private var cabinManager: Any? = null
     private var mcuManager: Any? = null
+    // 保持对动态代理回调的强引用，防止在内存紧张 (TrimMemory) 时被垃圾回收机制 (GC) 提前回收导致档位事件静默失联
+    private var cabinCallbackProxy: Any? = null
+    private var mcuCallbackProxy: Any? = null
     private var isCarSupported = false
     private var isConnected = false
     private var isInitialized = false
@@ -157,7 +167,7 @@ class CarGearManager private constructor(private val context: Context) {
         }
         isInitialized = true
 
-        Thread {
+        workerExecutor.execute {
             try {
                 val carClass = Class.forName("android.car.Car")
                 isCarSupported = true
@@ -171,10 +181,18 @@ class CarGearManager private constructor(private val context: Context) {
                     }
 
                     override fun onServiceDisconnected(name: ComponentName?) {
-                        AppLogger.w(TAG, "⚠️ CarService 服务断开: $name")
+                        AppLogger.w(TAG, "⚠️ CarService 服务断开: $name，3秒后尝试自动重新握手")
                         isConnected = false
+                        isInitialized = false
                         cabinManager = null
                         mcuManager = null
+                        cabinCallbackProxy = null
+                        mcuCallbackProxy = null
+                        mainHandler.postDelayed({
+                            if (listeners.isNotEmpty() || driveModeListeners.isNotEmpty()) {
+                                init()
+                            }
+                        }, 3000L)
                     }
                 }
 
@@ -194,7 +212,7 @@ class CarGearManager private constructor(private val context: Context) {
             } catch (t: Throwable) {
                 AppLogger.e(TAG, "初始化 CarService 握手异常: ${t.message}", t)
             }
-        }.start()
+        }
     }
 
     /**
@@ -234,7 +252,7 @@ class CarGearManager private constructor(private val context: Context) {
     }
 
     /**
-     * 主动读取一次实车当前档位
+     * 主动读取一次实车当前档位 (支持 0x2140210f 与 0x11400400 双路热备份，确保重启自愈后 100% 捕获真实在播/行驶档位)
      */
     private fun readInitialGear(cabin: Any) {
         try {
@@ -244,7 +262,18 @@ class CarGearManager private constructor(private val context: Context) {
                 Int::class.javaPrimitiveType,
                 Int::class.javaPrimitiveType
             )
-            val raw = getIntMethod.invoke(cabin, ID_GEAR_SELECTION_NEW, 0) as Int
+            // 优先查询 0x2140210f (CarCabinManager 新能源座舱档位)
+            var raw = try {
+                getIntMethod.invoke(cabin, ID_GEAR_SELECTION_NEW, 0) as? Int ?: 0
+            } catch (_: Exception) { 0 }
+
+            // 若 0x2140210f 未命中或为无效值，立即回退查询 0x11400400 (底层动力总线档位)
+            if (!isValidGear(raw)) {
+                raw = try {
+                    getIntMethod.invoke(cabin, ID_GEAR_SELECTION, 0) as? Int ?: 0
+                } catch (_: Exception) { 0 }
+            }
+
             if (isValidGear(raw)) {
                 val label = toGearLabel(raw)
                 AppLogger.i(TAG, "🎉 实车初始档位主动查询成功: raw=$raw -> $label 档")
@@ -258,7 +287,7 @@ class CarGearManager private constructor(private val context: Context) {
     }
 
     /**
-     * 主动读取一次实车当前驾驶模式
+     * 主动读取一次实车当前驾驶模式 (支持 0x2140f030 与 0x2141f08e 双属性兼容)
      */
     private fun readInitialDriveMode(cabin: Any) {
         try {
@@ -267,7 +296,16 @@ class CarGearManager private constructor(private val context: Context) {
                 Int::class.javaPrimitiveType,
                 Int::class.javaPrimitiveType
             )
-            val raw = getIntMethod.invoke(cabin, ID_VENDOR_DRIVER_MODE_SET, 0) as Int
+            var raw = try {
+                getIntMethod.invoke(cabin, ID_VENDOR_DRIVER_MODE_SET, 0) as? Int ?: 0
+            } catch (_: Exception) { 0 }
+
+            if (raw == 0) {
+                raw = try {
+                    getIntMethod.invoke(cabin, ID_DRIVING_MODE_ALL, 0) as? Int ?: 0
+                } catch (_: Exception) { 0 }
+            }
+
             val mode = toDriveMode(raw)
             AppLogger.i(TAG, "🎉 实车初始驾驶模式主动查询成功: raw=$raw -> $mode")
             notifyDriveModeInternal(mode, raw)
@@ -313,12 +351,16 @@ class CarGearManager private constructor(private val context: Context) {
                 callbackClass,
                 IntArray::class.java
             )
+            // 严禁订阅 ID_DRIVING_MODE_ALL (0x2141f08e): 该属性为底盘各子系统全量复合掩码，
+            // 开机初期会短暂发送状态位 raw=3，若作为驾驶模式订阅会导致错误识别为 SPORT 并冲刷真实模式！
+            // 驾驶模式变动唯一信任 ID_VENDOR_DRIVER_MODE_SET (0x2140f030)
             registerMethod.invoke(cabin, callbackProxy, intArrayOf(
                 ID_GEAR_SELECTION_NEW, 
                 ID_GEAR_SELECTION,
                 ID_VENDOR_DRIVER_MODE_SET
             ))
-            AppLogger.i(TAG, "🔥 成功向 CarCabinManager 订阅档位与驾驶模式属性 (0x2140210f / 0x11400400 / 0x2140f030)")
+            cabinCallbackProxy = callbackProxy
+            AppLogger.i(TAG, "🔥 成功向 CarCabinManager 订阅档位与驾驶模式核心属性 (0x2140210f / 0x11400400 / 0x2140f030)")
 
         } catch (t: Throwable) {
             AppLogger.e(TAG, "注册 CarCabinManager 监听异常: ${t.message}", t)
@@ -350,10 +392,12 @@ class CarGearManager private constructor(private val context: Context) {
                 IntArray::class.java
             )
             registerMethod.invoke(mcu, callbackProxy, intArrayOf(ID_GEAR_SELECTION))
+            mcuCallbackProxy = callbackProxy
             AppLogger.i(TAG, "成功向 CarMcuManager 订阅备用档位属性 (0x11400400)")
 
         } catch (t: Throwable) {
-            AppLogger.w(TAG, "注册 CarMcuManager 监听失败: ${t.message}")
+            val root = if (t is java.lang.reflect.InvocationTargetException && t.cause != null) t.cause!! else t
+            AppLogger.w(TAG, "注册 CarMcuManager 备用监听失败: ${root.javaClass.simpleName}${if (root.message != null) " - " + root.message else ""}")
         }
     }
 
@@ -372,9 +416,15 @@ class CarGearManager private constructor(private val context: Context) {
      */
     private fun handleCarPropertyValue(event: Any) {
         try {
-            val propId = event.javaClass.getMethod("getPropertyId").invoke(event) as Int
+            val getPropId = cachedGetPropertyIdMethod ?: event.javaClass.getMethod("getPropertyId").also {
+                cachedGetPropertyIdMethod = it
+            }
+            val getVal = cachedGetValueMethod ?: event.javaClass.getMethod("getValue").also {
+                cachedGetValueMethod = it
+            }
+            val propId = getPropId.invoke(event) as Int
             if (propId == ID_GEAR_SELECTION_NEW || propId == ID_GEAR_SELECTION) {
-                val rawValue = extractIntFromValue(event.javaClass.getMethod("getValue").invoke(event))
+                val rawValue = extractIntFromValue(getVal.invoke(event))
                 if (isValidGear(rawValue)) {
                     val label = toGearLabel(rawValue)
                     AppLogger.i(TAG, "🚘 实车档位总线变动触发: prop=0x${Integer.toHexString(propId)}, raw=$rawValue -> $label")
@@ -383,7 +433,7 @@ class CarGearManager private constructor(private val context: Context) {
                     AppLogger.d(TAG, "忽略非标准档位过渡噪声: raw=$rawValue")
                 }
             } else if (propId == ID_VENDOR_DRIVER_MODE_SET) {
-                val rawValue = extractIntFromValue(event.javaClass.getMethod("getValue").invoke(event))
+                val rawValue = extractIntFromValue(getVal.invoke(event))
                 val mode = toDriveMode(rawValue)
                 AppLogger.i(TAG, "🏎️ 实车驾驶模式总线变动触发: prop=0x${Integer.toHexString(propId)}, raw=$rawValue -> $mode")
                 notifyDriveModeInternal(mode, rawValue)
@@ -492,6 +542,36 @@ class CarGearManager private constructor(private val context: Context) {
         mainHandler.post {
             for (listener in driveModeListeners) {
                 listener.onDriveModeChanged(mode, raw)
+            }
+        }
+    }
+
+    /**
+     * 释放车机 CarService 资源
+     */
+    fun release() {
+        pendingNRunnable?.let { mainHandler.removeCallbacks(it) }
+        pendingNRunnable = null
+        workerExecutor.execute {
+            try {
+                if (carInstance != null && isConnected) {
+                    val carClass = carInstance!!.javaClass
+                    val disconnectMethod = carClass.getMethod("disconnect")
+                    disconnectMethod.invoke(carInstance)
+                    AppLogger.i(TAG, "CarService 成功断开连接")
+                }
+            } catch (t: Throwable) {
+                AppLogger.w(TAG, "断开 CarService 异常: ${t.message}")
+            } finally {
+                isConnected = false
+                isInitialized = false
+                carInstance = null
+                cabinManager = null
+                mcuManager = null
+                cabinCallbackProxy = null
+                mcuCallbackProxy = null
+                cachedGetPropertyIdMethod = null
+                cachedGetValueMethod = null
             }
         }
     }

@@ -280,8 +280,14 @@ class MusicRecognitionEngine(private val context: Context) {
             // 只要检测到进度在稳定推进，即使底层上报 false，也强制修正为 true
             isPlaying = true
         } else if (isDynamicPlayingConfirmed == false && source == MusicSource.BLUETOOTH) {
-            // 蓝牙源若进度连续停滞 > 2.8s，强制修正为 false
-            isPlaying = false
+            // 蓝牙源若进度连续停滞 > 2.8s，只有在音频流真正静默停止时才判定为暂停！
+            // 绝不能因为蓝牙 AVRCP 协议未上报进度递增而误判正在发声的音乐为暂停，彻底消灭每隔2.8s来回震荡的频闪！
+            val isAudioReallyActive = isBtA2dpStreaming || try { audioManager.isMusicActive } catch (_: Exception) { false }
+            if (!isAudioReallyActive) {
+                isPlaying = false
+            } else {
+                isPlaying = true
+            }
         }
 
         return Pair(pos, isPlaying)
@@ -1125,9 +1131,9 @@ class MusicRecognitionEngine(private val context: Context) {
             AppLogger.d(TAG, "scanAllSessions failed: ${e.message}")
             lastRefreshInfo = "轮询异常: ${e.message}"
         }
-        // 动态自适应轮询：播放中保持 2s 灵敏追踪，空闲静默期平缓退避至 6s，大幅降低车机 Binder IPC 开销
+        // 动态自适应轮询：播放中保持 2s 灵敏追踪，空闲静默期平缓退避至 10s，大幅降低车机 Binder IPC 开销与 CPU 唤醒
         val isPlaying = _currentTrack.value?.isPlaying == true || isBtA2dpStreaming
-        val nextInterval = if (isPlaying) POLL_INTERVAL_MS else (POLL_INTERVAL_MS * 3)
+        val nextInterval = if (isPlaying) POLL_INTERVAL_MS else (POLL_INTERVAL_MS * 5)
         pollingHandler?.postDelayed(pollingRunnable, nextInterval)
     }
 

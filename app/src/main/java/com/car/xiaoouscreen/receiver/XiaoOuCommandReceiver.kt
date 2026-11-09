@@ -8,6 +8,7 @@ import android.util.Log
 import com.car.xiaoouscreen.car.CarCallManager
 import com.car.xiaoouscreen.car.CarGearManager
 import com.car.xiaoouscreen.service.WeatherOverlayService
+import com.carlyrics.util.PrivacyUtil
 
 /**
  * 接收来自外部 / ADB 命令行广播的指令接收器
@@ -30,9 +31,14 @@ class XiaoOuCommandReceiver : BroadcastReceiver() {
 
         when (action) {
             WeatherOverlayService.ACTION_GEAR_SWITCH_LEGACY, WeatherOverlayService.ACTION_SWITCH_GEAR -> {
-                val gear = intent.getStringExtra(WeatherOverlayService.EXTRA_GEAR_LEGACY)
+                val rawGear = intent.getStringExtra(WeatherOverlayService.EXTRA_GEAR_LEGACY)
                     ?: intent.getStringExtra(WeatherOverlayService.EXTRA_TARGET_GEAR)
                     ?: "P"
+                val gear = rawGear.uppercase().trim()
+                if (gear != "P" && gear != "R" && gear != "N" && gear != "D") {
+                    Log.w(TAG, "忽略非有效档位指令: $rawGear")
+                    return
+                }
                 Log.i(TAG, "🏎️ 静态广播触发切档: $gear")
                 // 1. 同步更新 CarGearManager 状态
                 CarGearManager.getInstance(context).simulateGear(gear)
@@ -71,6 +77,7 @@ class XiaoOuCommandReceiver : BroadcastReceiver() {
                 val stateStr = intent.getStringExtra(WeatherOverlayService.EXTRA_CALL_STATE) ?: "ringing"
                 val name = intent.getStringExtra(WeatherOverlayService.EXTRA_CALL_NAME) ?: "张总"
                 val number = intent.getStringExtra(WeatherOverlayService.EXTRA_CALL_NUMBER) ?: "13800009527"
+                Log.d(TAG, "接收到通话事件广播: type=$typeStr, state=$stateStr, name=${PrivacyUtil.maskName(name)}, num=${PrivacyUtil.maskPhone(number)}")
                 val type = if (typeStr.equals("wechat", ignoreCase = true)) CarCallManager.CallType.WECHAT else CarCallManager.CallType.NORMAL
                 val state = when (stateStr.lowercase()) {
                     "ringing", "incoming" -> CarCallManager.CallState.RINGING

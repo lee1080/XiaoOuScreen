@@ -28,7 +28,7 @@ object CrashHandler : Thread.UncaughtExceptionHandler {
         defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler(this)
 
-        logFile = File(context.getExternalFilesDir(null), "crash_log.txt")
+        logFile = File(context.filesDir, "logs/crash_log.txt")
 
         // 收集设备信息
         val metrics = DisplayMetrics()
@@ -73,8 +73,8 @@ object CrashHandler : Thread.UncaughtExceptionHandler {
 
             AppLogger.e("CrashHandler", "未捕获异常已记录", throwable)
             AppLogger.flushSync()
-        } catch (_: Exception) {
-            // 即使日志写入失败也不能吞掉异常
+        } catch (_: Throwable) {
+            // 即使日志写入失败也不能吞掉异常，确保进入 finally 移交默认处理器
         } finally {
             defaultHandler?.uncaughtException(thread, throwable)
         }

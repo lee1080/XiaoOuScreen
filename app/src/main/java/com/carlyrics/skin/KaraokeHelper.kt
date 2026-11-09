@@ -187,6 +187,15 @@ object KaraokeHelper {
         }
     }
 
+    /**
+     * 清理卡拉OK字块缓存 (TrimMemory 阶段调用)
+     */
+    fun clearWordSpanCache() {
+        synchronized(wordSpanCache) {
+            wordSpanCache.clear()
+        }
+    }
+
     private fun getOrBuildWordSpans(line: LyricLine, text: String, nextLineTimestamp: Long?): List<WordSpanInfo> {
         val cacheKey = "${line.timestamp}_${text.hashCode()}_${nextLineTimestamp ?: 0L}"
         synchronized(wordSpanCache) {

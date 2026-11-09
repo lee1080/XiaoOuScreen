@@ -31,6 +31,22 @@ class OpenMeteoRepository(context: Context) {
     var lastSunsetUnix: Long = 0L
         private set
 
+    init {
+        // 构造时立即从本地 7 天离线天文缓存中还原当天的日落与日出时间戳，杜绝冷启动时内存变量为 0L
+        try {
+            val json = prefs.getString(KEY_CACHED_JSON, null)
+            if (!json.isNullOrBlank()) {
+                val cachedResponse = gson.fromJson(json, OpenMeteoResponse::class.java)
+                val nowUnix = System.currentTimeMillis() / 1000L
+                val (sunrise, sunset) = extractTodaySunTimes(cachedResponse.daily, nowUnix)
+                lastSunriseUnix = sunrise
+                lastSunsetUnix = sunset
+                lastMaxPrecipProbability = cachedResponse.hourly?.precipitationProbability?.take(6)?.maxOrNull() ?: 0
+                Log.d(TAG, "📦 OpenMeteoRepo 构造即刻恢复离线天文台: sunrise=$sunrise, sunset=$sunset")
+            }
+        } catch (_: Exception) {}
+    }
+
     private val api: OpenMeteoApi by lazy {
         val client = OkHttpClient.Builder()
             .connectTimeout(8, TimeUnit.SECONDS)
@@ -60,9 +76,8 @@ class OpenMeteoRepository(context: Context) {
                 val current = response.current ?: throw IllegalStateException("Current weather is null")
                 val daily = response.daily
 
-                // 寻找离当前最近的今天日出日落时间戳
-                val sunriseUnix = daily?.sunrise?.firstOrNull() ?: 0L
-                val sunsetUnix = daily?.sunset?.firstOrNull() ?: 0L
+                // 精准匹配当天的日出日落时间戳 (防止跨天多日缓存首元素错位)
+                val (sunriseUnix, sunsetUnix) = extractTodaySunTimes(daily, nowUnix)
                 lastSunriseUnix = sunriseUnix
                 lastSunsetUnix = sunsetUnix
 
@@ -114,8 +129,7 @@ class OpenMeteoRepository(context: Context) {
         return try {
             val cachedResponse = gson.fromJson(json, OpenMeteoResponse::class.java)
             val current = cachedResponse.current ?: return null
-            val sunriseUnix = cachedResponse.daily?.sunrise?.firstOrNull() ?: 0L
-            val sunsetUnix = cachedResponse.daily?.sunset?.firstOrNull() ?: 0L
+            val (sunriseUnix, sunsetUnix) = extractTodaySunTimes(cachedResponse.daily, nowUnix)
             lastSunriseUnix = sunriseUnix
             lastSunsetUnix = sunsetUnix
             lastMaxPrecipProbability = cachedResponse.hourly?.precipitationProbability?.take(6)?.maxOrNull() ?: 0
@@ -133,6 +147,28 @@ class OpenMeteoRepository(context: Context) {
             Log.e(TAG, "Failed to parse cached weather", e)
             null
         }
+    }
+
+    private fun extractTodaySunTimes(daily: DailyWeatherDto?, nowUnix: Long): Pair<Long, Long> {
+        if (daily == null || daily.sunrise.isNullOrEmpty() || daily.sunset.isNullOrEmpty()) {
+            return Pair(0L, 0L)
+        }
+        val calNow = java.util.Calendar.getInstance().apply { timeInMillis = nowUnix * 1000L }
+        val nowYear = calNow.get(java.util.Calendar.YEAR)
+        val nowDay = calNow.get(java.util.Calendar.DAY_OF_YEAR)
+
+        val calItem = java.util.Calendar.getInstance()
+        for (i in daily.sunrise.indices) {
+            val rise = daily.sunrise[i]
+            calItem.timeInMillis = rise * 1000L
+            if (calItem.get(java.util.Calendar.YEAR) == nowYear && calItem.get(java.util.Calendar.DAY_OF_YEAR) == nowDay) {
+                val set = daily.sunset.getOrNull(i) ?: 0L
+                return Pair(rise, set)
+            }
+        }
+        // 兜底：若跨天缓存未能精确匹配今天，选择离当前时刻最近的日落所在的日
+        val bestIdx = daily.sunset.indices.minByOrNull { kotlin.math.abs(daily.sunset[it] - nowUnix) } ?: 0
+        return Pair(daily.sunrise.getOrElse(bestIdx) { 0L }, daily.sunset.getOrElse(bestIdx) { 0L })
     }
 
     companion object {

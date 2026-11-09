@@ -287,7 +287,7 @@ object PresetManager {
                 PrefsManager.setApiKey(k)
                 LyricsApiManager.API_KEY = k
             }
-            if (settings.has("cache_max_size_mb")) PrefsManager.setCacheMaxSizeMb(settings.optInt("cache_max_size_mb", 10))
+            if (settings.has("cache_max_size_mb")) PrefsManager.setCacheMaxSizeMb(settings.optInt("cache_max_size_mb", 64))
             if (settings.has("xiaoou_avoidance_enabled")) {
                 PrefsManager.setXiaoOuAvoidanceEnabled(settings.optBoolean("xiaoou_avoidance_enabled", true))
             }

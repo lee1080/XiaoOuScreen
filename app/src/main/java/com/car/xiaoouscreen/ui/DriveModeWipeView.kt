@@ -306,7 +306,7 @@ class DriveModeWipeView @JvmOverloads constructor(
         cachedCanvas = Canvas(cachedBitmap!!)
 
         // 配置 Orbitron 字体
-        HmiFontManager.getOrbitronBold(context)?.let {
+        HmiFontManager.getOrbitronBold(context).let {
             heroTextPaint.typeface = it
             heroShadowPaint.typeface = it
             heroFloorShadowPaint.typeface = it
@@ -530,7 +530,7 @@ class DriveModeWipeView @JvmOverloads constructor(
      * 立即取消并隐藏驾驶模式 (被档位等更高优先级打断时调用，彻底终结，绝不恢复)
      */
     fun dismiss() {
-        mainHandler.post {
+        val action = Runnable {
             cancelAllAnimators()
             currentState = AnimState.IDLE
             wipeProgress = 0f
@@ -540,6 +540,11 @@ class DriveModeWipeView @JvmOverloads constructor(
             previousMode = null
             visibility = GONE
             Log.i(TAG, "驾驶模式已被打断并彻底终结 (dismiss)")
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            action.run()
+        } else {
+            mainHandler.post(action)
         }
     }
 
@@ -553,7 +558,7 @@ class DriveModeWipeView @JvmOverloads constructor(
     /**
      * 从挂起中恢复驾驶模式 (用户要求：打断后直接保持主页面，绝不再复活展示模式)
      */
-    fun resumeFromSuspension(dwellMs: Long = DURATION_DWELL_MS) {
+    fun resumeFromSuspension(@Suppress("UNUSED_PARAMETER") dwellMs: Long = DURATION_DWELL_MS) {
         // no-op: 彻底杜绝打断后再次复活展示
         Log.i(TAG, "resumeFromSuspension 忽略：按用户规范，打断后直接保持主页面，不复活展示")
     }
@@ -852,7 +857,7 @@ class DriveModeWipeView @JvmOverloads constructor(
         val cy = LOGICAL_HEIGHT / 2f
 
         // 1. 大气背景：优先使用 HTML 1:1 像素级 1920×384 WebP 渐变背景大图 (带物理安全暗角，共享RGB_565池)
-        val bgBmp = SharedHmiAssetManager.getDriveModeBitmap(resources, theme.key) ?: SharedHmiAssetManager.getDriveModeBitmap(resources, "NORMAL")
+        val bgBmp = (SharedHmiAssetManager.getDriveModeBitmap(resources, theme.key) ?: SharedHmiAssetManager.getDriveModeBitmap(resources, "NORMAL"))?.takeIf { !it.isRecycled }
         if (bgBmp != null) {
             bgPaint.shader = null
             bgPaint.alpha = 255
@@ -866,7 +871,7 @@ class DriveModeWipeView @JvmOverloads constructor(
         }
 
         // 2. 5 款模式专属科技微动效装饰线条 (完全复刻 SVG 规范)
-        drawModeBespokeArtwork(canvas, theme, cx, cy)
+        drawModeBespokeArtwork(canvas, theme)
 
         // 3. 居中极简巨幅模式大字 (Orbitron Bold, 148px 或 128px)
         // 模式英文名称轻微放大：从 100% (1.00f) 放大至 105% (1.05f) 黄金律动
@@ -951,7 +956,7 @@ class DriveModeWipeView @JvmOverloads constructor(
     /**
      * 绘制 5 款模式 1:1 对应的专属高精矢量艺术图层
      */
-    private fun drawModeBespokeArtwork(canvas: Canvas, theme: ModeTheme, cx: Float, cy: Float) {
+    private fun drawModeBespokeArtwork(canvas: Canvas, theme: ModeTheme) {
         val centerGlow = centerGlowShaders[theme.key] ?: centerGlowShaders["SPORT"]!!
         val fadeL = fadeLShaders[theme.key] ?: fadeLShaders["SPORT"]!!
         val fadeR = fadeRShaders[theme.key] ?: fadeRShaders["SPORT"]!!
@@ -1299,7 +1304,7 @@ class DriveModeWipeView @JvmOverloads constructor(
     }
 
     private fun drawBaseDashboard(canvas: Canvas) {
-        if (hasValidSnapshot && cachedBitmap != null) {
+        if (hasValidSnapshot && cachedBitmap != null && !cachedBitmap!!.isRecycled) {
             bitmapPaint.alpha = 255
             canvas.drawBitmap(cachedBitmap!!, 0f, 0f, bitmapPaint)
         } else {

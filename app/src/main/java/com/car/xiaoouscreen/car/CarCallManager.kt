@@ -11,7 +11,9 @@ import android.os.Looper
 import android.os.Parcel
 import android.os.SystemClock
 import com.carlyrics.util.AppLogger
+import com.carlyrics.util.PrivacyUtil
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.Executors
 
 /**
  * 欧尚 Z6 iDD / B561 智能座舱通话状态感知管理器
@@ -46,7 +48,12 @@ class CarCallManager private constructor(private val context: Context) {
         val durationSeconds: Long = 0L,
         val timestamp: Long = System.currentTimeMillis()
     ) {
+        // 核心修正：仅当处于响铃、呼出拨号或通话中时，才判定为活跃通话状态 (已挂断 TERMINATED 不再阻塞置顶接管)
         val isCallActive: Boolean
+            get() = state == CallState.RINGING || state == CallState.DIALING || state == CallState.ACTIVE
+
+        // 是否处于通话展示态 (含挂断退场展示)
+        val isDisplayActive: Boolean
             get() = state != CallState.IDLE
     }
 
@@ -126,6 +133,9 @@ class CarCallManager private constructor(private val context: Context) {
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val workerExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "CarCall-Worker").apply { isDaemon = true }
+    }
     private val listeners = CopyOnWriteArrayList<CallListener>()
 
     private var currentCallInfo = CallInfo()
@@ -221,7 +231,9 @@ class CarCallManager private constructor(private val context: Context) {
         mainHandler.postDelayed({
             if (listeners.isNotEmpty()) {
                 AppLogger.i(TAG, "🔄 触发原厂蓝牙电话服务自动重连...")
-                bindBluetoothPhoneService()
+                workerExecutor.execute {
+                    bindBluetoothPhoneService()
+                }
             }
         }, 3000L)
     }
@@ -236,8 +248,11 @@ class CarCallManager private constructor(private val context: Context) {
             } catch (e: Exception) {
                 AppLogger.w(TAG, "linkToDeath 异常: ${e.message}")
             }
-            registerRemoteReply()
-            queryActiveCalls()
+            // 调度至后台工作线程执行 IPC 查询与远程注册，杜绝主线程阻塞 ANR
+            workerExecutor.execute {
+                registerRemoteReply()
+                queryActiveCalls()
+            }
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -255,22 +270,24 @@ class CarCallManager private constructor(private val context: Context) {
     }
 
     fun startListening() {
-        Thread {
+        workerExecutor.execute {
             bindBluetoothPhoneService()
-        }.start()
+        }
     }
 
     fun stopListening() {
-        if (isServiceBound) {
-            try {
-                phoneServiceBinder?.unlinkToDeath(deathRecipient, 0)
-                unregisterRemoteReply()
-                context.unbindService(serviceConnection)
-            } catch (e: Exception) {
-                AppLogger.w(TAG, "解绑车机原生蓝牙电话服务异常: ${e.message}")
-            } finally {
-                isServiceBound = false
-                phoneServiceBinder = null
+        workerExecutor.execute {
+            if (isServiceBound) {
+                try {
+                    phoneServiceBinder?.unlinkToDeath(deathRecipient, 0)
+                    unregisterRemoteReply()
+                    context.unbindService(serviceConnection)
+                } catch (e: Exception) {
+                    AppLogger.w(TAG, "解绑车机原生蓝牙电话服务异常: ${e.message}")
+                } finally {
+                    isServiceBound = false
+                    phoneServiceBinder = null
+                }
             }
         }
     }
@@ -362,6 +379,9 @@ class CarCallManager private constructor(private val context: Context) {
 
     /**
      * 按照 smali 逐字节读取 CallContact Parcel
+     * writeToParcel 字节序:
+     * id(Int), name(String), number(String), state(Int), creationElapsedMilli(Long),
+     * isMultiParty(Byte), isOutgoing(Byte), isInBandRing(Byte)
      */
     private fun readCallContact(parcel: Parcel): RawContact {
         val id = parcel.readInt()
@@ -370,18 +390,36 @@ class CarCallManager private constructor(private val context: Context) {
         val state = parcel.readInt()
         val creationElapsedMilli = parcel.readLong()
         val isMultiParty = parcel.readByte().toInt() != 0
-        return RawContact(id, name, number, state, creationElapsedMilli, isMultiParty)
+        val isOutgoing = parcel.readByte().toInt() != 0
+        val isInBandRing = parcel.readByte().toInt() != 0
+        return RawContact(id, name, number, state, creationElapsedMilli, isMultiParty, isOutgoing, isInBandRing)
     }
 
     private fun handleRawContact(raw: RawContact) {
         mainHandler.post {
-            val mappedState = when (raw.state) {
-                RAW_STATE_ACTIVE, RAW_STATE_HELD_CALL, RAW_STATE_HELD_BY_HOLD -> CallState.ACTIVE
-                RAW_STATE_DIALING -> CallState.DIALING
-                RAW_STATE_RINGING, RAW_STATE_INCOMING, RAW_STATE_WAITING -> CallState.RINGING
-                RAW_STATE_TERMINATED -> CallState.TERMINATED
+            val mappedState = when {
+                // 1. 明确的挂断态
+                raw.state == RAW_STATE_TERMINATED -> CallState.TERMINATED
+
+                // 2. 明确的已接通/保持态
+                raw.state == RAW_STATE_ACTIVE ||
+                raw.state == RAW_STATE_HELD_CALL ||
+                raw.state == RAW_STATE_HELD_BY_HOLD -> CallState.ACTIVE
+
+                // 3. 呼出方向 (无论是拨号 RAW_STATE_DIALING 还是对方振铃 RAW_STATE_RINGING，只要是呼出，均为 DIALING)
+                raw.isOutgoing -> CallState.DIALING
+
+                // 4. 呼入方向 (来电振铃、来电中、呼叫等待)
+                raw.state == RAW_STATE_RINGING ||
+                raw.state == RAW_STATE_INCOMING ||
+                raw.state == RAW_STATE_WAITING -> CallState.RINGING
+
+                // 5. 其他非零状态兜底保护
+                raw.state == RAW_STATE_DIALING -> CallState.DIALING
+
                 else -> CallState.IDLE
             }
+            AppLogger.d(TAG, "📞 解析车机原生通话: state=${raw.state}, isOutgoing=${raw.isOutgoing} -> mappedState=$mappedState")
             updateCallState(mappedState, raw.name, raw.number)
         }
     }
@@ -440,7 +478,7 @@ class CarCallManager private constructor(private val context: Context) {
             durationSeconds = duration
         )
 
-        AppLogger.i(TAG, "📢 通话状态演变: state=$state, type=$type, name=$cleanName, number=$rawNumber, dur=${duration}s")
+        AppLogger.i(TAG, "📢 通话状态演变: state=$state, type=$type, name=${PrivacyUtil.maskName(cleanName)}, number=${PrivacyUtil.maskPhone(rawNumber)}, dur=${duration}s")
         notifyListeners(currentCallInfo)
     }
 
@@ -481,6 +519,12 @@ class CarCallManager private constructor(private val context: Context) {
         val number: String,
         val state: Int,
         val creationElapsedMilli: Long,
-        val isMultiParty: Boolean
-    )
+        val isMultiParty: Boolean,
+        val isOutgoing: Boolean,
+        val isInBandRing: Boolean
+    ) {
+        override fun toString(): String {
+            return "RawContact(id=$id, name=${PrivacyUtil.maskName(name)}, number=${PrivacyUtil.maskPhone(number)}, state=$state, outgoing=$isOutgoing)"
+        }
+    }
 }

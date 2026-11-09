@@ -23,9 +23,9 @@ import java.security.MessageDigest
 object LyricsCacheManager {
 
     private const val TAG = "LyricsCache"
-    private const val DEFAULT_MAX_SIZE_MB = 10L
-    private const val MIN_MAX_SIZE_MB = 5L
-    private const val MAX_MAX_SIZE_MB = 50L
+    private const val DEFAULT_MAX_SIZE_MB = 64L
+    private const val MIN_MAX_SIZE_MB = 8L
+    private const val MAX_MAX_SIZE_MB = 128L
 
     private lateinit var cacheRoot: File
     private lateinit var coverDir: File
@@ -134,6 +134,8 @@ object LyricsCacheManager {
             val json = JSONObject().apply {
                 put("coverUrl", data.coverUrl ?: JSONObject.NULL)
                 put("offset", data.offset)
+                put("sourceName", data.sourceName)
+                if (data.rawLrc != null) put("rawLrc", data.rawLrc)
                 put("lines", JSONArray().apply {
                     data.lines.forEach { line ->
                         put(JSONObject().apply {
@@ -165,20 +167,69 @@ object LyricsCacheManager {
 
     // ==================== 缓存管理 ====================
 
-    fun clearAll() {
+    fun clearAll(context: Context? = null) {
         ensureInit()
         try {
-            cacheRoot.deleteRecursively()
-            coverDir.mkdirs()
-            lyricsDir.mkdirs()
+            if (::cacheRoot.isInitialized && cacheRoot.exists()) {
+                cacheRoot.deleteRecursively()
+                coverDir.mkdirs()
+                lyricsDir.mkdirs()
+            }
         } catch (e: Exception) {
-            AppLogger.e(TAG, "Failed to clear cache: ${e.message}", e)
+            AppLogger.e(TAG, "Failed to clear lyrics cache: ${e.message}", e)
+        }
+
+        // 同步清理内部私有 cacheDir 与外部 externalCacheDir 中的其他临时文件
+        if (context != null) {
+            try {
+                context.cacheDir?.listFiles()?.forEach { file ->
+                    if (file.name != "lyrics_cache") {
+                        file.deleteRecursively()
+                    }
+                }
+                context.externalCacheDir?.listFiles()?.forEach { file ->
+                    file.deleteRecursively()
+                }
+            } catch (e: Exception) {
+                AppLogger.e(TAG, "Failed to clear app cache files: ${e.message}", e)
+            }
         }
     }
 
     fun getCacheSize(): Long {
         ensureInit()
-        return cacheRoot.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+        return try {
+            if (::cacheRoot.isInitialized && cacheRoot.exists()) {
+                cacheRoot.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+            } else 0L
+        } catch (_: Exception) { 0L }
+    }
+
+    /**
+     * 获取应用全局完整真实缓存大小 (字节)
+     * 包括：
+     * 1. 歌词与封面私有磁盘缓存 (context.cacheDir/lyrics_cache)
+     * 2. Glide 网络图片磁盘缓存 (context.cacheDir/image_manager_disk_cache)
+     * 3. 应用内部私有 cacheDir 下的所有临时缓存文件
+     * 4. 外部私有 externalCacheDir 下的缓存文件 (若存在)
+     */
+    fun getTotalCacheSizeBytes(context: Context): Long {
+        var total = 0L
+        try {
+            context.cacheDir?.let { dir ->
+                if (dir.exists()) {
+                    total += dir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+                }
+            }
+            context.externalCacheDir?.let { dir ->
+                if (dir.exists()) {
+                    total += dir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+                }
+            }
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "getTotalCacheSizeBytes error: ${e.message}")
+        }
+        return total
     }
 
     fun setMaxSize(mb: Int) {
@@ -235,10 +286,14 @@ object LyricsCacheManager {
                 )
             }
             val coverUrl = if (obj.isNull("coverUrl")) null else obj.getString("coverUrl")
+            val sourceName = obj.optString("sourceName", "")
+            val rawLrc = if (obj.isNull("rawLrc")) null else obj.optString("rawLrc")
             LyricData(
                 lines = lines,
                 coverUrl = coverUrl,
-                offset = obj.optLong("offset", 0L)
+                offset = obj.optLong("offset", 0L),
+                sourceName = sourceName,
+                rawLrc = rawLrc
             )
         } catch (e: Exception) {
             null

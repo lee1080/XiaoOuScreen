@@ -32,12 +32,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.CloudQueue
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PermDeviceInformation
-import androidx.compose.material.icons.filled.QueueMusic
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material3.Icon
@@ -130,8 +130,6 @@ fun SettingsScreen(
                     enabledSourcesCount = state.sources.count { it.enabled },
                     isQWeather = state.weather.enableQWeather,
                     qWeatherKey = state.weather.apiKey,
-                    qWeatherHost = state.weather.apiHost,
-                    isQWeatherConnected = state.weather.isQWeatherConnected,
                     isProjecting = state.xiaoou.isProjecting,
                     currentMusicTitle = state.currentMusicTitle
                 )
@@ -235,8 +233,6 @@ private fun StatusBar(
     enabledSourcesCount: Int,
     isQWeather: Boolean,
     qWeatherKey: String,
-    qWeatherHost: String,
-    isQWeatherConnected: Boolean,
     isProjecting: Boolean,
     currentMusicTitle: String?,
     modifier: Modifier = Modifier
@@ -538,7 +534,7 @@ private fun SidebarMenuItem(
         MenuItemId.WELCOME -> Icons.Default.Home
         MenuItemId.XIAOOU_SCREEN -> Icons.Default.PermDeviceInformation
         MenuItemId.WEATHER_SERVICE -> Icons.Default.CloudQueue
-        MenuItemId.LYRICS_SETTINGS -> Icons.Default.QueueMusic
+        MenuItemId.LYRICS_SETTINGS -> Icons.AutoMirrored.Filled.QueueMusic
         MenuItemId.FULLSCREEN_LYRICS -> Icons.Default.MusicNote
         MenuItemId.SERVICE_SETTINGS -> Icons.Default.Settings
     }
@@ -683,6 +679,12 @@ private fun DetailPanel(
             val scrollStates = remember { MenuItemId.values().associateWith { androidx.compose.foundation.ScrollState(0) } }
             val currentScrollState = scrollStates[selectedCategory] ?: rememberScrollState()
 
+            LaunchedEffect(selectedCategory) {
+                if (selectedCategory == MenuItemId.SERVICE_SETTINGS) {
+                    viewModel.refreshCacheSize()
+                }
+            }
+
             var showContactAuthorDialog by remember { mutableStateOf(false) }
 
             // 滚动内容与悬浮操作层容器
@@ -707,7 +709,6 @@ private fun DetailPanel(
                         when (category) {
                             MenuItemId.WELCOME -> WelcomePage(
                                 state = state.welcome,
-                                onNavigate = { viewModel.selectCategory(it) },
                                 onGrantAllPermissions = { viewModel.checkAndRequestNextPermission() },
                                 onTogglePermission = { viewModel.openPermissionSetting(it) },
                                 onShowInfo = { viewModel.showAnnotation(it) }
@@ -734,10 +735,7 @@ private fun DetailPanel(
                                 state = state.lyrics,
                                 sources = state.sources,
                                 onToggleSourceEnabled = { viewModel.toggleSourceEnabled(it) },
-                                onDeleteCheckedSources = { viewModel.showSourceManagerDialog(true) },
-                                onPreferredSourceChange = { viewModel.setPreferredSource(it) },
                                 onReorderSources = { viewModel.reorderSources(it) },
-                                onOpenImportDialog = { viewModel.showImportDialog(true) },
                                 onOpenSourceManagerDialog = { viewModel.showSourceManagerDialog(true) },
                                 onTimeOffsetChange = { viewModel.setTimeOffset(it) },
                                 onSaveCustomLyricUrl = { viewModel.saveCustomLyricUrl(it) },
@@ -749,8 +747,6 @@ private fun DetailPanel(
                                 state = state.lyrics,
                                 onToggleMasterEnabled = { viewModel.toggleMasterLyrics(it) },
                                 onSkinThemeChange = { viewModel.setSkinTheme(it) },
-                                onToggleLongMarquee = { viewModel.toggleLongMarquee(it) },
-                                onAlignModeChange = { viewModel.setAlignMode(it) },
                                 onSplitRatioChange = { viewModel.setSplitRatio(it) },
                                 onCoverScaleChange = { viewModel.setCoverScale(it) },
                                 onTitleFontSizeChange = { viewModel.setTitleFontSize(it) },

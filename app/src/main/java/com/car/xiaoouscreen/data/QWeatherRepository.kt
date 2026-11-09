@@ -3,6 +3,7 @@ package com.car.xiaoouscreen.data
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
+import com.carlyrics.util.PrivacyUtil
 import com.google.gson.Gson
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -30,8 +31,20 @@ class QWeatherRepository(private val context: Context) {
     var lastMinutelyTimestamp: Long = 0L
         private set
 
-    // 异常熔断标记 (如当日遇到 403 或 429，熔断降级为 Open-Meteo)
+    // 异常熔断标记 (如遇到 403 或 429，临时熔断降级为 Open-Meteo，15分钟冷却期满后自动自愈探测)
+    private var circuitBrokenTimeMs: Long = 0L
     var isCircuitBroken: Boolean = false
+        get() {
+            if (field) {
+                val elapsed = System.currentTimeMillis() - circuitBrokenTimeMs
+                if (elapsed >= CIRCUIT_BREAKER_COOLDOWN_MS) {
+                    Log.i(TAG, "QWeather 熔断冷却期满 (15分钟)，自动恢复接口探测自愈")
+                    field = false
+                    circuitBrokenTimeMs = 0L
+                }
+            }
+            return field
+        }
         private set
 
     init {
@@ -98,6 +111,7 @@ class QWeatherRepository(private val context: Context) {
                 val testApi = createApi(baseUrl)
                 val response = testApi.getWeatherNow(location = queryLoc, key = trimmedKey)
                 if (response.code == "200") {
+                    resetCircuitBreaker()
                     val locLabel = if (lat != null && lon != null) {
                         String.format(Locale.US, "[%.2f°E, %.2f°N]", lon, lat)
                     } else {
@@ -140,7 +154,7 @@ class QWeatherRepository(private val context: Context) {
             }
 
             val loc = String.format(Locale.US, "%.2f,%.2f", lon, lat)
-            Log.e(TAG, "📡 [QWeather API] 实际请求实况数据: BaseUrl=${configManager.getBaseUrl()}, Location(lon,lat)=$loc")
+            Log.d(TAG, "📡 [QWeather API] 实际请求实况数据: BaseUrl=${configManager.getBaseUrl()}, Location=${PrivacyUtil.maskCoordinate(lon)},${PrivacyUtil.maskCoordinate(lat)}")
             try {
                 val api = createApi()
                 val response = api.getWeatherNow(location = loc, key = configManager.apiKey)
@@ -175,7 +189,7 @@ class QWeatherRepository(private val context: Context) {
             }
 
             val loc = String.format(Locale.US, "%.2f,%.2f", lon, lat)
-            Log.e(TAG, "📡 [QWeather API] 实际请求实况数据: BaseUrl=${configManager.getBaseUrl()}, Location(lon,lat)=$loc")
+            Log.d(TAG, "📡 [QWeather API] 实际请求分钟降水数据: BaseUrl=${configManager.getBaseUrl()}, Location=${PrivacyUtil.maskCoordinate(lon)},${PrivacyUtil.maskCoordinate(lat)}")
             try {
                 val api = createApi()
                 val response = api.getMinutely5m(location = loc, key = configManager.apiKey)
@@ -200,19 +214,22 @@ class QWeatherRepository(private val context: Context) {
 
     fun resetCircuitBreaker() {
         isCircuitBroken = false
+        circuitBrokenTimeMs = 0L
     }
 
     private fun checkErrorCode(code: String) {
         if (code == "401" || code == "403" || code == "402") {
-            Log.e(TAG, "QWeather critical error $code, triggering circuit breaker")
+            Log.e(TAG, "QWeather critical error $code, triggering circuit breaker (15 min cooldown)")
             isCircuitBroken = true
+            circuitBrokenTimeMs = System.currentTimeMillis()
         }
     }
 
     private fun checkHttpException(e: HttpException) {
         if (e.code() == 401 || e.code() == 403 || e.code() == 429) {
-            Log.e(TAG, "QWeather critical HTTP ${e.code()}, triggering circuit breaker")
+            Log.e(TAG, "QWeather critical HTTP ${e.code()}, triggering circuit breaker (15 min cooldown)")
             isCircuitBroken = true
+            circuitBrokenTimeMs = System.currentTimeMillis()
         }
     }
 
@@ -271,6 +288,7 @@ class QWeatherRepository(private val context: Context) {
 
     companion object {
         private const val TAG = "QWeatherRepo"
+        private const val CIRCUIT_BREAKER_COOLDOWN_MS = 15 * 60 * 1000L // 15分钟熔断冷却期
         private const val KEY_CACHE_NOW = "key_cached_now_json"
         private const val KEY_CACHE_NOW_TIME = "key_cached_now_time"
         private const val KEY_CACHE_MINUTELY = "key_cached_minutely_json"

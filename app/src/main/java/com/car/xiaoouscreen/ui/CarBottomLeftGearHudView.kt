@@ -504,7 +504,9 @@ class CarBottomLeftGearHudView @JvmOverloads constructor(
         }
 
         // 绘制模糊后的高饱和背景 (饱和度 170%)
-        canvas.drawBitmap(glassBgBitmap, glassSrcRect, slotRect, glassBitmapPaint)
+        if (!glassBgBitmap.isRecycled) {
+            canvas.drawBitmap(glassBgBitmap, glassSrcRect, slotRect, glassBitmapPaint)
+        }
 
         canvas.restore()
     }

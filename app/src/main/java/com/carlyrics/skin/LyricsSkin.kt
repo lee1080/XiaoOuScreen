@@ -289,7 +289,12 @@ abstract class LyricsSkin(context: Context) : FrameLayout(context) {
 
     // ---- 内部 Helper: 跑马灯滚动 ----
 
-    protected fun applyMarquee(targetView: TextView, lyricsAreaWidth: Int, currentTimestamp: Long, nextTimestamp: Long) {
+    protected fun applyMarquee(
+        targetView: TextView,
+        @Suppress("UNUSED_PARAMETER") lyricsAreaWidth: Int = 0,
+        @Suppress("UNUSED_PARAMETER") currentTimestamp: Long = 0L,
+        @Suppress("UNUSED_PARAMETER") nextTimestamp: Long = 0L
+    ) {
         // 卡拉OK系统由 KaraokeHelper 全权驱动高精度平移与边界排版，避免双动画竞争覆盖
         cancelMarquee(targetView)
         if (!marqueeEnabled) {
@@ -304,11 +309,7 @@ abstract class LyricsSkin(context: Context) : FrameLayout(context) {
         }
     }
 
-    protected fun applyMarquee(targetView: TextView, currentTimestamp: Long, nextTimestamp: Long) {
-        applyMarquee(targetView, 0, currentTimestamp, nextTimestamp)
-    }
-
-    protected fun cancelMarquee(exceptView: TextView? = null) {
+    protected fun cancelMarquee(@Suppress("UNUSED_PARAMETER") exceptView: TextView? = null) {
         marqueeAnimator?.cancel()
         marqueeAnimator = null
     }

@@ -81,7 +81,8 @@ class NotificationListenerService : NotificationListenerService() {
         if (isIgnoredPackage(pkg)) {
             return
         }
-        AppLogger.d(TAG, "onNotificationPosted: pkg=$pkg, category=${sbn.notification.category}, title=${sbn.notification.extras.getString(android.app.Notification.EXTRA_TITLE)}")
+        // 隐私合规保护：不记录任意三方通知的敏感标题内容，仅记录包名与通知分类
+        AppLogger.d(TAG, "onNotificationPosted: pkg=$pkg, category=${sbn.notification.category}")
         val callback = onNotificationPosted
         if (callback != null) {
             callback.invoke(sbn)

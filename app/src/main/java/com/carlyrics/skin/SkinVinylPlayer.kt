@@ -54,11 +54,11 @@ class SkinVinylPlayer(context: Context) : LyricsSkin(context) {
     private val fadeMaskBottom: View
 
     // 架构容器
-    private lateinit var vinylPanelView: FrameLayout
-    private lateinit var leftPanel: FrameLayout
-    private lateinit var lyricsArea: FrameLayout
-    private lateinit var leftContainerView: LinearLayout
-    private lateinit var contentRowLayout: LinearLayout
+    private val vinylPanelView: FrameLayout
+    private val leftPanel: FrameLayout
+    private val lyricsArea: FrameLayout
+    private val leftContainerView: LinearLayout
+    private val contentRowLayout: LinearLayout
 
     private val baseVinylSizeDp = 130
     private val baseNowPlayingSp = 10f
@@ -218,7 +218,7 @@ class SkinVinylPlayer(context: Context) : LyricsSkin(context) {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.BOTTOM
             setPadding(0, dp(baseVizTopPaddingDp), 0, 0)
         }
-        visualizerBars.forEachIndexed { i, bar ->
+        visualizerBars.forEach { bar ->
             bar.pivotY = vizBarHeight.toFloat() // 底部缩放轴心
             vizRow.addView(bar, LinearLayout.LayoutParams(dp(baseBarWidthDp), vizBarHeight).apply {
                 setMargins(0, 0, dp(baseBarSpacingDp), 0)

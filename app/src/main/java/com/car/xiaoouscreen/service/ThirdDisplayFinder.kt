@@ -2,6 +2,8 @@ package com.car.xiaoouscreen.service
 
 import android.content.Context
 import android.hardware.display.DisplayManager
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.Display
 
@@ -17,6 +19,43 @@ object ThirdDisplayFinder {
     const val Z6_PREFERRED_DISPLAY_ID = 2
 
     private var manualDisplayId: Int? = null
+    private var displayListener: DisplayManager.DisplayListener? = null
+    private var changeListener: DisplayChangeListener? = null
+
+    interface DisplayChangeListener {
+        fun onDisplaysChanged()
+    }
+
+    fun startListening(context: Context, listener: DisplayChangeListener) {
+        val dm = context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager ?: return
+        this.changeListener = listener
+        if (displayListener == null) {
+            val l = object : DisplayManager.DisplayListener {
+                override fun onDisplayAdded(displayId: Int) {
+                    Log.i(TAG, "屏幕增加: displayId=$displayId")
+                    changeListener?.onDisplaysChanged()
+                }
+
+                override fun onDisplayRemoved(displayId: Int) {
+                    Log.i(TAG, "屏幕移除: displayId=$displayId")
+                    changeListener?.onDisplaysChanged()
+                }
+
+                override fun onDisplayChanged(displayId: Int) {
+                    changeListener?.onDisplaysChanged()
+                }
+            }
+            displayListener = l
+            dm.registerDisplayListener(l, Handler(Looper.getMainLooper()))
+        }
+    }
+
+    fun stopListening(context: Context) {
+        val dm = context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager ?: return
+        displayListener?.let { dm.unregisterDisplayListener(it) }
+        displayListener = null
+        changeListener = null
+    }
 
     fun setManualDisplayId(id: Int?) {
         manualDisplayId = id

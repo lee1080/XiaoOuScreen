@@ -16,6 +16,8 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.animation.DecelerateInterpolator
+import android.widget.ImageView
+import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
@@ -35,10 +37,13 @@ import com.carlyrics.display.LyricsNormalizedContainerView
 import com.carlyrics.lyrics.LyricsApiManager
 import com.carlyrics.model.CurrentTrack
 import com.carlyrics.model.LyricLine
+import com.carlyrics.recognition.MusicRecognitionEngine
 import com.carlyrics.util.PrefsManager
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -114,10 +119,25 @@ class CarSubscreenActivity : AppCompatActivity(),
     }
     private val fallbackToWeatherRunnable = Runnable {
         Log.i(TAG, "音乐暂停已达 5 秒，平滑回退至时间天气大时钟界面")
+        setTopMusicTrackInfo("", "", isPlaying = false)
         switchToWeatherPage(smooth = true)
     }
 
     private var wasInLyricsBeforeCall: Boolean = false
+    private var isResumedState = false
+
+    private fun bringActivityToFront() {
+        try {
+            val intent = Intent(this, CarSubscreenActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            }
+            startActivity(intent)
+            Log.i(TAG, "🛡️ [Activity登顶接管] 执行 bringActivityToFront 压制原厂媒体界面")
+        } catch (e: Exception) {
+            Log.w(TAG, "bringActivityToFront failed: ${e.message}")
+        }
+    }
+
     private val callListener = object : CarCallManager.CallListener {
         override fun onCallChanged(callInfo: CarCallManager.CallInfo) {
             runOnUiThread {
@@ -126,12 +146,20 @@ class CarSubscreenActivity : AppCompatActivity(),
                         wasInLyricsBeforeCall = true
                         switchToWeatherPage(smooth = true)
                     }
-                } else if (callInfo.state == CarCallManager.CallState.IDLE) {
+                } else if (callInfo.state == CarCallManager.CallState.TERMINATED || callInfo.state == CarCallManager.CallState.IDLE) {
                     if (wasInLyricsBeforeCall) {
                         if (isMusicPlaying) {
                             switchToLyricsPage(smooth = true)
                         }
                         wasInLyricsBeforeCall = false
+                    }
+                    // 挂断电话且音乐正在恢复播放，若 Activity 被挤到后台则主动登顶接管
+                    if (isMusicPlaying && !isResumedState) {
+                        mainHandler.postDelayed({
+                            if (!isResumedState && isMusicPlaying) {
+                                bringActivityToFront()
+                            }
+                        }, 800L)
                     }
                 }
                 weatherCanvasView.setCallInfo(callInfo)
@@ -224,7 +252,8 @@ class CarSubscreenActivity : AppCompatActivity(),
                     val playing = intent.getBooleanExtra(WeatherOverlayService.EXTRA_MUSIC_PLAYING, true)
                     val title = intent.getStringExtra(WeatherOverlayService.EXTRA_MUSIC_TITLE) ?: "See You Again (feat. Charlie Puth)"
                     val artist = intent.getStringExtra(WeatherOverlayService.EXTRA_MUSIC_ARTIST) ?: "Wiz Khalifa / Charlie Puth"
-                    onTrackStateChanged(CurrentTrack(title = title, artist = artist, isPlaying = playing, position = 15000L, duration = 200000L))
+                    val duration = intent.getLongExtra("extra_music_duration", 0L)
+                    onTrackStateChanged(CurrentTrack(title = title, artist = artist, isPlaying = playing, position = 15000L, duration = duration))
                 }
             }
         }
@@ -460,9 +489,10 @@ class CarSubscreenActivity : AppCompatActivity(),
     }
 
     private fun onTrackStateChanged(track: CurrentTrack?) {
-        if (track == null || track.title.isBlank()) {
+        if (track == null || track.title.isBlank() || MusicRecognitionEngine.isInvalidPlaceholderTrack(track.title, track.artist)) {
             isMusicPlaying = false
             mainHandler.removeCallbacks(fallbackToWeatherRunnable)
+            setTopMusicTrackInfo("", "", isPlaying = false)
             switchToWeatherPage(smooth = true)
             return
         }
@@ -471,6 +501,7 @@ class CarSubscreenActivity : AppCompatActivity(),
         val artist = track.artist.trim()
         val playing = track.isPlaying
 
+        val wasPlayingBefore = isMusicPlaying
         isMusicPlaying = playing
         lastKnownPosition = track.position
         lastPositionNanos = System.nanoTime()
@@ -489,7 +520,16 @@ class CarSubscreenActivity : AppCompatActivity(),
 
         if (playing) {
             mainHandler.removeCallbacks(fallbackToWeatherRunnable)
-            switchToLyricsPage(smooth = true)
+            if (!wasPlayingBefore && !isResumedState) {
+                // 音乐恢复播放但界面不在前台，登顶接管
+                bringActivityToFront()
+            }
+            if (PrefsManager.isStandaloneLyricsEnabled()) {
+                switchToLyricsPage(smooth = true)
+            } else {
+                switchToWeatherPage(smooth = false)
+            }
+            setTopMusicTrackInfo(lastTrackTitle, lastTrackArtist, isPlaying = true)
             startLyricsProgressTicker()
         } else {
             mainHandler.postDelayed(fallbackToWeatherRunnable, 5000L)
@@ -500,26 +540,68 @@ class CarSubscreenActivity : AppCompatActivity(),
         lyricsFetchJob?.cancel()
         lyricsApi.cancelAllRequests()
         lyricsContainerView.setTrackInfo(title, artist)
+        if (isMusicPlaying) {
+            setTopMusicTrackInfo(title, artist, isPlaying = true)
+        }
 
         lyricsFetchJob = lifecycleScope.launch(Dispatchers.IO) {
-            val coverUrl = try {
-                lyricsApi.fetchCover(title, artist)
-            } catch (_: Exception) { null }
+            try {
+                coroutineContext.ensureActive()
+                val coverUrl = try {
+                    lyricsApi.fetchCover(title, artist)
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (_: Exception) { null }
 
-            lastCoverUrl = coverUrl
-            withContext(Dispatchers.Main) {
-                lyricsContainerView.setCoverUrl(coverUrl)
-            }
+                coroutineContext.ensureActive()
+                if (title != lastTrackTitle || artist != lastTrackArtist) return@launch
+                lastCoverUrl = coverUrl
+                withContext(Dispatchers.Main) {
+                    if (title == lastTrackTitle && artist == lastTrackArtist) {
+                        lyricsContainerView.setCoverUrl(coverUrl)
+                    }
+                }
 
-            val lyricResult = try {
-                lyricsApi.fetchLyrics(title, artist)
-            } catch (_: Exception) { null }
+                coroutineContext.ensureActive()
+                val lyricResult = try {
+                    lyricsApi.fetchLyrics(title, artist)
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (_: Exception) { null }
 
-            val lines = lyricResult?.getOrNull()?.lines ?: emptyList()
-            currentLyricLines = lines
+                coroutineContext.ensureActive()
+                if (title != lastTrackTitle || artist != lastTrackArtist) return@launch
+                val rawLines = lyricResult?.getOrNull()?.lines?.filter { it.text.isNotBlank() } ?: emptyList()
+                val lines = if (rawLines.isNotEmpty()) {
+                    rawLines
+                } else {
+                    val highlightLine = if (artist.isNotBlank() &&
+                        !artist.equals("未知歌手", ignoreCase = true) &&
+                        !artist.equals("Unknown", ignoreCase = true)
+                    ) {
+                        if (title.contains(artist)) title else "$title - $artist"
+                    } else if (title.isNotBlank()) {
+                        title
+                    } else {
+                        "未知曲目"
+                    }
+                    listOf(
+                        LyricLine(timestamp = 0L, text = highlightLine),
+                        LyricLine(timestamp = 86_400_000L, text = "暂无未匹配到歌词")
+                    )
+                }
+                currentLyricLines = lines
 
-            withContext(Dispatchers.Main) {
-                lyricsContainerView.setLyrics(lines)
+                withContext(Dispatchers.Main) {
+                    if (title == lastTrackTitle && artist == lastTrackArtist) {
+                        lyricsContainerView.setLyrics(lines)
+                        if (isMusicPlaying) {
+                            setTopMusicTrackInfo(title, artist, isPlaying = true)
+                        }
+                    }
+                }
+            } catch (_: CancellationException) {
+                // 协程已及时取消，安全退出
             }
         }
     }
@@ -542,8 +624,14 @@ class CarSubscreenActivity : AppCompatActivity(),
     }
 
     fun switchToLyricsPage(smooth: Boolean = true) {
-        if (currentPage == ActivePage.LYRICS && lyricsContainerView.visibility == View.VISIBLE && lyricsContainerView.alpha == 1f) return
+        if (currentPage == ActivePage.LYRICS && lyricsContainerView.visibility == View.VISIBLE && lyricsContainerView.alpha == 1f) {
+            weatherCanvasView.setTopMusicTrackInfo("", "", isPlaying = false)
+            return
+        }
         currentPage = ActivePage.LYRICS
+
+        // 全屏歌词状态下：隐藏顶部居中常驻音乐胶囊
+        weatherCanvasView.setTopMusicTrackInfo("", "", isPlaying = false)
 
         lyricsContainerView.resume()
         lyricsContainerView.visibility = View.VISIBLE
@@ -562,10 +650,10 @@ class CarSubscreenActivity : AppCompatActivity(),
                 .start()
 
             weatherCanvasView.animate()
-                .alpha(0f)
-                .setDuration(500L)
-                .setInterpolator(DecelerateInterpolator())
-                .setListener(object : AnimatorListenerAdapter() {
+                ?.alpha(0f)
+                ?.setDuration(500L)
+                ?.setInterpolator(DecelerateInterpolator())
+                ?.setListener(object : AnimatorListenerAdapter() {
                     override fun onAnimationEnd(animation: Animator) {
                         if (currentPage == ActivePage.LYRICS) {
                             weatherCanvasView.visibility = View.GONE
@@ -573,7 +661,7 @@ class CarSubscreenActivity : AppCompatActivity(),
                         }
                     }
                 })
-                .start()
+                ?.start()
         } else {
             lyricsContainerView.alpha = 1f
             weatherCanvasView.visibility = View.GONE
@@ -583,8 +671,13 @@ class CarSubscreenActivity : AppCompatActivity(),
     }
 
     fun switchToWeatherPage(smooth: Boolean = true) {
-        if (currentPage == ActivePage.WEATHER && weatherCanvasView.visibility == View.VISIBLE && weatherCanvasView.alpha == 1f) return
+        if (currentPage == ActivePage.WEATHER && weatherCanvasView.visibility == View.VISIBLE && weatherCanvasView.alpha == 1f) {
+            checkAndRestoreTopMusicInfo(smooth)
+            return
+        }
         currentPage = ActivePage.WEATHER
+
+        checkAndRestoreTopMusicInfo(smooth)
 
         weatherCanvasView.resumeAnimation()
         weatherCanvasView.visibility = View.VISIBLE
@@ -603,10 +696,10 @@ class CarSubscreenActivity : AppCompatActivity(),
                 .start()
 
             lyricsContainerView.animate()
-                .alpha(0f)
-                .setDuration(800L)
-                .setInterpolator(DecelerateInterpolator())
-                .setListener(object : AnimatorListenerAdapter() {
+                ?.alpha(0f)
+                ?.setDuration(800L)
+                ?.setInterpolator(DecelerateInterpolator())
+                ?.setListener(object : AnimatorListenerAdapter() {
                     override fun onAnimationEnd(animation: Animator) {
                         if (currentPage == ActivePage.WEATHER) {
                             lyricsContainerView.visibility = View.GONE
@@ -614,13 +707,61 @@ class CarSubscreenActivity : AppCompatActivity(),
                         }
                     }
                 })
-                .start()
+                ?.start()
         } else {
             weatherCanvasView.alpha = 1f
             lyricsContainerView.visibility = View.GONE
             lyricsContainerView.alpha = 0f
             lyricsContainerView.pause()
         }
+    }
+
+    /**
+     * 平滑隐藏顶部音乐播放信息胶囊 (岛)
+     */
+    fun hideTopMusicTrackInfo(smooth: Boolean = true) {
+        weatherCanvasView.setTopMusicTrackInfo("", "", isPlaying = false)
+    }
+
+    /**
+     * 评估并恢复天气主界面的顶部常驻音乐信息胶囊
+     * - 仅在非全屏歌词模式且音乐正在播放时展示
+     * - 如果没有音乐播放，恢复时间显示时必须隐藏这个岛！
+     */
+    private fun checkAndRestoreTopMusicInfo(smooth: Boolean) {
+        val cleanTitle = lastTrackTitle.trim()
+        val cleanArtist = lastTrackArtist.trim()
+        val shouldShow = isMusicPlaying &&
+            cleanTitle.isNotEmpty() &&
+            !MusicRecognitionEngine.isInvalidPlaceholderTrack(cleanTitle, cleanArtist) &&
+            !PrefsManager.isStandaloneLyricsEnabled() &&
+            currentPage != ActivePage.LYRICS
+
+        if (shouldShow) {
+            weatherCanvasView.setTopMusicTrackInfo(cleanTitle, cleanArtist, isPlaying = true)
+        } else {
+            weatherCanvasView.setTopMusicTrackInfo("", "", isPlaying = false)
+        }
+    }
+
+    /**
+     * 设置并更新小欧屏最顶部居中高亮音乐播放信息 (‘音乐图标’ 歌名-歌手名)
+     * - 纯原生 1920×384 黄金比例直接渲染，实车与 PAD 缩放比例 100% 绝对一致
+     * - 居中对齐，超出边界自动以省略号截断
+     * - 播放时淡入展示；无音乐播放或恢复时间显示时优雅淡出收敛隐藏
+     */
+    fun setTopMusicTrackInfo(title: String, artist: String, isPlaying: Boolean) {
+        lastTrackTitle = title
+        lastTrackArtist = artist
+        this.isMusicPlaying = isPlaying
+
+        // 全屏歌词状态下 (ActivePage.LYRICS 或系统启用了全屏歌词且音乐正在播放)，不显示顶部的歌名等
+        if (currentPage == ActivePage.LYRICS || PrefsManager.isStandaloneLyricsEnabled()) {
+            weatherCanvasView.setTopMusicTrackInfo("", "", isPlaying = false)
+            return
+        }
+
+        weatherCanvasView.setTopMusicTrackInfo(title, artist, isPlaying)
     }
 
     // ==================== 触控与按键模拟 ====================
@@ -676,6 +817,7 @@ class CarSubscreenActivity : AppCompatActivity(),
 
     override fun onResume() {
         super.onResume()
+        isResumedState = true
         hideSystemUi()
         weatherCanvasView.resumeAnimation()
         if (currentPage == ActivePage.LYRICS) {
@@ -688,6 +830,7 @@ class CarSubscreenActivity : AppCompatActivity(),
 
     override fun onPause() {
         super.onPause()
+        isResumedState = false
         weatherCanvasView.pauseAnimation()
         lyricsContainerView.pause()
         lyricsProgressJob?.cancel()

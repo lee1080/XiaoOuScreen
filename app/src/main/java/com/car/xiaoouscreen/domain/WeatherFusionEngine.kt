@@ -12,6 +12,7 @@ import com.car.xiaoouscreen.data.QWeatherMinutelyResponse
 import com.car.xiaoouscreen.data.QWeatherNowDto
 import com.car.xiaoouscreen.data.QWeatherRepository
 import com.car.xiaoouscreen.location.CarGpsManager
+import com.carlyrics.util.PrivacyUtil
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -155,12 +156,12 @@ class WeatherFusionEngine(
         scope.launch {
             val nowMs = System.currentTimeMillis()
             val nowUnix = nowMs / 1000L
-            Log.e(TAG, "🌐【双天气引擎触发刷新】传入经纬度: lat=$lat, lon=$lon (force=$force)")
+            Log.d(TAG, "🌐【双天气引擎触发刷新】传入经纬度: lat=${PrivacyUtil.maskCoordinate(lat)}, lon=${PrivacyUtil.maskCoordinate(lon)} (force=$force)")
 
             // 步骤 1：请求 Open-Meteo 基础气象 (ECMWF IFS 0.25° + 日出日落秒级时间戳)
             val omResult = openMeteoRepo.getWeatherScene(lat, lon)
             val baseScene = omResult.getOrNull() ?: _sceneConfig.value
-            Log.e(TAG, "🌦️ Open-Meteo 返回: temp=${baseScene.temperatureCelsius}℃, state=${baseScene.weatherState}, wind=${baseScene.windSpeedKmh}km/h")
+            Log.d(TAG, "🌦️ Open-Meteo 返回: temp=${baseScene.temperatureCelsius}℃, state=${baseScene.weatherState}, wind=${baseScene.windSpeedKmh}km/h")
 
             val sunriseUnix = openMeteoRepo.lastSunriseUnix
             val sunsetUnix = openMeteoRepo.lastSunsetUnix
@@ -175,7 +176,10 @@ class WeatherFusionEngine(
                 WeatherState.SLEET -> 68
             }
 
-            // 步骤 2：判断是否启用了和风天气且配置了 Key
+            // 步骤 2：强制刷新时重置熔断标记，并判断是否启用了和风天气且配置了 Key
+            if (force) {
+                qWeatherRepo.resetCircuitBreaker()
+            }
             if (!qWeatherRepo.configManager.isEnabled || !qWeatherRepo.configManager.isConfigured() || qWeatherRepo.isCircuitBroken) {
                 // 纯免费 Open-Meteo 兜底模式
                 _sceneConfig.value = baseScene
@@ -193,16 +197,16 @@ class WeatherFusionEngine(
             val isLocationMoved = distMeters >= 3000f
             val needNowUpdate = force || isLocationMoved || (nowMs - lastQWeatherNowTimeMs >= 15 * 60 * 1000L)
             if (needNowUpdate) {
-                Log.e(TAG, "📡 正在请求和风实况 weather/now (lon=$lon, lat=$lat, moved=$isLocationMoved, force=$force)...")
+                Log.d(TAG, "📡 正在请求和风实况 weather/now (lon=${PrivacyUtil.maskCoordinate(lon)}, lat=${PrivacyUtil.maskCoordinate(lat)}, moved=$isLocationMoved, force=$force)...")
                 val nowResult = qWeatherRepo.getWeatherNow(lat, lon)
                 if (nowResult.isSuccess) {
                     lastQNow = nowResult.getOrNull()
                     lastQWeatherNowTimeMs = nowMs
                     lastQWeatherLat = lat
                     lastQWeatherLon = lon
-                    Log.e(TAG, "✅ 和风实况返回: temp=${lastQNow?.temp}℃, text=${lastQNow?.text}, wind=${lastQNow?.windDir} ${lastQNow?.windScale}级")
+                    Log.d(TAG, "✅ 和风实况返回: temp=${lastQNow?.temp}℃, text=${lastQNow?.text}, wind=${lastQNow?.windDir} ${lastQNow?.windScale}级")
                 } else {
-                    Log.e(TAG, "❌ 和风实况请求失败: ${nowResult.exceptionOrNull()?.message}")
+                    Log.w(TAG, "❌ 和风实况请求失败: ${nowResult.exceptionOrNull()?.message}")
                 }
             }
 
@@ -406,20 +410,27 @@ class WeatherFusionEngine(
         }
     }
 
+    @Volatile
+    private var isNetworkCallbackRegistered = false
+
     private fun registerNetworkCallback() {
+        if (isNetworkCallbackRegistered) return
         try {
             val req = NetworkRequest.Builder()
                 .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 .build()
             connectivityManager.registerNetworkCallback(req, networkCallback)
+            isNetworkCallbackRegistered = true
         } catch (e: Exception) {
             Log.w(TAG, "Failed to register network callback: ${e.message}")
         }
     }
 
     private fun unregisterNetworkCallback() {
+        if (!isNetworkCallbackRegistered) return
         try {
             connectivityManager.unregisterNetworkCallback(networkCallback)
+            isNetworkCallbackRegistered = false
         } catch (_: Exception) {}
     }
 

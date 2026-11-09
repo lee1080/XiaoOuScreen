@@ -212,7 +212,7 @@ object PrefsManager {
 
     // ----- Cache -----
     fun getCacheMaxSizeMb(): Int {
-        return get().getInt(KEY_CACHE_MAX_SIZE_MB, 10)
+        return get().getInt(KEY_CACHE_MAX_SIZE_MB, 64)
     }
 
     fun setCacheMaxSizeMb(mb: Int) {

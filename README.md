@@ -11,13 +11,13 @@
 
 ## 📖 项目简介
 
-**小欧屏 (XiaoOuScreen)** 是一套专为车载超宽副屏（1920×384 分辨率）深度研发的综合车机应用。针对车机芯片（如联发科 MT6771 等）在性能与能耗上的严苛要求，全工程基于 **Native Canvas 零 GC 内存复用机制** 与 **Jetpack Compose 现代化架构** 构建，兼具极致流畅与低能耗。
+**小欧屏 (XiaoOuScreen)** 是一套专为车载超宽副屏（1920×384 黄金比例）深度定制研发的综合车载应用。针对车机芯片（如联发科 MT6771 / Mali-G72 等）在性能与能耗上的严苛要求，全工程基于 **Native Canvas 零 GC 内存复用机制** 与 **Jetpack Compose 现代化架构** 构建，兼具极致流畅与低能耗。
 
 ### 🌟 核心功能特性
 
 1. **气象动态背景与大气融合时钟**：
    - **双天气源智能融合**：支持和风天气 (QWeather) 与 Open-Meteo 实时气象数据，自动计算日出日落（精准判定拂晓与落日）。
-   - **自适应光照与粒子系统**：支持 6 大气象状态 × 4 昼夜时段（拂晓、白昼、黄昏、深夜）动态光照、雨滴、雪花、雾气及电闪雷暴粒子渲染。
+   - **自适应光照与粒子系统**：支持 **4 大昼夜时段 × 7 种天气 = 28 种拟真全景** 动态光照、雨滴、雪花、雾气及电闪雷暴粒子渲染。
    - **零 GC 高性能渲染**：在 `onDraw` 循环中彻底规避对象分配，粒子采用对象池循环复用，画面切换支持平滑 Cross-Fade 渐变过渡。
 
 2. **车载原生歌词引擎与音乐岛**：
@@ -37,6 +37,85 @@
 5. **新拟物风格设置中心 (Jetpack Compose)**：
    - 针对车载触控优化的 Neu-morphism（新拟物凹凸质感）控制面板。
    - 支持天气源切换、API Key 配置、全屏歌词排版调节、开机自启托管、源管理及关于信息。
+
+---
+
+## 🎨 昼夜时段 × 气象状态 28 种拟真全景效果展示
+
+小欧屏内置由物理光学算法驱动的真实大气天色系统，根据 GPS 定位计算太阳高度角与日出日落时刻，在 **晨曦 (Dawn)**、**白昼 (Day)**、**黄昏 (Dusk)** 与 **夜晚 (Night)** 4 大时段，以及 7 种核心天气（晴朗、多云、阴雾、雨天、雪天、雷暴、雨夹雪）之间智能平滑渐变：
+
+### 🌟 四大时段核心视觉对照
+
+| 时段 | 效果预览 (1920 × 384 超宽实车副屏渲染) |
+|---|---|
+| **白昼 (Day)** | ![白昼晴空](docs/images/scenes/scene_day_clear.png) |
+| **黄昏 (Dusk)** | ![黄昏落日](docs/images/scenes/scene_dusk_clear.png) |
+| **夜晚 (Night)** | ![极夜月夜](docs/images/scenes/scene_night_clear.png) |
+| **晨曦 (Dawn)** | ![晨曦破晓](docs/images/scenes/scene_dawn_clear.png) |
+
+---
+
+### ☀️ 一、白昼时段 (Day) · 蔚蓝晴空与强明度散射
+
+> 正午阳光充足，天空呈高明度深天青渐变，时钟与信息 HUD 采用高对比度纯白与天青光晕。
+
+| 气象状态 | 效果截图 |
+|---|---|
+| **晴朗 (Clear)** | ![白昼-晴朗](docs/images/scenes/scene_day_clear.png) |
+| **多云 (Cloudy)** | ![白昼-多云](docs/images/scenes/scene_day_cloudy.png) |
+| **阴天/雾 (Overcast)** | ![白昼-阴天](docs/images/scenes/scene_day_overcast.png) |
+| **雨天 (Rain)** | ![白昼-雨天](docs/images/scenes/scene_day_rain.png) |
+| **雪天 (Snow)** | ![白昼-雪天](docs/images/scenes/scene_day_snow.png) |
+| **雷暴 (Storm)** | ![白昼-雷暴](docs/images/scenes/scene_day_storm.png) |
+| **雨夹雪 (Sleet)** | ![白昼-雨夹雪](docs/images/scenes/scene_day_sleet.png) |
+
+---
+
+### 🌇 二、黄昏时段 (Dusk) · 赤金夕阳与晚霞云海
+
+> 日落前后 45 分钟，西方地平线呈现赤金到暗紫红的火烧云漫射，时钟文字散发落日炽金色漫反射光晕。
+
+| 气象状态 | 效果截图 |
+|---|---|
+| **晴朗 (Clear)** | ![黄昏-晴朗](docs/images/scenes/scene_dusk_clear.png) |
+| **多云 (Cloudy)** | ![黄昏-多云](docs/images/scenes/scene_dusk_cloudy.png) |
+| **阴天/雾 (Overcast)** | ![黄昏-阴天](docs/images/scenes/scene_dusk_overcast.png) |
+| **雨天 (Rain)** | ![黄昏-雨天](docs/images/scenes/scene_dusk_rain.png) |
+| **雪天 (Snow)** | ![黄昏-雪天](docs/images/scenes/scene_dusk_snow.png) |
+| **雷暴 (Storm)** | ![黄昏-雷暴](docs/images/scenes/scene_dusk_storm.png) |
+| **雨夹雪 (Sleet)** | ![黄昏-雨夹雪](docs/images/scenes/scene_dusk_sleet.png) |
+
+---
+
+### 🌙 三、夜晚时段 (Night) · 静谧月夜与深空电弧
+
+> 极夜深空背景，暗调黑蓝与深空紫渐变，月亮自适应月相、星云粒子微闪，夜间驾车不刺眼。
+
+| 气象状态 | 效果截图 |
+|---|---|
+| **晴朗 (Clear)** | ![夜晚-晴朗](docs/images/scenes/scene_night_clear.png) |
+| **多云 (Cloudy)** | ![夜晚-多云](docs/images/scenes/scene_night_cloudy.png) |
+| **阴天/雾 (Overcast)** | ![夜晚-阴天](docs/images/scenes/scene_night_overcast.png) |
+| **雨天 (Rain)** | ![夜晚-雨天](docs/images/scenes/scene_night_rain.png) |
+| **雪天 (Snow)** | ![夜晚-雪天](docs/images/scenes/scene_night_snow.png) |
+| **雷暴 (Storm)** | ![夜晚-雷暴](docs/images/scenes/scene_night_storm.png) |
+| **雨夹雪 (Sleet)** | ![夜晚-雨夹雪](docs/images/scenes/scene_night_sleet.png) |
+
+---
+
+### 🌅 四、晨曦时段 (Dawn) · 旭日东升与晨光初透
+
+> 日出前后 45 分钟，东方天际初露鱼肚白与玫瑰金粉霞，柔和晨光漫射唤醒清晨驾车体验。
+
+| 气象状态 | 效果截图 |
+|---|---|
+| **晴朗 (Clear)** | ![晨曦-晴朗](docs/images/scenes/scene_dawn_clear.png) |
+| **多云 (Cloudy)** | ![晨曦-多云](docs/images/scenes/scene_dawn_cloudy.png) |
+| **阴天/雾 (Overcast)** | ![晨曦-阴天](docs/images/scenes/scene_dawn_overcast.png) |
+| **雨天 (Rain)** | ![晨曦-雨天](docs/images/scenes/scene_dawn_rain.png) |
+| **雪天 (Snow)** | ![晨曦-雪天](docs/images/scenes/scene_dawn_snow.png) |
+| **雷暴 (Storm)** | ![晨曦-雷暴](docs/images/scenes/scene_dawn_storm.png) |
+| **雨夹雪 (Sleet)** | ![晨曦-雨夹雪](docs/images/scenes/scene_dawn_sleet.png) |
 
 ---
 
@@ -66,7 +145,7 @@ XiaoOuScreen/
 │   │   ├── com/car/xiaoouscreen/   # 小欧屏核心逻辑（时钟、气象、动效、服务、设置）
 │   │   └── com/carlyrics/          # 车载歌词引擎（识别、缓存、皮肤渲染、JS插件）
 │   └── src/main/res/               # 矢量资源、布局、全尺寸 PNG 图标
-├── docs/                           # 说明与效果图素材
+├── docs/                           # 说明与 28 种气象时段效果图素材
 ├── build_and_bump_release.py       # 自动化混淆加固与正式版构建脚本
 ├── build.gradle.kts                # 根构建脚本
 ├── settings.gradle.kts             # 项目设置 (XiaoOuScreen)

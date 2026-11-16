@@ -22,6 +22,11 @@
 # ==================== 车机 AIDL 与系统底层通信接口 ====================
 -keep interface com.chinatsp.threescreenmiddleservice.** { *; }
 -keep class com.chinatsp.threescreenmiddleservice.** { *; }
+-keep class com.chinatsp.music.** { *; }
+-keepclassmembers class com.chinatsp.music.** { *; }
+-keep class * implements android.os.Parcelable {
+    public static final android.os.Parcelable$Creator *;
+}
 -keep class * extends android.os.IInterface { *; }
 -dontwarn android.car.**
 -keep class android.car.** { *; }

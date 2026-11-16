@@ -102,6 +102,7 @@ class LyricsDisplayView(context: Context) : LyricsSkin(context) {
     }
 
     private var currentCornerRadiusDp: Float = 16f
+    private var isFirstScrollAfterInit = true
 
     private val coverFrame: FrameLayout = FrameLayout(context).apply {
         clipToOutline = true
@@ -235,6 +236,7 @@ class LyricsDisplayView(context: Context) : LyricsSkin(context) {
     override fun setLyrics(lines: List<LyricLine>) {
         if (lines == lyricLines && lines.isNotEmpty() && lyLineViews.isNotEmpty()) return
         lyricLines = lines
+        isFirstScrollAfterInit = true
         lyricsContainer.removeAllViews()
 
         if (lines.isEmpty()) {
@@ -489,9 +491,14 @@ class LyricsDisplayView(context: Context) : LyricsSkin(context) {
         val targetView = lyLineViews[index]
         targetView.post {
             // targetView 是 wrapper FrameLayout 内的 TextView，需用 wrapper.top 获取在 lyricsContainer 中的位置
-            val wrapper = targetView.parent as View
-            val scrollY = wrapper.top - lyricsScrollView.height / 2 + wrapper.height / 2
-            lyricsScrollView.smoothScrollTo(0, scrollY.coerceAtLeast(0))
+            val wrapper = targetView.parent as? View ?: return@post
+            val scrollY = (wrapper.top - lyricsScrollView.height / 2 + wrapper.height / 2).coerceAtLeast(0)
+            if (isFirstScrollAfterInit) {
+                isFirstScrollAfterInit = false
+                lyricsScrollView.scrollTo(0, scrollY)
+            } else {
+                lyricsScrollView.smoothScrollTo(0, scrollY)
+            }
         }
     }
 

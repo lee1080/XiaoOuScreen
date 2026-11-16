@@ -41,16 +41,34 @@ object PrefsManager {
 
     private var prefs: SharedPreferences? = null
 
+    /**
+     * 获取安全存储上下文 (Direct Boot 设备保护区支持)
+     * 在 Android 7.0+ (API 24+) 车机点火但尚未解锁阶段，提供无需凭据解密的 DE 保护区存储，
+     * 彻底消灭 credential encrypted storage are not available until after user is unlocked 异常。
+     */
+    fun getSafeStorageContext(context: Context): Context {
+        val appCtx = context.applicationContext ?: context
+        return if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+            appCtx.createDeviceProtectedStorageContext()
+        } else {
+            appCtx
+        }
+    }
+
     fun init(context: Context) {
-        val appCtx = context.applicationContext
+        val appCtx = context.applicationContext ?: context
         val targetCtx = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
-            try {
-                val dpCtx = appCtx.createDeviceProtectedStorageContext()
-                dpCtx.moveSharedPreferencesFrom(appCtx, PREFS_NAME)
-                dpCtx
-            } catch (e: Exception) {
-                appCtx
+            val dpCtx = appCtx.createDeviceProtectedStorageContext()
+            val userManager = appCtx.getSystemService(Context.USER_SERVICE) as? android.os.UserManager
+            val isUnlocked = userManager == null || userManager.isUserUnlocked
+            if (isUnlocked) {
+                try {
+                    dpCtx.moveSharedPreferencesFrom(appCtx, PREFS_NAME)
+                } catch (e: Exception) {
+                    AppLogger.w(TAG, "moveSharedPreferencesFrom failed: ${e.message}")
+                }
             }
+            dpCtx
         } else {
             appCtx
         }

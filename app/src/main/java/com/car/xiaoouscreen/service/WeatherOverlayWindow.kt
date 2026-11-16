@@ -110,6 +110,13 @@ class WeatherOverlayWindow(
     private var pendingCallInfo: CarCallManager.CallInfo? = null
     private var wasInLyricsBeforeCall: Boolean = false
 
+    // 缓存独立全屏车载歌词的全部状态，确保 Presentation 重新登顶或重置时 100% 继承，绝不重置到第 0 行
+    private var lastLyricsTrackTitle: String = ""
+    private var lastLyricsTrackArtist: String = ""
+    private var lastLyricsCoverUrl: String? = null
+    private var lastLyricLines: List<LyricLine> = emptyList()
+    private var lastLyricsProgressMs: Long = 0L
+
     private val autoHideHandler = Handler(Looper.getMainLooper())
     private val hideCloseRunnable = Runnable {
         closeButtonContainer?.visibility = View.GONE
@@ -593,6 +600,8 @@ class WeatherOverlayWindow(
     // ==================== 歌词数据透传 ====================
 
     fun setLyricsTrackInfo(title: String, artist: String) {
+        lastLyricsTrackTitle = title
+        lastLyricsTrackArtist = artist
         lyricsContainerView?.setTrackInfo(title, artist)
     }
 
@@ -616,14 +625,17 @@ class WeatherOverlayWindow(
     }
 
     fun setLyricsCoverUrl(url: String?) {
+        lastLyricsCoverUrl = url
         lyricsContainerView?.setCoverUrl(url)
     }
 
     fun setLyricsLines(lines: List<LyricLine>) {
+        lastLyricLines = lines
         lyricsContainerView?.setLyrics(lines)
     }
 
     fun updateLyricsProgress(positionMs: Long) {
+        lastLyricsProgressMs = positionMs
         lyricsContainerView?.updateProgress(positionMs)
     }
 
@@ -756,8 +768,7 @@ class WeatherOverlayWindow(
         weatherCanvasView?.onSceneRenderUpdated = null
         weatherCanvasView?.pauseAnimation()
         lyricsContainerView?.pause()
-        bottomLeftGearHudView?.backgroundProvider = null
-        bottomLeftGearHudView?.weatherLeftProvider = null
+        bottomLeftGearHudView?.dismiss()
         gearCubeView?.dismiss()
         driveModeView?.dismiss()
 
@@ -805,8 +816,8 @@ class WeatherOverlayWindow(
     fun reassertTop(force: Boolean = false): Boolean {
         if (!isAttached) return false
         val now = SystemClock.elapsedRealtime()
-        if (!force && now - lastReassertTime < 800L) {
-            AppLogger.d(TAG, "🛡️ 置顶重登节流保护 (800ms 内已执行)，跳过重复调用")
+        if (!force && now - lastReassertTime < 3500L) {
+            AppLogger.d(TAG, "🛡️ 置顶重登节流保护 (3500ms 内已执行)，跳过重复调用")
             return false
         }
         if (!force && consecutiveReassertCount >= 4 && now - lastReassertTime < 15000L) {
@@ -851,6 +862,20 @@ class WeatherOverlayWindow(
                 lyricsContainerView?.xiaoOuAvoidanceEnabled = shouldAvoid
                 weatherCanvasView?.setXiaoOuAvoidance(shouldAvoid)
                 weatherCanvasView?.setLiquidGlassEnabled(PrefsManager.isLiquidGlassClockEnabled(), smooth = false)
+
+                // 核心修复：无缝恢复独立全屏车载歌词的全部状态，绝不回滚至开头重新滚动
+                if (lastLyricsTrackTitle.isNotEmpty()) {
+                    lyricsContainerView?.setTrackInfo(lastLyricsTrackTitle, lastLyricsTrackArtist)
+                }
+                if (lastLyricsCoverUrl != null) {
+                    lyricsContainerView?.setCoverUrl(lastLyricsCoverUrl)
+                }
+                if (lastLyricLines.isNotEmpty()) {
+                    lyricsContainerView?.setLyrics(lastLyricLines)
+                    if (lastLyricsProgressMs > 0L) {
+                        lyricsContainerView?.updateProgress(lastLyricsProgressMs)
+                    }
+                }
 
                 if (currentPage == ActivePage.LYRICS) {
                     lyricsContainerView?.visibility = View.VISIBLE

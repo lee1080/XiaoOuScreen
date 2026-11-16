@@ -27,7 +27,10 @@ class NotificationListenerService : NotificationListenerService() {
                 lower == "com.chinatsp.etc" ||
                 lower == "com.chinatsp.gesturerecognition" ||
                 lower == "com.chinatsp.onecall" ||
-                lower == "com.mojoxing.light"
+                lower == "com.mojoxing.light" ||
+                lower == "com.oushang.radio" ||
+                lower.startsWith("com.oushang.radio") ||
+                lower.contains("ximalaya")
         }
 
         var instance: NotificationListenerService? = null

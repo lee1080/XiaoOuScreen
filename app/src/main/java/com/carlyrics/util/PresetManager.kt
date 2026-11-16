@@ -88,7 +88,7 @@ object PresetManager {
     private var prefs: SharedPreferences? = null
 
     fun init(context: Context) {
-        val appCtx = context.applicationContext
+        val appCtx = PrefsManager.getSafeStorageContext(context)
         prefs = appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         
         val names = getPresetNames()

@@ -101,6 +101,49 @@ class ThreeScreenClient(
     }
 
     /**
+     * 查询车机三屏调度当前前台显示的视图类型
+     * 例如："MEDIA" (媒体/蓝牙音乐/酷狗)、"NEBULAR_COMPASS" (待机指南针)、"NAVIGATION" (导航) 等
+     */
+    fun getCurrentView(): String? {
+        if (!isBound || service == null) return null
+        return try {
+            service?.currentView
+        } catch (e: Exception) {
+            Log.w(TAG, "getCurrentView 远程调用异常: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * 查询当前副屏是否处于系统高优先级窗口 (如 APA 泊车辅助、休息模式等)
+     */
+    fun isHighWindowView(): Boolean {
+        if (!isBound || service == null) return false
+        return try {
+            service?.isHighWindowView ?: false
+        } catch (e: Exception) {
+            Log.w(TAG, "isHighWindowView 远程调用异常: ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * 判断指定视图名是否为原厂媒体类界面 (蓝牙音乐、酷狗音乐等)
+     */
+    fun isMediaView(viewType: String?): Boolean {
+        if (viewType.isNullOrBlank()) return false
+        return viewType.contains(VIEW_MEDIA, ignoreCase = true)
+    }
+
+    /**
+     * 核心自检测：主动探测当前副屏是否正被原厂媒体视图 (MEDIA) 遮挡
+     */
+    fun isOccludedByNativeMedia(): Boolean {
+        val current = getCurrentView()
+        return isMediaView(current)
+    }
+
+    /**
      * 申请三屏切换到 OSHAN_FITNESS 槽位
      */
     fun requestShowFitness() {
@@ -125,5 +168,14 @@ class ThreeScreenClient(
     companion object {
         private const val TAG = "ThreeScreenClient"
         const val SOURCE_FITNESS = "OSHAN_FITNESS"
+        const val VIEW_MEDIA = "MEDIA"
+        const val VIEW_NAVIGATION = "NAVIGATION"
+        const val VIEW_COMPASS = "NEBULAR_COMPASS"
+        const val VIEW_TRAVEL = "TRAVEL"
+        const val VIEW_CIRCUIT = "CIRCUIT_MODEL"
+        const val VIEW_REST = "REST_MODE"
+        const val VIEW_OTA = "OTA_UPGRADE"
+        const val VIEW_APA = "APA"
+        const val VIEW_VOICE_TTS = "VOICE_TTS"
     }
 }

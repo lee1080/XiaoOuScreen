@@ -12,10 +12,13 @@ data class CurrentTrack(
     val source: MusicSource = MusicSource.UNKNOWN,
     val packageName: String = "",   // 来源应用包名
     val isPlaying: Boolean = true,  // 是否处于正在播放状态
-    val mediaId: String = ""        // 播放器内部媒体唯一标识 (如汽水音乐 track_id)
+    val mediaId: String = "",        // 播放器内部媒体唯一标识 (如汽水音乐 track_id)
+    val nativeLyrics: List<LyricLine>? = null, // 原车/本地已解析歌词 (若有)
+    val nativeCoverUrl: String? = null // 原车/本地提取的封面缓存路径 (若有)
 )
 
 enum class MusicSource {
+    KUGOU_NATIVE,       // 原车酷狗音乐 (AIDL 原生专线)
     MEDIA_SESSION,      // 通过 MediaSession 获取
     NOTIFICATION,       // 通过通知栏获取
     BLUETOOTH,          // 通过蓝牙 AVRCP

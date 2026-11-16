@@ -410,7 +410,7 @@ class CarWeatherCanvasView @JvmOverloads constructor(
         setShadowLayer(6f, 0f, 2f, Color.argb(180, 0, 0, 0))
     }
 
-    private val dateSubPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    private val dateSubPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
         textSize = 21f
         typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
         letterSpacing = 0.03f
@@ -913,19 +913,26 @@ class CarWeatherCanvasView @JvmOverloads constructor(
             cachedHudComfort = getComfortLevel(currentConfig.temperatureCelsius)
             cachedHudHasValidRainAlert = currentConfig.isMinuteRainActive &&
                 !currentConfig.minuteRainSummary.isNullOrBlank() &&
-                currentConfig.minuteRainSummary != "未来两小时无降水"
-            cachedHudRainText = if (cachedHudHasValidRainAlert) "🌧️ ${currentConfig.minuteRainSummary}" else ""
+                !currentConfig.minuteRainSummary!!.contains("无降水") &&
+                !currentConfig.minuteRainSummary!!.contains("没有降水")
+            val summaryText = currentConfig.minuteRainSummary.orEmpty().trim()
+            cachedHudRainText = if (cachedHudHasValidRainAlert) {
+                if (summaryText.startsWith("🌧️") || summaryText.startsWith("🌧")) {
+                    summaryText
+                } else {
+                    "🌧️ $summaryText"
+                }
+            } else {
+                ""
+            }
 
             cachedHudWeatherWidth = weatherLabelPaint.measureText(cachedHudWeatherText)
             cachedHudSubInfoWidth = weatherSubPaint.measureText(cachedHudSubInfoText)
             cachedHudPrefixWidth = dateSubPaint.measureText(cachedHudPrefixText)
             cachedHudComfortWidth = comfortLabelPaint.measureText(cachedHudComfort.statusText)
             cachedHudRainWidth = if (cachedHudHasValidRainAlert) dateSubPaint.measureText(cachedHudRainText) else 0f
-            cachedHudNoteWidth = if (cachedHudHasValidRainAlert) {
-                cachedHudRainWidth
-            } else {
-                cachedHudPrefixWidth + cachedHudComfortWidth
-            }
+            // 核心修复：HUD 矩形基准宽度只取标准环境感知宽度，绝不被动态降水文字撑大导致天气/温度左移
+            cachedHudNoteWidth = cachedHudPrefixWidth + cachedHudComfortWidth
         }
         if (cachedDateStr != lastMeasuredDateStr) {
             lastMeasuredDateStr = cachedDateStr
@@ -1675,13 +1682,16 @@ class CarWeatherCanvasView @JvmOverloads constructor(
             val noteWidth = cachedHudNoteWidth
 
             // 矩形组合最大宽度 (平滑插值保障模式切换零跳跃)
+            // 降水预报文字属于单行动态信息，不参与全局包围盒居中计算，确保温度、天气与日期绝不左移或跳动
             val idleBlockWidth = maxOf(row2Width, dateWidth, noteWidth)
             val lyricsBlockWidth = maxOf(timeWidth, row2Width, dateWidth, noteWidth)
             val blockWidth = lerp(idleBlockWidth, lyricsBlockWidth, lyricsModeProgress)
 
-            // 3. 水平居中：小时间至环境感知的 4 行信息作为一个整体，在小欧屏左侧 HUD 视口内 [SAFE_MARGIN_PX (130px), HUD_DIVIDER_X (535px)] 绝对居中
+            // 3. 水平居中：小时间至环境感知的各行信息作为一个整体，在小欧屏左侧 HUD 视口内 [SAFE_MARGIN_PX (130px), HUD_DIVIDER_X (535px)] 绝对居中
             val hudAvailableWidth = HUD_DIVIDER_X - SAFE_MARGIN_PX
-            val hudStartX = SAFE_MARGIN_PX + (hudAvailableWidth - blockWidth) / 2f
+            val rawStartX = SAFE_MARGIN_PX + (hudAvailableWidth - blockWidth) / 2f
+            // 安全左边界硬保底：强制保证 X >= SAFE_MARGIN_PX + 8f (138px)，彻底杜绝任何被车机外壳遮挡的物理盲区风险
+            val hudStartX = rawStartX.coerceAtLeast(SAFE_MARGIN_PX + 8f)
             weatherHudLeftX = hudStartX
 
             // 4. 垂直布局计算
@@ -1743,7 +1753,30 @@ class CarWeatherCanvasView @JvmOverloads constructor(
             if (hasValidRainAlert) {
                 val rpAlpha = (245 * weatherAlphaFactor).toInt()
                 applyTextWithDynamicShadow(dateSubPaint, rpAlpha, 7f, 0f, 2f, 200)
-                canvas.drawText(rainText, hudStartX, noteBaselineY, dateSubPaint)
+
+                // 视口安全右边界保护：绝不越过 535px 分割线
+                val maxRainWidth = (HUD_DIVIDER_X - 12f - hudStartX).coerceAtLeast(100f)
+                val originalTextSize = dateSubPaint.textSize
+                val originalWidth = dateSubPaint.measureText(rainText)
+
+                val (textToDraw, effectiveTextSize) = when {
+                    originalWidth <= maxRainWidth -> rainText to originalTextSize
+                    else -> {
+                        // 尝试微调字号 (21f -> 18f) 保持完整展示
+                        dateSubPaint.textSize = 18f
+                        if (dateSubPaint.measureText(rainText) <= maxRainWidth) {
+                            rainText to 18f
+                        } else {
+                            // 仍超出则优雅尾部省略，坚决不穿模
+                            val ellipsized = TextUtils.ellipsize(rainText, dateSubPaint, maxRainWidth, TextUtils.TruncateAt.END).toString()
+                            ellipsized to 18f
+                        }
+                    }
+                }
+
+                dateSubPaint.textSize = effectiveTextSize
+                canvas.drawText(textToDraw, hudStartX, noteBaselineY, dateSubPaint)
+                dateSubPaint.textSize = originalTextSize // 恢复默认字号 21f
             } else {
                 val dsAlpha = (220 * weatherAlphaFactor).toInt()
                 applyTextWithDynamicShadow(dateSubPaint, dsAlpha, 7f, 0f, 2f, 200)

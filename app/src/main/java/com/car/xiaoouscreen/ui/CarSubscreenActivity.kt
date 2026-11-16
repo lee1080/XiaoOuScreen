@@ -509,7 +509,7 @@ class CarSubscreenActivity : AppCompatActivity(),
         if (title.isNotEmpty() && (title != lastTrackTitle || artist != lastTrackArtist || currentLyricLines.isEmpty())) {
             lastTrackTitle = title
             lastTrackArtist = artist
-            fetchLyricsAndCover(title, artist)
+            fetchLyricsAndCover(title, artist, track)
         } else {
             lyricsContainerView.setTrackInfo(lastTrackTitle, lastTrackArtist)
             if (lastCoverUrl != null) lyricsContainerView.setCoverUrl(lastCoverUrl)
@@ -536,7 +536,7 @@ class CarSubscreenActivity : AppCompatActivity(),
         }
     }
 
-    private fun fetchLyricsAndCover(title: String, artist: String) {
+    private fun fetchLyricsAndCover(title: String, artist: String, track: CurrentTrack? = null) {
         lyricsFetchJob?.cancel()
         lyricsApi.cancelAllRequests()
         lyricsContainerView.setTrackInfo(title, artist)
@@ -547,48 +547,68 @@ class CarSubscreenActivity : AppCompatActivity(),
         lyricsFetchJob = lifecycleScope.launch(Dispatchers.IO) {
             try {
                 coroutineContext.ensureActive()
-                val coverUrl = try {
-                    lyricsApi.fetchCover(title, artist)
-                } catch (ce: CancellationException) {
-                    throw ce
-                } catch (_: Exception) { null }
+                val currentTrack = track ?: CarLyricsApplication.recognitionEngine.currentTrack.value
+
+                // 1. 封面处理：优先使用原车/U盘本地提取封面，若无则轻量级补拉在线封面
+                val isNativeCoverAvailable = currentTrack != null &&
+                        currentTrack.title.equals(title, ignoreCase = true) &&
+                        !currentTrack.nativeCoverUrl.isNullOrBlank()
+
+                val coverUrl = if (isNativeCoverAvailable) {
+                    currentTrack!!.nativeCoverUrl
+                } else {
+                    try {
+                        lyricsApi.fetchCover(title, artist)
+                    } catch (ce: CancellationException) {
+                        throw ce
+                    } catch (_: Exception) { null }
+                }
 
                 coroutineContext.ensureActive()
                 if (title != lastTrackTitle || artist != lastTrackArtist) return@launch
                 lastCoverUrl = coverUrl
                 withContext(Dispatchers.Main) {
-                    if (title == lastTrackTitle && artist == lastTrackArtist) {
+                    if (title == lastTrackTitle && artist == lastTrackArtist && coverUrl != null) {
                         lyricsContainerView.setCoverUrl(coverUrl)
                     }
                 }
 
                 coroutineContext.ensureActive()
-                val lyricResult = try {
-                    lyricsApi.fetchLyrics(title, artist)
-                } catch (ce: CancellationException) {
-                    throw ce
-                } catch (_: Exception) { null }
+                // 2. 歌词处理：优先使用原车酷狗/U盘离线自带歌词，若无则调用维护的在线接口与本地缓存
+                val isNativeLyricsAvailable = currentTrack != null &&
+                        currentTrack.title.equals(title, ignoreCase = true) &&
+                        !currentTrack.nativeLyrics.isNullOrEmpty()
 
-                coroutineContext.ensureActive()
-                if (title != lastTrackTitle || artist != lastTrackArtist) return@launch
-                val rawLines = lyricResult?.getOrNull()?.lines?.filter { it.text.isNotBlank() } ?: emptyList()
-                val lines = if (rawLines.isNotEmpty()) {
-                    rawLines
+                val lines = if (isNativeLyricsAvailable) {
+                    currentTrack!!.nativeLyrics!!
                 } else {
-                    val highlightLine = if (artist.isNotBlank() &&
-                        !artist.equals("未知歌手", ignoreCase = true) &&
-                        !artist.equals("Unknown", ignoreCase = true)
-                    ) {
-                        if (title.contains(artist)) title else "$title - $artist"
-                    } else if (title.isNotBlank()) {
-                        title
+                    val lyricResult = try {
+                        lyricsApi.fetchLyrics(title, artist)
+                    } catch (ce: CancellationException) {
+                        throw ce
+                    } catch (_: Exception) { null }
+
+                    coroutineContext.ensureActive()
+                    if (title != lastTrackTitle || artist != lastTrackArtist) return@launch
+                    val rawLines = lyricResult?.getOrNull()?.lines?.filter { it.text.isNotBlank() } ?: emptyList()
+                    if (rawLines.isNotEmpty()) {
+                        rawLines
                     } else {
-                        "未知曲目"
+                        val highlightLine = if (artist.isNotBlank() &&
+                            !artist.equals("未知歌手", ignoreCase = true) &&
+                            !artist.equals("Unknown", ignoreCase = true)
+                        ) {
+                            if (title.contains(artist)) title else "$title - $artist"
+                        } else if (title.isNotBlank()) {
+                            title
+                        } else {
+                            "未知曲目"
+                        }
+                        listOf(
+                            LyricLine(timestamp = 0L, text = highlightLine),
+                            LyricLine(timestamp = 86_400_000L, text = "暂无未匹配到歌词")
+                        )
                     }
-                    listOf(
-                        LyricLine(timestamp = 0L, text = highlightLine),
-                        LyricLine(timestamp = 86_400_000L, text = "暂无未匹配到歌词")
-                    )
                 }
                 currentLyricLines = lines
 

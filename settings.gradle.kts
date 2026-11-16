@@ -13,5 +13,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "CarWeatherClock"
+rootProject.name = "XiaoOuScreen"
 include(":app")

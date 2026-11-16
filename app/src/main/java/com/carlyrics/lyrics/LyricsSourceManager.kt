@@ -44,7 +44,7 @@ object LyricsSourceManager {
         if (isInitialized) return
         synchronized(lock) {
             if (isInitialized) return
-            appContext = context.applicationContext
+            appContext = com.carlyrics.util.PrefsManager.getSafeStorageContext(context)
             prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             sourcesDir = File(appContext.filesDir, "lyrics_sources")
             if (!sourcesDir.exists()) {

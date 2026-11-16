@@ -6,10 +6,15 @@ import android.graphics.BitmapFactory
 import android.graphics.drawable.Drawable
 import android.widget.ImageView
 import com.bumptech.glide.Glide
+import com.bumptech.glide.load.engine.DiskCacheStrategy
 import com.bumptech.glide.request.target.CustomTarget
 import com.bumptech.glide.request.transition.Transition
 import com.carlyrics.model.LyricData
 import com.carlyrics.model.LyricLine
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -18,7 +23,7 @@ import java.security.MessageDigest
 
 /**
  * 本地缓存管理器 —— 缓存封面图片和歌词数据。
- * 使用 LRU 策略管理磁盘缓存，默认最大 10MB。
+ * 使用 LRU 策略全盘管控磁盘缓存，默认上限 64MB。
  */
 object LyricsCacheManager {
 
@@ -27,6 +32,7 @@ object LyricsCacheManager {
     private const val MIN_MAX_SIZE_MB = 8L
     private const val MAX_MAX_SIZE_MB = 128L
 
+    private var appContext: Context? = null
     private lateinit var cacheRoot: File
     private lateinit var coverDir: File
     private lateinit var lyricsDir: File
@@ -34,20 +40,27 @@ object LyricsCacheManager {
 
     @Volatile private var initialized = false
 
+    private val cacheScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
     fun init(context: Context) {
         if (initialized) return
         synchronized(this) {
             if (initialized) return
-            cacheRoot = File(context.cacheDir, "lyrics_cache")
+            val ctx = context.applicationContext ?: context
+            appContext = ctx
+            cacheRoot = File(ctx.cacheDir, "lyrics_cache")
             coverDir = File(cacheRoot, "covers")
             lyricsDir = File(cacheRoot, "lyrics")
             coverDir.mkdirs()
             lyricsDir.mkdirs()
 
             val mb = PrefsManager.getCacheMaxSizeMb()
-            setMaxSize(mb)
+            val clamped = mb.coerceIn(MIN_MAX_SIZE_MB.toInt(), MAX_MAX_SIZE_MB.toInt())
+            maxSizeBytes = clamped.toLong() * 1024 * 1024
             initialized = true
         }
+        // 启动时异步执行一次全盘 LRU 淘汰，将旧版本超标缓存(如 313MB)自动清理至配额以下
+        enforceSizeLimitAsync()
     }
 
     private fun ensureInit() {
@@ -106,9 +119,29 @@ object LyricsCacheManager {
                 bitmap.compress(Bitmap.CompressFormat.JPEG, 85, out)
             }
             file.setLastModified(System.currentTimeMillis())
-            enforceSizeLimit()
+            enforceSizeLimitAsync()
         } catch (e: Exception) {
             AppLogger.e(TAG, "Failed to cache cover: ${e.message}", e)
+        }
+    }
+
+    /**
+     * 保存车机原厂接口/U盘直读的封面 Bitmap 到本地磁盘缓存，返回本地 file:// URI 供 Glide 秒级加载
+     */
+    fun saveNativeCover(title: String, artist: String, bitmap: Bitmap): String? {
+        ensureInit()
+        return try {
+            val key = "native_kugou_${title}_${artist}"
+            val file = coverFile(key)
+            FileOutputStream(file).use { out ->
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
+            }
+            file.setLastModified(System.currentTimeMillis())
+            enforceSizeLimitAsync()
+            "file://${file.absolutePath}"
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Failed to save native cover: ${e.message}", e)
+            null
         }
     }
 
@@ -159,7 +192,7 @@ object LyricsCacheManager {
             val file = lyricsFile(title, artist)
             file.writeText(json.toString())
             file.setLastModified(System.currentTimeMillis())
-            enforceSizeLimit()
+            enforceSizeLimitAsync()
         } catch (e: Exception) {
             AppLogger.e(TAG, "Failed to cache lyrics: ${e.message}", e)
         }
@@ -179,15 +212,16 @@ object LyricsCacheManager {
             AppLogger.e(TAG, "Failed to clear lyrics cache: ${e.message}", e)
         }
 
-        // 同步清理内部私有 cacheDir 与外部 externalCacheDir 中的其他临时文件
-        if (context != null) {
+        // 同步清理内部私有 cacheDir 与外部 externalCacheDir 中的其他临时文件与 Glide 磁盘缓存
+        val ctx = context?.applicationContext ?: appContext
+        if (ctx != null) {
             try {
-                context.cacheDir?.listFiles()?.forEach { file ->
+                ctx.cacheDir?.listFiles()?.forEach { file ->
                     if (file.name != "lyrics_cache") {
                         file.deleteRecursively()
                     }
                 }
-                context.externalCacheDir?.listFiles()?.forEach { file ->
+                ctx.externalCacheDir?.listFiles()?.forEach { file ->
                     file.deleteRecursively()
                 }
             } catch (e: Exception) {
@@ -225,6 +259,9 @@ object LyricsCacheManager {
                 if (dir.exists()) {
                     total += dir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
                 }
+            }
+            if (total > maxSizeBytes) {
+                enforceSizeLimitAsync(context)
             }
         } catch (e: Exception) {
             AppLogger.e(TAG, "getTotalCacheSizeBytes error: ${e.message}")
@@ -301,31 +338,74 @@ object LyricsCacheManager {
     }
 
     /**
-     * LRU 淘汰：当缓存超过上限时，删除最旧的文件直到低于上限。
+     * LRU 淘汰：全盘管控应用真实缓存（cacheDir + externalCacheDir）。
+     * 1. 优先清除 Glide 遗留的冗余磁盘缓存 (image_manager_disk_cache)
+     * 2. 收集所有可清理的封面、歌词与临时文件，按 lastModified 升序（最旧的在前）淘汰，
+     *    直到总占用严格降至 80% 水位线以下。
      */
     @Synchronized
-    private fun enforceSizeLimit() {
+    fun enforceSizeLimit(context: Context? = null) {
+        val ctx = context?.applicationContext ?: appContext ?: return
         try {
             val allFiles = mutableListOf<File>()
-            cacheRoot.walkTopDown().forEach { file ->
-                if (file.isFile) allFiles.add(file)
-            }
-            val totalSize = allFiles.sumOf { it.length() }
-            if (totalSize <= maxSizeBytes) return
-
-            // 按最后修改时间升序（最旧的在前）
-            allFiles.sortBy { it.lastModified() }
-
-            var currentSize = totalSize
-            for (file in allFiles) {
-                if (currentSize <= maxSizeBytes * 0.8) break // 清理到 80% 水位线
-                val fileSize = file.length()
-                if (file.delete()) {
-                    currentSize -= fileSize
+            ctx.cacheDir?.let { dir ->
+                if (dir.exists()) {
+                    dir.walkTopDown().filter { it.isFile }.forEach { allFiles.add(it) }
                 }
             }
+            ctx.externalCacheDir?.let { dir ->
+                if (dir.exists()) {
+                    dir.walkTopDown().filter { it.isFile }.forEach { allFiles.add(it) }
+                }
+            }
+
+            var currentTotalSize = allFiles.sumOf { it.length() }
+            if (currentTotalSize <= maxSizeBytes) return
+
+            val curMB = currentTotalSize / (1024 * 1024)
+            val maxMB = maxSizeBytes / (1024 * 1024)
+            val targetBytes = (maxSizeBytes * 0.8).toLong()
+            AppLogger.i(TAG, "⚡ 触发全局缓存 LRU 淘汰: 当前占用=${curMB}MB, 配额上限=${maxMB}MB, 目标水位线=${targetBytes / (1024 * 1024)}MB")
+
+            // 1. 如果存在 Glide 遗留的磁盘缓存 (image_manager_disk_cache)，直接清空释放
+            val glideDir = File(ctx.cacheDir, "image_manager_disk_cache")
+            if (glideDir.exists()) {
+                glideDir.listFiles()?.forEach { gf ->
+                    val len = gf.length()
+                    if (gf.delete()) {
+                        currentTotalSize -= len
+                    }
+                }
+            }
+
+            if (currentTotalSize <= targetBytes) {
+                AppLogger.i(TAG, "清理 Glide 冗余磁盘缓存后降至水位线: ${currentTotalSize / (1024 * 1024)}MB")
+                return
+            }
+
+            // 2. 将剩余所有文件按 lastModified 升序（最旧的在前）淘汰
+            val remainingFiles = allFiles
+                .filter { it.exists() && it.isFile }
+                .sortedBy { it.lastModified() }
+
+            for (file in remainingFiles) {
+                if (currentTotalSize <= targetBytes) break
+                val len = file.length()
+                if (file.delete()) {
+                    currentTotalSize -= len
+                }
+            }
+
+            AppLogger.i(TAG, "LRU 淘汰完成: 剩余全局缓存已降至 ${currentTotalSize / (1024 * 1024)}MB")
         } catch (e: Exception) {
-            AppLogger.e(TAG, "enforceSizeLimit error: ${e.message}")
+            AppLogger.e(TAG, "enforceSizeLimit error: ${e.message}", e)
+        }
+    }
+
+    fun enforceSizeLimitAsync(context: Context? = null) {
+        val ctx = context?.applicationContext ?: appContext
+        cacheScope.launch {
+            enforceSizeLimit(ctx)
         }
     }
 
@@ -338,14 +418,18 @@ object LyricsCacheManager {
             target.setImageBitmap(cached)
             return
         }
-        Glide.with(context).asBitmap().load(url).into(object : CustomTarget<Bitmap>() {
-            override fun onResourceReady(resource: Bitmap, transition: Transition<in Bitmap>?) {
-                target.setImageBitmap(resource)
-                cacheCover(url, resource)
-            }
+        Glide.with(context)
+            .asBitmap()
+            .load(url)
+            .diskCacheStrategy(DiskCacheStrategy.NONE)
+            .into(object : CustomTarget<Bitmap>() {
+                override fun onResourceReady(resource: Bitmap, transition: Transition<in Bitmap>?) {
+                    target.setImageBitmap(resource)
+                    cacheCover(url, resource)
+                }
 
-            override fun onLoadCleared(placeholder: Drawable?) {}
-        })
+                override fun onLoadCleared(placeholder: Drawable?) {}
+            })
     }
 
     /** 加载封面为 Bitmap 并回调，优先本地缓存 */
@@ -355,15 +439,19 @@ object LyricsCacheManager {
             onReady(cached)
             return
         }
-        Glide.with(context).asBitmap().load(url).into(object : CustomTarget<Bitmap>() {
-            override fun onResourceReady(resource: Bitmap, transition: Transition<in Bitmap>?) {
-                cacheCover(url, resource)
-                onReady(resource)
-            }
+        Glide.with(context)
+            .asBitmap()
+            .load(url)
+            .diskCacheStrategy(DiskCacheStrategy.NONE)
+            .into(object : CustomTarget<Bitmap>() {
+                override fun onResourceReady(resource: Bitmap, transition: Transition<in Bitmap>?) {
+                    cacheCover(url, resource)
+                    onReady(resource)
+                }
 
-            override fun onLoadCleared(placeholder: Drawable?) {
-                onReady(null)
-            }
-        })
+                override fun onLoadCleared(placeholder: Drawable?) {
+                    onReady(null)
+                }
+            })
     }
 }

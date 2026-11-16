@@ -700,13 +700,17 @@ class CarBottomLeftGearHudView @JvmOverloads constructor(
         }
     }
 
-    override fun onDetachedFromWindow() {
-        super.onDetachedFromWindow()
+    fun dismiss() {
         slideAnimator?.cancel()
         slideAnimator = null
         fadeAnimator?.cancel()
         fadeAnimator = null
         backgroundProvider = null
         weatherLeftProvider = null
+    }
+
+    override fun onDetachedFromWindow() {
+        dismiss()
+        super.onDetachedFromWindow()
     }
 }

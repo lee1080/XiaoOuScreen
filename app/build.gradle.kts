@@ -59,12 +59,15 @@ android {
 
     signingConfigs {
         create("aospPlatform") {
-            storeFile = rootProject.file("key/aosp_platform.jks")
-            storePassword = "android"
-            keyAlias = "android"
-            keyPassword = "android"
-            enableV1Signing = true
-            enableV2Signing = true
+            val keyFile = rootProject.file("key/aosp_platform.jks")
+            if (keyFile.exists()) {
+                storeFile = keyFile
+                storePassword = "android"
+                keyAlias = "android"
+                keyPassword = "android"
+                enableV1Signing = true
+                enableV2Signing = true
+            }
         }
     }
 
@@ -75,7 +78,10 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            signingConfig = signingConfigs.getByName("aospPlatform")
+            val aospConfig = signingConfigs.getByName("aospPlatform")
+            if (aospConfig.storeFile != null) {
+                signingConfig = aospConfig
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

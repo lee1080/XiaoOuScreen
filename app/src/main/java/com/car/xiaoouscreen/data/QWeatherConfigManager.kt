@@ -10,7 +10,8 @@ import android.content.SharedPreferences
 class QWeatherConfigManager(context: Context) {
 
     private val prefs: SharedPreferences =
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        com.carlyrics.util.PrefsManager.getSafeStorageContext(context)
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     var isEnabled: Boolean
         get() = prefs.getBoolean(KEY_IS_ENABLED, false)

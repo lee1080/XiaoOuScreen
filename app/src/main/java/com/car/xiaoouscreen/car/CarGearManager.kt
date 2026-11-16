@@ -325,23 +325,23 @@ class CarGearManager private constructor(private val context: Context) {
             val callbackProxy = Proxy.newProxyInstance(
                 classLoader,
                 arrayOf(callbackClass)
-            ) { _, method, args ->
+            ) { proxy, method, args ->
                 when (method.name) {
                     "onChangeEvent" -> {
                         if (args != null && args.isNotEmpty()) {
                             val event = args[0] // CarPropertyValue
                             handleCarPropertyValue(event)
                         }
-                        null
+                        getDefaultReturnValue(method.returnType)
                     }
                     "onErrorEvent" -> {
                         AppLogger.w(TAG, "CarCabinManager.onErrorEvent: ${args?.contentToString()}")
-                        null
+                        getDefaultReturnValue(method.returnType)
                     }
-                    "equals" -> false
-                    "hashCode" -> 31
-                    "toString" -> "CarCabinEventCallbackProxy"
-                    else -> null
+                    "equals" -> proxy === (args?.firstOrNull())
+                    "hashCode" -> System.identityHashCode(proxy)
+                    "toString" -> "CarCabinEventCallbackProxy@${Integer.toHexString(System.identityHashCode(proxy))}"
+                    else -> getDefaultReturnValue(method.returnType)
                 }
             }
 
@@ -378,12 +378,24 @@ class CarGearManager private constructor(private val context: Context) {
             val callbackProxy = Proxy.newProxyInstance(
                 classLoader,
                 arrayOf(callbackClass)
-            ) { _, method, args ->
-                if ("onChangeEvent" == method.name && args != null && args.isNotEmpty()) {
-                    val event = args[0]
-                    handleCarPropertyValue(event)
+            ) { proxy, method, args ->
+                when (method.name) {
+                    "onChangeEvent" -> {
+                        if (args != null && args.isNotEmpty()) {
+                            val event = args[0]
+                            handleCarPropertyValue(event)
+                        }
+                        getDefaultReturnValue(method.returnType)
+                    }
+                    "onErrorEvent" -> {
+                        AppLogger.w(TAG, "CarMcuManager.onErrorEvent: ${args?.contentToString()}")
+                        getDefaultReturnValue(method.returnType)
+                    }
+                    "equals" -> proxy === (args?.firstOrNull())
+                    "hashCode" -> System.identityHashCode(proxy)
+                    "toString" -> "CarMcuEventCallbackProxy@${Integer.toHexString(System.identityHashCode(proxy))}"
+                    else -> getDefaultReturnValue(method.returnType)
                 }
-                null
             }
 
             val registerMethod = mcu.javaClass.getMethod(
@@ -398,6 +410,21 @@ class CarGearManager private constructor(private val context: Context) {
         } catch (t: Throwable) {
             val root = if (t is java.lang.reflect.InvocationTargetException && t.cause != null) t.cause!! else t
             AppLogger.w(TAG, "注册 CarMcuManager 备用监听失败: ${root.javaClass.simpleName}${if (root.message != null) " - " + root.message else ""}")
+        }
+    }
+
+    private fun getDefaultReturnValue(returnType: Class<*>): Any? {
+        return when (returnType) {
+            java.lang.Boolean.TYPE -> false
+            java.lang.Integer.TYPE -> 0
+            java.lang.Long.TYPE -> 0L
+            java.lang.Short.TYPE -> 0.toShort()
+            java.lang.Byte.TYPE -> 0.toByte()
+            java.lang.Float.TYPE -> 0f
+            java.lang.Double.TYPE -> 0.0
+            java.lang.Character.TYPE -> '\u0000'
+            java.lang.Void.TYPE -> null
+            else -> null
         }
     }
 

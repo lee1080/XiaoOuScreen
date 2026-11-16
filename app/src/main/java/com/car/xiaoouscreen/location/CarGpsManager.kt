@@ -18,7 +18,8 @@ class CarGpsManager(private val context: Context) {
     private val locationManager =
         context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
 
-    private val prefs = context.getSharedPreferences("car_gps_prefs", Context.MODE_PRIVATE)
+    private val prefs = com.carlyrics.util.PrefsManager.getSafeStorageContext(context)
+        .getSharedPreferences("car_gps_prefs", Context.MODE_PRIVATE)
 
     // 默认经纬度 (采用双精度 LongBits 存储，杜绝 Float 强转精度截断与跳变)
     @Volatile

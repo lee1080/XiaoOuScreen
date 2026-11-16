@@ -18,7 +18,8 @@ class QWeatherRepository(private val context: Context) {
 
     val configManager = QWeatherConfigManager(context)
     private val prefs: SharedPreferences =
-        context.getSharedPreferences("qweather_data_cache", Context.MODE_PRIVATE)
+        com.carlyrics.util.PrefsManager.getSafeStorageContext(context)
+            .getSharedPreferences("qweather_data_cache", Context.MODE_PRIVATE)
     private val gson = Gson()
 
     // 内存 L1 缓存

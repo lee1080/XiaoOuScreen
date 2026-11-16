@@ -86,7 +86,9 @@ class WeatherFusionEngine(
                 openMeteoWmoCode = 3,
                 nowUnix = nowUnix,
                 sunriseUnix = sunriseUnix,
-                sunsetUnix = sunsetUnix
+                sunsetUnix = sunsetUnix,
+                predictedRainTargetUnix = predictedRainTargetUnix,
+                isTargetRainStart = isTargetRainStart
             )
             lastWmoCode = when (restoredScene.weatherState) {
                 WeatherState.CLEAR -> 0
@@ -235,7 +237,9 @@ class WeatherFusionEngine(
                 sunsetUnix = sunsetUnix,
                 fallbackWindSpeed = baseScene.windSpeedKmh,
                 fallbackTemp = baseScene.temperatureCelsius,
-                fallbackWindDir = baseScene.windDirectionDegree
+                fallbackWindDir = baseScene.windDirectionDegree,
+                predictedRainTargetUnix = predictedRainTargetUnix,
+                isTargetRainStart = isTargetRainStart
             )
 
             // 保持 lastWmoCode 与当前融合后的实况天气现象绝对一致
@@ -283,7 +287,9 @@ class WeatherFusionEngine(
                     sunsetUnix = openMeteoRepo.lastSunsetUnix,
                     fallbackWindSpeed = _sceneConfig.value.windSpeedKmh,
                     fallbackTemp = _sceneConfig.value.temperatureCelsius,
-                    fallbackWindDir = _sceneConfig.value.windDirectionDegree
+                    fallbackWindDir = _sceneConfig.value.windDirectionDegree,
+                    predictedRainTargetUnix = predictedRainTargetUnix,
+                    isTargetRainStart = isTargetRainStart
                 )
                 lastWmoCode = when (mergedScene.weatherState) {
                     WeatherState.CLEAR -> 0
@@ -377,14 +383,14 @@ class WeatherFusionEngine(
                 if (predictedRainTargetUnix > nowUnix) {
                     val remainingMinutes = ((predictedRainTargetUnix - nowUnix) / 60).toInt()
                     if (isTargetRainStart) {
-                        updatedSummary = "预计 $remainingMinutes 分钟后降雨"
+                        updatedSummary = "预计${remainingMinutes}分钟后降雨"
                         isRainActive = true
                         // 雨前 5~10 分钟单次复验触发
                         if (remainingMinutes in 5..10 && !isPreRainVerified) {
                             verifyPreRain()
                         }
                     } else {
-                        updatedSummary = "预计 $remainingMinutes 分钟后雨停"
+                        updatedSummary = "预计${remainingMinutes}分钟后雨停"
                         isRainActive = true
                     }
                 } else if (predictedRainTargetUnix > 0L && predictedRainTargetUnix <= nowUnix) {

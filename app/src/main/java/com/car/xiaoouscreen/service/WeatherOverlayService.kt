@@ -93,14 +93,50 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
     private var lastKnownPosition: Long = 0L
     private var lastPositionNanos: Long = 0L
     private var isMusicPlaying = false
+    private var isFallbackPending = false
+    private val pauseDebounceHandler = Handler(Looper.getMainLooper())
+    private var pendingPausedTrack: CurrentTrack? = null
+
+    private val pauseDebounceRunnable = Runnable {
+        val pausedTrack = pendingPausedTrack ?: return@Runnable
+        pendingPausedTrack = null
+        if (isMusicPlaying) return@Runnable
+
+        AppLogger.i(TAG, "⏸️ 音乐暂停已确认为真实暂停 (350ms防抖通过)，执行定格与回退大时钟倒计时 (pos=${pausedTrack.position})")
+
+        // 1. 彻底销毁 16ms 歌词高频推演协程，杜绝暂停后时间戳继续递增推演
+        lyricsProgressJob?.cancel()
+        lyricsProgressJob = null
+
+        // 2. 冻结当前时间戳与位置，将静止位置立即定格至 View
+        lastKnownPosition = pausedTrack.position
+        lastPositionNanos = 0L
+        overlayWindow?.updateLyricsProgress(pausedTrack.position)
+        overlayWindow?.updateCanvasLyricsProgress(pausedTrack.position)
+
+        // 3. 顶栏音乐胶囊状态更新为非播放
+        overlayWindow?.setTopMusicTrackInfo(lastTrackTitle, lastTrackArtist, isPlaying = false)
+
+        // 4. 音乐暂停防抖 5s 延时回退
+        if (isShowing()) {
+            if (!isFallbackPending) {
+                isFallbackPending = true
+                fallbackHandler.removeCallbacks(fallbackToWeatherRunnable)
+                fallbackHandler.postDelayed(fallbackToWeatherRunnable, 5000L)
+            }
+        }
+    }
 
     private var lyricsProgressJob: Job? = null
     private var lyricsFetchJob: Job? = null
 
     private val fallbackHandler = Handler(Looper.getMainLooper())
     private val fallbackToWeatherRunnable = Runnable {
-        Log.i(TAG, "音乐暂停已达 5 秒，平滑回退至时间天气大时钟界面")
+        AppLogger.i(TAG, "音乐暂停已达 5 秒，平滑回退至时间天气大时钟界面")
+        isFallbackPending = false
         wasMusicPlaying = false
+        lyricsProgressJob?.cancel()
+        lyricsProgressJob = null
         overlayWindow?.setTopMusicTrackInfo("", "", isPlaying = false)
         if (PrefsManager.isStandaloneLyricsEnabled()) {
             overlayWindow?.switchToWeatherPage(smooth = true)
@@ -217,6 +253,11 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
         }
     }
 
+    private var wasCallActiveBefore = false
+    private val callRecoveryRunnable = Runnable {
+        checkOcclusionAndRecover("电话挂断恢复")
+    }
+
     private val callListener = object : CarCallManager.CallListener {
         override fun onCallChanged(callInfo: CarCallManager.CallInfo) {
             mainHandler.post {
@@ -225,14 +266,18 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
                 }
                 overlayWindow?.setCallInfo(callInfo)
 
-                // 核心修复：当电话挂断 (TERMINATED 或 IDLE) 时，若蓝牙音乐正在恢复播放，
-                // 车机原厂蓝牙音乐 Presentation 会在此窗口期抢先弹出覆盖我方小欧屏。
-                // 延时 1000ms 单次精准置顶接管副屏，彻底消灭多次重复重登导致的连闪！
-                if (callInfo.state == CarCallManager.CallState.TERMINATED || callInfo.state == CarCallManager.CallState.IDLE) {
-                    if (isMusicPlaying) {
-                        AppLogger.i(TAG, "🛡️ [电话挂断接管] 通话结束且蓝牙音乐正在播放中，触发小欧副屏单次精准置顶接管")
-                        scheduleReassertTop(1000L)
-                    }
+                if (callInfo.isCallActive) {
+                    wasCallActiveBefore = true
+                    mainHandler.removeCallbacks(callRecoveryRunnable)
+                } else if (callInfo.state == CarCallManager.CallState.TERMINATED && wasCallActiveBefore) {
+                    wasCallActiveBefore = false
+                    AppLogger.i(TAG, "🛡️ [电话挂断接管] 捕获通话挂断退场，延时 600ms 执行单次置顶确认")
+                    mainHandler.removeCallbacks(callRecoveryRunnable)
+                    mainHandler.postDelayed(callRecoveryRunnable, 600L)
+                } else if (callInfo.state == CarCallManager.CallState.IDLE) {
+                    // IDLE 为 2.5s 倒计时结束后的常态复位，绝对不派发二次自检队列
+                    wasCallActiveBefore = false
+                    mainHandler.removeCallbacks(callRecoveryRunnable)
                 }
             }
         }
@@ -243,6 +288,10 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
             val action = intent?.action ?: return
             Log.i(TAG, "📡 收到外部/ADB控制广播: $action")
             when (action) {
+                ACTION_CHECK_OCCLUSION -> {
+                    AppLogger.i(TAG, "📡 接收到遮挡探测广播指令")
+                    checkOcclusionAndRecover("广播手动触发自检")
+                }
                 ACTION_GEAR_SWITCH_LEGACY, ACTION_SWITCH_GEAR -> {
                     val gear = intent.getStringExtra(EXTRA_GEAR_LEGACY)
                         ?: intent.getStringExtra(EXTRA_TARGET_GEAR)
@@ -322,12 +371,16 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
                     com.carlyrics.util.AppLogger.flushSync()
                     overlayWindow?.pause()
                     lyricsProgressJob?.cancel()
+                    lyricsProgressJob = null
                 }
                 Intent.ACTION_SCREEN_ON, Intent.ACTION_USER_PRESENT -> {
                     Log.i(TAG, "☀️ 车机屏幕亮屏/唤醒，立即恢复小欧屏物理引擎与歌词走时")
                     overlayWindow?.resume()
                     if (isShowing()) {
                         startLyricsProgressTicker()
+                        mainHandler.postDelayed({
+                            checkOcclusionAndRecover("屏幕唤醒自检")
+                        }, 800L)
                     }
                 }
             }
@@ -402,6 +455,7 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
             addAction(ACTION_UPDATE_XIAOOU_AVATAR)
             addAction(ACTION_CALL_EVENT)
             addAction(ACTION_SIMULATE_MUSIC)
+            addAction(ACTION_CHECK_OCCLUSION)
             addAction(Intent.ACTION_SCREEN_OFF)
             addAction(Intent.ACTION_SCREEN_ON)
             addAction(Intent.ACTION_USER_PRESENT)
@@ -526,6 +580,9 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
                 ACTION_CHECK_LYRICS_STATE -> {
                     evaluateLyricsStateTransition()
                 }
+                ACTION_CHECK_OCCLUSION -> {
+                    checkOcclusionAndRecover("onStartCommand触发自检")
+                }
                 else -> {}
             }
         }
@@ -610,9 +667,15 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
     }
 
     fun hideOverlay(isExplicitUserClose: Boolean = true) {
+        mainHandler.removeCallbacks(callRecoveryRunnable)
+        wasCallActiveBefore = false
+        pauseDebounceHandler.removeCallbacks(pauseDebounceRunnable)
+        pendingPausedTrack = null
         reassertTopHandler.removeCallbacks(reassertTopRunnable)
         fallbackHandler.removeCallbacks(fallbackToWeatherRunnable)
+        isFallbackPending = false
         lyricsProgressJob?.cancel()
+        lyricsProgressJob = null
         overlayWindow?.dismiss()
         overlayWindow = null
         // 彻底切断 requestHideFitness 调用，我方独立管理窗口生命周期，杜绝与系统三屏中间件冲突
@@ -663,16 +726,19 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
                         overlayWindow?.setTopMusicTrackInfo(title, artist, isPlaying = true)
                     }
                 }
-                fetchLyricsAndCover(title, artist)
+                fetchLyricsAndCover(title, artist, track)
             } else if (lastFetchedTrackKey != trackKey && inFlightFetchTrackKey != trackKey) {
-                fetchLyricsAndCover(title, artist)
+                fetchLyricsAndCover(title, artist, track)
             }
         }
 
         if (track == null || track.title.isBlank() || MusicRecognitionEngine.isInvalidPlaceholderTrack(track.title, track.artist)) {
             isMusicPlaying = false
             wasMusicPlaying = false
+            isFallbackPending = false
             fallbackHandler.removeCallbacks(fallbackToWeatherRunnable)
+            lyricsProgressJob?.cancel()
+            lyricsProgressJob = null
             overlayWindow?.setTopMusicTrackInfo("", "", isPlaying = false)
             if (PrefsManager.isStandaloneLyricsEnabled()) {
                 overlayWindow?.switchToWeatherPage(smooth = true)
@@ -683,32 +749,43 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
         }
 
         if (!track.isPlaying) {
-            val hadBeenPlaying = isMusicPlaying
-            isMusicPlaying = false
-            // 音乐临时暂停 (例如电话打入/呼出中断，或用户主动暂停) -> 启动 5s 延时平滑回退至时间大时钟
-            if (isShowing()) {
-                fallbackHandler.removeCallbacks(fallbackToWeatherRunnable)
-                fallbackHandler.postDelayed(fallbackToWeatherRunnable, 5000L)
+            // 若当前处于播放中，启动 350ms 暂停防抖过滤，杜绝车机蓝牙多通道伴生回调的瞬态闪烁震荡
+            if (isMusicPlaying) {
+                isMusicPlaying = false
+                pendingPausedTrack = track
+                pauseDebounceHandler.removeCallbacks(pauseDebounceRunnable)
+                pauseDebounceHandler.postDelayed(pauseDebounceRunnable, 350L)
+            } else if (pendingPausedTrack != null) {
+                pendingPausedTrack = track
+            } else {
+                // 已经完成暂停防抖确认，仅更新最新静止位置，不重启任何定时器
+                lastKnownPosition = track.position
+                overlayWindow?.updateLyricsProgress(track.position)
+                overlayWindow?.updateCanvasLyricsProgress(track.position)
             }
             return
         }
 
         // 此时处于 PLAYING 状态
-        val wasPlayingBefore = isMusicPlaying
-        val isFirstPlayInSession = !wasMusicPlaying
+        val isFirstPlayInSession = !wasMusicPlaying && pendingPausedTrack == null
+
+        // 立即取消暂停防抖，平稳恢复播放
+        pauseDebounceHandler.removeCallbacks(pauseDebounceRunnable)
+        pendingPausedTrack = null
+
         isMusicPlaying = true
         wasMusicPlaying = true
-        fallbackHandler.removeCallbacks(fallbackToWeatherRunnable)
-
-        // 核心防抢置顶防抖优化：
-        // 1. 日常切歌 (isTrackChanged == true) 时，小欧副屏窗口一直稳固挂载在顶层，绝不调用 reassertTop 重建窗口！
-        // 2. 短暂暂停后继续播放 (wasMusicPlaying == true，未超过 5s 超时回退) 时，副屏保持就绪，也绝不调用 reassertTop！
-        // 3. 仅当真正从完全停止/5秒超时回退后冷启动起播 (isFirstPlayInSession && !isTrackChanged) 时，才调度单次精准重登守护，
-        //    彻底杜绝 650ms + 1600ms 双重重登导致的小欧屏与原生界面来回切换2次（连闪两次）！
-        if (isFirstPlayInSession && !isTrackChanged) {
-            AppLogger.i(TAG, "🛡️ [防抢置顶] 检测到音乐冷启动起播 (isFirstPlay=$isFirstPlayInSession)，预约单次置顶重登守护")
-            scheduleReassertTop(800L)
+        if (isFallbackPending) {
+            fallbackHandler.removeCallbacks(fallbackToWeatherRunnable)
+            isFallbackPending = false
+            AppLogger.d(TAG, "▶️ 音乐在 5s 内恢复播放，取消大时钟回退倒计时")
         }
+
+        // 核心防抢置顶与无感过渡优化：
+        // 1. 日常切歌 (isTrackChanged == true) 时，小欧副屏窗口一直稳固挂载在顶层，绝不调用 reassertTop 重建窗口！
+        // 2. 暂停恢复播放 (无论暂停多久) 时，小欧副屏窗口始终处于最顶层，直接平滑淡入歌词页，绝不调用 checkOcclusionAndRecover
+        //    触发伪遮挡误判，彻底杜绝 Presentation 销毁重建与闪烁！
+        // 3. 原厂媒体界面抢占副屏由 ITSmiddleService 的 onShowRequest 事件驱动精准捕获，无需在起播时主动轮询。
 
         lastKnownPosition = track.position
         lastPositionNanos = System.nanoTime()
@@ -738,7 +815,7 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
         }
     }
 
-    private fun fetchLyricsAndCover(title: String, artist: String) {
+    private fun fetchLyricsAndCover(title: String, artist: String, track: CurrentTrack? = null) {
         val trackKey = "$title|$artist"
         if (inFlightFetchTrackKey == trackKey) {
             Log.d(TAG, "歌词与封面请求已在进行中，跳过重复拉取: $trackKey")
@@ -757,49 +834,73 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
         lyricsFetchJob = serviceScope.launch(Dispatchers.IO) {
             try {
                 coroutineContext.ensureActive()
-                // 1. 获取歌词内容 (内置偏好源、JS 歌词源瀑布流调度与本地缓存，内部已同时解析封面)
-                val lyricResult = try {
-                    lyricsApi.fetchLyrics(title, artist)
-                } catch (ce: CancellationException) {
-                    throw ce
-                } catch (_: Exception) { null }
+                val currentTrack = track ?: CarLyricsApplication.recognitionEngine.currentTrack.value
 
-                coroutineContext.ensureActive()
-                if (inFlightFetchTrackKey != trackKey) {
-                    Log.d(TAG, "已切换新歌曲，丢弃过时歌词结果: $trackKey (当前正在获取: $inFlightFetchTrackKey)")
-                    return@launch
-                }
+                // 1. 获取歌词内容：优先使用原车酷狗/U盘离线自带歌词，若无则调用维护的在线接口与本地缓存
+                val isNativeLyricsAvailable = currentTrack != null &&
+                        currentTrack.title.equals(title, ignoreCase = true) &&
+                        !currentTrack.nativeLyrics.isNullOrEmpty()
 
-                val data = lyricResult?.getOrNull()
-                val rawLines = data?.lines?.filter { it.text.isNotBlank() } ?: emptyList()
-                val lines = if (rawLines.isNotEmpty()) {
-                    rawLines
+                val (lines, fetchedCoverUrl) = if (isNativeLyricsAvailable) {
+                    val rawLines = currentTrack!!.nativeLyrics!!
+                    Log.i(TAG, "优先采用原车/U盘原生歌词: $trackKey (行数: ${rawLines.size})")
+                    Pair(rawLines, null)
                 } else {
-                    val highlightLine = if (artist.isNotBlank() &&
-                        !artist.equals("未知歌手", ignoreCase = true) &&
-                        !artist.equals("Unknown", ignoreCase = true)
-                    ) {
-                        if (title.contains(artist)) title else "$title - $artist"
-                    } else if (title.isNotBlank()) {
-                        title
-                    } else {
-                        "未知曲目"
+                    Log.d(TAG, "原车未附带歌词，回退至在线歌词接口匹配: $trackKey")
+                    val lyricResult = try {
+                        lyricsApi.fetchLyrics(title, artist)
+                    } catch (ce: CancellationException) {
+                        throw ce
+                    } catch (_: Exception) { null }
+
+                    coroutineContext.ensureActive()
+                    if (inFlightFetchTrackKey != trackKey) {
+                        Log.d(TAG, "已切换新歌曲，丢弃过时歌词结果: $trackKey (当前正在获取: $inFlightFetchTrackKey)")
+                        return@launch
                     }
-                    listOf(
-                        LyricLine(timestamp = 0L, text = highlightLine),
-                        LyricLine(timestamp = 86_400_000L, text = "暂无未匹配到歌词")
-                    )
+
+                    val data = lyricResult?.getOrNull()
+                    val rawLines = data?.lines?.filter { it.text.isNotBlank() } ?: emptyList()
+                    val parsedLines = if (rawLines.isNotEmpty()) {
+                        rawLines
+                    } else {
+                        val highlightLine = if (artist.isNotBlank() &&
+                            !artist.equals("未知歌手", ignoreCase = true) &&
+                            !artist.equals("Unknown", ignoreCase = true)
+                        ) {
+                            if (title.contains(artist)) title else "$title - $artist"
+                        } else if (title.isNotBlank()) {
+                            title
+                        } else {
+                            "未知曲目"
+                        }
+                        listOf(
+                            LyricLine(timestamp = 0L, text = highlightLine),
+                            LyricLine(timestamp = 86_400_000L, text = "暂无未匹配到歌词")
+                        )
+                    }
+                    Pair(parsedLines, data?.coverUrl)
                 }
+
                 currentLyricLines = lines
                 lastFetchedTrackKey = trackKey
 
-                // 2. 封面处理：优先复用歌词返回的 coverUrl，若无则轻量级补拉封面
+                // 2. 封面处理：优先使用原车/U盘本地提取封面，次优复用歌词返回的 coverUrl，若无则在线补拉封面
                 coroutineContext.ensureActive()
-                val coverUrl = data?.coverUrl ?: try {
-                    lyricsApi.fetchCover(title, artist)
-                } catch (ce: CancellationException) {
-                    throw ce
-                } catch (_: Exception) { null }
+                val isNativeCoverAvailable = currentTrack != null &&
+                        currentTrack.title.equals(title, ignoreCase = true) &&
+                        !currentTrack.nativeCoverUrl.isNullOrBlank()
+
+                val coverUrl = if (isNativeCoverAvailable) {
+                    Log.i(TAG, "优先采用原车/U盘原生封面: $trackKey (${currentTrack!!.nativeCoverUrl})")
+                    currentTrack.nativeCoverUrl
+                } else {
+                    fetchedCoverUrl ?: try {
+                        lyricsApi.fetchCover(title, artist)
+                    } catch (ce: CancellationException) {
+                        throw ce
+                    } catch (_: Exception) { null }
+                }
 
                 coroutineContext.ensureActive()
                 if (inFlightFetchTrackKey != trackKey) {
@@ -874,6 +975,7 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
     fun evaluateLyricsStateTransition(smooth: Boolean = true) {
         val standaloneEnabled = PrefsManager.isStandaloneLyricsEnabled()
         fallbackHandler.removeCallbacks(fallbackToWeatherRunnable)
+        isFallbackPending = false
 
         val track = CarLyricsApplication.recognitionEngine.currentTrack.value
 
@@ -892,9 +994,9 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
                     lastTrackArtist = artist
                     lastFetchedTrackKey = null
                     currentLyricLines = emptyList()
-                    fetchLyricsAndCover(title, artist)
+                    fetchLyricsAndCover(title, artist, track)
                 } else if (lastFetchedTrackKey != trackKey && inFlightFetchTrackKey != trackKey) {
-                    fetchLyricsAndCover(title, artist)
+                    fetchLyricsAndCover(title, artist, track)
                 } else {
                     overlayWindow?.setLyricsTrackInfo(lastTrackTitle, lastTrackArtist)
                     if (lastCoverUrl != null) overlayWindow?.setLyricsCoverUrl(lastCoverUrl)
@@ -923,9 +1025,9 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
                     lastTrackArtist = artist
                     lastFetchedTrackKey = null
                     currentLyricLines = emptyList()
-                    fetchLyricsAndCover(title, artist)
+                    fetchLyricsAndCover(title, artist, track)
                 } else if (lastFetchedTrackKey != trackKey && inFlightFetchTrackKey != trackKey) {
-                    fetchLyricsAndCover(title, artist)
+                    fetchLyricsAndCover(title, artist, track)
                 } else {
                     if (currentLyricLines.isNotEmpty()) {
                         overlayWindow?.setCanvasLyrics(currentLyricLines)
@@ -1044,25 +1146,102 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
     }
 
     // ==========================================
-    // ThreeScreenClient 回调
+    // ThreeScreenClient 回调与方案 1 遮挡精准自检测
     // ==========================================
     override fun onBound(ok: Boolean) {
-        Log.i(TAG, "三屏调度绑定状态: $ok")
+        AppLogger.i(TAG, "三屏调度 NotifyService 绑定状态: $ok")
+        if (ok && isShowing()) {
+            mainHandler.postDelayed({
+                checkOcclusionAndRecover("三屏服务连接就绪初检")
+            }, 600L)
+        }
     }
 
     override fun onShowRequest(type: String) {
+        AppLogger.i(TAG, "三屏调度收到 onShowRequest: type=$type")
         if (type == ThreeScreenClient.SOURCE_FITNESS) {
             if (!PrefsManager.getOverlayVisible()) {
                 Log.d(TAG, "三屏调度收到 onShowRequest，但用户已关闭投屏，忽略唤醒")
                 return
             }
             showOverlay(currentMode)
+            return
+        }
+
+        // 方案 1 核心自检测：判断自身是否被原厂副屏媒体(蓝牙音乐/酷狗歌词)覆盖
+        if (isShowing() && currentMode == WeatherOverlayWindow.Mode.FITNESS) {
+            if (threeScreenClient?.isMediaView(type) == true) {
+                // 车载电话活跃状态严格避让，绝不在通话中触发抢屏
+                if (CarCallManager.getInstance(this).getCurrentCallInfo().isCallActive) {
+                    AppLogger.i(TAG, "🛡️ [遮挡自检] 监听到原厂媒体($type)弹出，但当前处于通话活跃状态，保持避让")
+                    return
+                }
+
+                AppLogger.w(TAG, "🚨 [遮挡自检·精确捕获] 确凿监听到原厂媒体($type)弹出抢占副屏！调度无缝置顶接管...")
+                // 延时 350ms 避开原厂 Presentation.show() 内部初始化与入场动画，然后精准登顶
+                scheduleReassertTop(350L)
+            } else if (type.contains(ThreeScreenClient.VIEW_NAVIGATION, ignoreCase = true) ||
+                type.contains(ThreeScreenClient.VIEW_APA, ignoreCase = true)) {
+                AppLogger.i(TAG, "🛡️ [高优先级让路] 监听到系统高优先业务($type)，我方保持礼貌让路，不触发重登")
+            }
         }
     }
 
     override fun onHideRequest(type: String) {
-        // 我方已采用独立 Presentation/Overlay 挂载以和小欧机器人天然共存，不向 OSHAN_FITNESS 槽位绑定退出
-        Log.d(TAG, "三屏调度收到 onHideRequest: type=$type，我方保持独立挂载")
+        AppLogger.d(TAG, "三屏调度收到 onHideRequest: type=$type")
+        if (isShowing() && currentMode == WeatherOverlayWindow.Mode.FITNESS) {
+            if (threeScreenClient?.isMediaView(type) == true) {
+                AppLogger.i(TAG, "🛡️ [遮挡自检] 原厂媒体($type)退场，执行状态复核")
+                mainHandler.postDelayed({
+                    checkOcclusionAndRecover("原厂媒体退场复核")
+                }, 300L)
+            }
+        }
+    }
+
+    /**
+     * 方案 1：通过车机三屏调度中间件 (ITSmiddleService AIDL) 主动探测自身是否被原厂副屏遮挡
+     * 若检测到当前三屏前台视图为原厂媒体 (MEDIA)，且自身处于开启状态，则精准触发登顶接管
+     */
+    fun checkOcclusionAndRecover(reason: String): Boolean {
+        if (!isShowing() || currentMode != WeatherOverlayWindow.Mode.FITNESS) {
+            return false
+        }
+        if (CarCallManager.getInstance(this).getCurrentCallInfo().isCallActive) {
+            AppLogger.d(TAG, "🛡️ [遮挡自检·$reason] 当前车载电话处于活跃状态，保持避让不探测")
+            return false
+        }
+
+        val client = threeScreenClient ?: return false
+        val currentView = client.getCurrentView()
+        AppLogger.d(TAG, "🔍 [遮挡自检·$reason] 车机三屏当前前台视图: $currentView")
+
+        if (client.isMediaView(currentView)) {
+            AppLogger.w(TAG, "🚨 [遮挡自检·$reason] 主动探测确凿证实小欧屏被原厂媒体($currentView)遮挡！立即执行无缝登顶接管！")
+            val success = overlayWindow?.reassertTop() ?: false
+            if (success) {
+                updateLyricsRuntimeSettings()
+                if (lastTrackTitle.isNotEmpty()) {
+                    overlayWindow?.setLyricsTrackInfo(lastTrackTitle, lastTrackArtist)
+                    if (lastCoverUrl != null) overlayWindow?.setLyricsCoverUrl(lastCoverUrl)
+                    if (currentLyricLines.isNotEmpty()) {
+                        overlayWindow?.setLyricsLines(currentLyricLines)
+                        overlayWindow?.setCanvasLyrics(currentLyricLines)
+                        if (lastKnownPosition > 0L) {
+                            overlayWindow?.updateLyricsProgress(lastKnownPosition)
+                            overlayWindow?.updateCanvasLyricsProgress(lastKnownPosition)
+                        }
+                    }
+                    if (isMusicPlaying) {
+                        overlayWindow?.setTopMusicTrackInfo(lastTrackTitle, lastTrackArtist, isPlaying = true)
+                    }
+                }
+            }
+            return success
+        } else {
+            AppLogger.d(TAG, "✅ [遮挡自检·$reason] 小欧屏未被媒体遮挡 (前台: $currentView)")
+            return false
+        }
     }
 
     // ==========================================
@@ -1121,9 +1300,15 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
         CarGearManager.getInstance(this).release()
         CarCallManager.getInstance(this).removeListener(callListener)
         CarCallManager.getInstance(this).stopListening()
+        mainHandler.removeCallbacks(callRecoveryRunnable)
+        wasCallActiveBefore = false
+        pauseDebounceHandler.removeCallbacks(pauseDebounceRunnable)
+        pendingPausedTrack = null
         fallbackHandler.removeCallbacks(fallbackToWeatherRunnable)
+        isFallbackPending = false
         reassertTopHandler.removeCallbacks(reassertTopRunnable)
         lyricsProgressJob?.cancel()
+        lyricsProgressJob = null
         lyricsFetchJob?.cancel()
         fusionJob?.cancel()
         fusionEngine?.stop()
@@ -1161,6 +1346,7 @@ class WeatherOverlayService : Service(), ThreeScreenClient.Callback {
         const val ACTION_UPDATE_XIAOOU_AVATAR = "com.car.xiaoouscreen.UPDATE_XIAOOU_AVATAR"
         const val ACTION_CALL_EVENT = "com.car.xiaoouscreen.CALL_EVENT"
         const val ACTION_SIMULATE_MUSIC = "com.car.xiaoouscreen.SIMULATE_MUSIC"
+        const val ACTION_CHECK_OCCLUSION = "com.car.xiaoouscreen.CHECK_OCCLUSION"
 
         const val EXTRA_MUSIC_PLAYING = "extra_music_playing"
         const val EXTRA_MUSIC_TITLE = "extra_music_title"

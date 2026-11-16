@@ -16,7 +16,8 @@ import java.util.concurrent.TimeUnit
 class OpenMeteoRepository(context: Context) {
 
     private val prefs: SharedPreferences =
-        context.getSharedPreferences("car_weather_cache", Context.MODE_PRIVATE)
+        com.carlyrics.util.PrefsManager.getSafeStorageContext(context)
+            .getSharedPreferences("car_weather_cache", Context.MODE_PRIVATE)
     private val gson = Gson()
 
     /**

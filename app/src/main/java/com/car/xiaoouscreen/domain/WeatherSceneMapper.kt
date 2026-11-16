@@ -115,6 +115,75 @@ object WeatherSceneMapper {
     }
 
     /**
+     * 将和风天气原始自然语言或分钟级推演提炼为极简、紧凑的车载降水文案
+     * 消除冗长废话（如“未来两小时降水逐渐减弱，预计...”），确保字数在 8~12 字符内，绝不穿模或变形。
+     */
+    fun sanitizeRainSummary(
+        rawSummary: String?,
+        predictedTargetUnix: Long = 0L,
+        isTargetRainStart: Boolean = false,
+        nowUnix: Long = System.currentTimeMillis() / 1000L
+    ): String? {
+        if (rawSummary.isNullOrBlank()) return null
+        if (rawSummary.contains("无降水") || rawSummary.contains("没有降水") || rawSummary.contains("无明显降水")) {
+            return null
+        }
+
+        // 1. 若已有精确推演的目标时间戳，优先产出紧凑车载倒计时（如：预计45分钟后雨停）
+        if (predictedTargetUnix > nowUnix) {
+            val remainingMinutes = ((predictedTargetUnix - nowUnix) / 60).toInt()
+            if (remainingMinutes > 0) {
+                return if (isTargetRainStart) {
+                    "预计${remainingMinutes}分钟后降雨"
+                } else {
+                    "预计${remainingMinutes}分钟后雨停"
+                }
+            }
+        }
+
+        // 2. 针对和风天气原始自然语言做车载轻量清洗
+        var text = rawSummary.trim()
+        val prefixesToRemove = listOf(
+            "未来两小时降水逐渐减弱，",
+            "未来两小时降水逐渐增强，",
+            "未来两小时降水逐渐减弱",
+            "未来两小时降水逐渐增强",
+            "未来两小时，",
+            "未来两小时",
+            "未来1小时",
+            "未来一小时",
+            "未来半小时，",
+            "未来半小时",
+            "雷达显示，",
+            "雷达显示"
+        )
+        for (prefix in prefixesToRemove) {
+            if (text.startsWith(prefix)) {
+                text = text.removePrefix(prefix).trimStart('，', ',', ' ')
+            }
+        }
+
+        // 如果文本后半段包含 "预计XX分钟后..."，直接提取核心后半句
+        val predictIndex = text.indexOf("预计")
+        if (predictIndex > 0) {
+            text = text.substring(predictIndex).trim()
+        }
+
+        // 若依然超过 13 个字符，按逗号切分提取含关键意图的分句
+        if (text.length > 13 && (text.contains("，") || text.contains(","))) {
+            val parts = text.split("，", ",")
+            val keyPart = parts.firstOrNull {
+                it.contains("雨停") || it.contains("降雨") || it.contains("雨渐停") || it.contains("分钟")
+            }
+            if (keyPart != null) {
+                text = keyPart.trim()
+            }
+        }
+
+        return text.ifBlank { null }
+    }
+
+    /**
      * 和风天气实况 + 分钟降水雷达 + Open-Meteo 天文时刻 融合映射核心入口
      */
     fun mapQWeatherToScene(
@@ -126,7 +195,9 @@ object WeatherSceneMapper {
         sunsetUnix: Long,
         fallbackWindSpeed: Float = 10f,
         fallbackTemp: Float = 22f,
-        fallbackWindDir: Float = 45f
+        fallbackWindDir: Float = 45f,
+        predictedRainTargetUnix: Long = 0L,
+        isTargetRainStart: Boolean = false
     ): WeatherSceneConfig {
         val timeOfDay = resolveTimeOfDay(nowUnix, sunriseUnix, sunsetUnix)
 
@@ -138,9 +209,14 @@ object WeatherSceneMapper {
         val windDirText = qNow?.windDir ?: resolveWindDirText(windDirDegree)
         val windScaleText = qNow?.windScale?.let { "${it}级" } ?: resolveWindScaleText(windSpeed)
 
-        // 分钟级降水雷达外推切片解析
-        val summary = minutely?.summary
-        val hasRainSummary = !summary.isNullOrBlank() && summary != "未来两小时无降水"
+        // 分钟级降水雷达外推切片解析与紧凑精简
+        val summary = sanitizeRainSummary(
+            rawSummary = minutely?.summary,
+            predictedTargetUnix = predictedRainTargetUnix,
+            isTargetRainStart = isTargetRainStart,
+            nowUnix = nowUnix
+        )
+        val hasRainSummary = !summary.isNullOrBlank()
         val currentSlot = minutely?.minutely?.firstOrNull()
         val currentPrecip = currentSlot?.precip?.toFloatOrNull() ?: 0f
         val isRadarRaining = currentPrecip > 0.05f

@@ -833,7 +833,14 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             val sizeBytes = withContext(Dispatchers.IO) {
                 try {
-                    LyricsCacheManager.getTotalCacheSizeBytes(context)
+                    val bytes = LyricsCacheManager.getTotalCacheSizeBytes(context)
+                    val limitBytes = LyricsCacheManager.getMaxSizeMb() * 1024 * 1024
+                    if (bytes > limitBytes) {
+                        LyricsCacheManager.enforceSizeLimit(context)
+                        LyricsCacheManager.getTotalCacheSizeBytes(context)
+                    } else {
+                        bytes
+                    }
                 } catch (_: Exception) { 0L }
             }
             val sizeMB = sizeBytes / (1024f * 1024f)
@@ -880,9 +887,12 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun setCacheLimitMB(limitMB: Int) {
         val clamped = limitMB.coerceIn(8, 128)
         _uiState.update { it.copy(service = it.service.copy(cacheLimitMB = clamped)) }
-        try {
-            PrefsManager.setCacheMaxSizeMb(clamped)
-            LyricsCacheManager.setMaxSize(clamped)
-        } catch (_: Exception) {}
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                PrefsManager.setCacheMaxSizeMb(clamped)
+                LyricsCacheManager.setMaxSize(clamped)
+            } catch (_: Exception) {}
+            refreshCacheSize()
+        }
     }
 }

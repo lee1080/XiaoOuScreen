@@ -12,6 +12,7 @@ import com.car.xiaoouscreen.data.QWeatherMinutelyResponse
 import com.car.xiaoouscreen.data.QWeatherNowDto
 import com.car.xiaoouscreen.data.QWeatherRepository
 import com.car.xiaoouscreen.location.CarGpsManager
+import com.carlyrics.util.AppLogger
 import com.carlyrics.util.PrivacyUtil
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -44,10 +45,16 @@ class WeatherFusionEngine(
     private var pollJob: Job? = null
     private var tickerJob: Job? = null
     private var silentDebounceJob: Job? = null
+    private var retryJob: Job? = null
+    private var wakeupJob: Job? = null
+    private var refreshJob: Job? = null
 
-    // 冷却与单次校验标志
+    // 冷却与单次校验标志（仅真实在线拉取成功时才更新，断网回退缓存绝不毒化！）
     private var lastQWeatherNowTimeMs: Long = 0L
     private var lastQWeatherMinutelyTimeMs: Long = 0L
+    @Volatile
+    private var lastOnlineSuccessTimeMs: Long = 0L
+    private var consecutiveFailureCount: Int = 0
     private var isPreRainVerified: Boolean = false
 
     // 本地时间轴推演参数
@@ -109,12 +116,15 @@ class WeatherFusionEngine(
 
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
-            // 出库网络恢复：5秒防抖，静默补偿拉取
+            // 出库/点火 4G 联网恢复：3 秒防抖，若尚未拿到新鲜在线天气或距上次成功超 10 分钟，直接强制静默补偿拉取
             silentDebounceJob?.cancel()
             silentDebounceJob = scope.launch {
-                delay(5000L)
-                Log.i(TAG, "Network restored & stable for 5s, performing silent compensation fetch")
-                refreshWeather(force = false)
+                delay(3000L)
+                val staleMs = System.currentTimeMillis() - lastOnlineSuccessTimeMs
+                val needForce = (lastOnlineSuccessTimeMs == 0L || staleMs >= 10 * 60 * 1000L)
+                AppLogger.i(TAG, "🌐 [网络恢复补偿] 车机网络已就绪，触发天气刷新 (force=$needForce, 距上次在线成功=${if (lastOnlineSuccessTimeMs == 0L) "从未" else "${staleMs / 1000}s"})")
+                gpsManager.requestFreshLocationForWakeup()
+                refreshWeather(force = needForce)
             }
         }
     }
@@ -122,49 +132,142 @@ class WeatherFusionEngine(
     fun start() {
         registerNetworkCallback()
 
-        // 1. 若已有已知坐标，立即触发一次静默刷新
-        if (gpsManager.currentLatitude != 0.0 || gpsManager.currentLongitude != 0.0) {
-            refreshWeather(gpsManager.currentLatitude, gpsManager.currentLongitude, force = false)
-        }
-
-        // 2. GPS 就绪监听 (自带 15min / 5km 复合防连击门禁)
+        // 1. GPS 就绪监听 (自带首次实时定位快速纠偏 + 常规 15min/5km 复合门禁)
+        // 注意：startLocationUpdates 内部会自动回调一次已知坐标触发首轮刷新，无需重复发两次并发请求
         gpsManager.startLocationUpdates { lat, lon ->
-            refreshWeather(lat, lon, force = false)
+            val needForce = (lastOnlineSuccessTimeMs == 0L)
+            refreshWeather(lat, lon, force = needForce)
         }
 
-        // 3. 启动 15 分钟长周期常规轮询
+        // 2. 启动 15 分钟长周期常规轮询
         startPeriodicPolling()
 
-        // 4. 启动 1 分钟短周期本地时间轴与昼夜推演
+        // 3. 启动 1 分钟短周期本地时间轴、昼夜推演与挂钟超时保底检测
         startLocalTimelineTicker()
+    }
+
+    /**
+     * 车机 STR 休眠唤醒 / 屏幕点亮 / ACC_ON 点火上车调用：
+     * 解决车机熄火休眠一整晚后，早起上车亮屏时协程 uptimeMillis 冻结导致天气停留在昨天的痛点！
+     */
+    fun onDeviceWakeUp(reason: String = "屏幕唤醒") {
+        val nowMs = System.currentTimeMillis()
+        val staleMs = nowMs - lastOnlineSuccessTimeMs
+        // 只要从未在线成功，或距离上次真实在线更新已超 5 分钟，立即预约唤醒补偿刷新
+        if (lastOnlineSuccessTimeMs == 0L || staleMs >= 5 * 60 * 1000L) {
+            AppLogger.i(TAG, "☀️ [上车唤醒补偿·$reason] 距上次真实在线刷新已过 ${if (lastOnlineSuccessTimeMs == 0L) "从未成功" else "${staleMs / 1000}s"}，3.5s 后等待车机 4G/GPS 苏醒并强制拉取实况")
+            gpsManager.requestFreshLocationForWakeup()
+            wakeupJob?.cancel()
+            wakeupJob = scope.launch {
+                delay(3500L)
+                gpsManager.requestFreshLocationForWakeup()
+                refreshWeather(gpsManager.currentLatitude, gpsManager.currentLongitude, force = true)
+            }
+        }
     }
 
     fun stop() {
         pollJob?.cancel()
         tickerJob?.cancel()
         silentDebounceJob?.cancel()
+        retryJob?.cancel()
+        wakeupJob?.cancel()
+        refreshJob?.cancel()
         gpsManager.stopLocationUpdates()
         unregisterNetworkCallback()
     }
 
     /**
-     * 核心刷新方法：执行双源融合调度
+     * 断网/弱网阶梯退避重试：针对车机冷启动前 1~2 分钟 T-BOX 尚未完全就绪或刚出地库丢包场景
+     * 15s -> 30s -> 60s -> 120s 快速补偿，一旦成功立即终止重试
+     */
+    private fun scheduleFailureRetry(lat: Double, lon: Double) {
+        if (consecutiveFailureCount >= RETRY_DELAYS_MS.size) {
+            AppLogger.w(TAG, "⏳ [天气退避重试] 已达快速重试上限 (${RETRY_DELAYS_MS.size}次)，交由网络恢复回调与常规轮询兜底")
+            return
+        }
+        val delayMs = RETRY_DELAYS_MS[consecutiveFailureCount]
+        consecutiveFailureCount++
+        retryJob?.cancel()
+        retryJob = scope.launch {
+            AppLogger.i(TAG, "🔁 [天气退避重试] 本次在线拉取失败，预约 ${delayMs / 1000}s 后执行第 $consecutiveFailureCount 次补偿重试...")
+            delay(delayMs)
+            gpsManager.requestFreshLocationForWakeup()
+            refreshWeather(gpsManager.currentLatitude, gpsManager.currentLongitude, force = true)
+        }
+    }
+
+    /**
+     * 核心刷新方法：执行双源并发融合调度
      */
     fun refreshWeather(
         lat: Double = gpsManager.currentLatitude,
         lon: Double = gpsManager.currentLongitude,
         force: Boolean = false
     ) {
-        scope.launch {
+        // 避免短时间内重叠发起多个并发刷新任务
+        refreshJob?.cancel()
+        refreshJob = scope.launch {
             val nowMs = System.currentTimeMillis()
             val nowUnix = nowMs / 1000L
-            Log.d(TAG, "🌐【双天气引擎触发刷新】传入经纬度: lat=${PrivacyUtil.maskCoordinate(lat)}, lon=${PrivacyUtil.maskCoordinate(lon)} (force=$force)")
+            AppLogger.i(TAG, "🌐【双天气引擎刷新】坐标: lat=${PrivacyUtil.maskCoordinate(lat)}, lon=${PrivacyUtil.maskCoordinate(lon)} (force=$force)")
 
-            // 步骤 1：请求 Open-Meteo 基础气象 (ECMWF IFS 0.25° + 日出日落秒级时间戳)
-            val omResult = openMeteoRepo.getWeatherScene(lat, lon)
-            val baseScene = omResult.getOrNull() ?: _sceneConfig.value
-            Log.d(TAG, "🌦️ Open-Meteo 返回: temp=${baseScene.temperatureCelsius}℃, state=${baseScene.weatherState}, wind=${baseScene.windSpeedKmh}km/h")
+            // 强制刷新时重置熔断标记
+            if (force) {
+                qWeatherRepo.resetCircuitBreaker()
+            }
 
+            val qWeatherEnabled = qWeatherRepo.configManager.isEnabled &&
+                qWeatherRepo.configManager.isConfigured() &&
+                !qWeatherRepo.isCircuitBroken
+
+            val distMeters = if (lastQWeatherLat != 0.0 && lastQWeatherLon != 0.0) {
+                val results = FloatArray(1)
+                Location.distanceBetween(lastQWeatherLat, lastQWeatherLon, lat, lon, results)
+                results[0]
+            } else {
+                Float.MAX_VALUE
+            }
+            val isLocationMoved = distMeters >= 3000f
+            val needNowUpdate = qWeatherEnabled && (force || isLocationMoved || lastQWeatherNowTimeMs == 0L || (nowMs - lastQWeatherNowTimeMs >= 15 * 60 * 1000L))
+
+            // 步骤 1 & 2 并发执行：Open-Meteo 与和风实况同时发起，绝不因海外 Open-Meteo 偶发超时 8 秒而卡死国内和风实况！
+            var omScene: WeatherSceneConfig? = null
+            var omOnlineOk = false
+            var qNowOnlineOk = false
+
+            coroutineScope {
+                val omDeferred = async {
+                    val res = openMeteoRepo.getWeatherScene(lat, lon)
+                    Pair(res.getOrNull(), openMeteoRepo.lastFetchFromNetwork)
+                }
+                val qNowDeferred = if (needNowUpdate) {
+                    async { qWeatherRepo.getWeatherNow(lat, lon) }
+                } else null
+
+                val (fetchedOm, isOmNet) = omDeferred.await()
+                omScene = fetchedOm
+                omOnlineOk = isOmNet
+
+                if (qNowDeferred != null) {
+                    val nowResult = qNowDeferred.await()
+                    if (nowResult.isSuccess) {
+                        val freshNow = nowResult.getOrNull()
+                        if (freshNow != null) {
+                            lastQNow = freshNow
+                            lastQWeatherNowTimeMs = nowMs
+                            lastQWeatherLat = lat
+                            lastQWeatherLon = lon
+                            qNowOnlineOk = true
+                            AppLogger.i(TAG, "✅ [和风实况在线更新] temp=${freshNow.temp}℃, text=${freshNow.text}, wind=${freshNow.windDir} ${freshNow.windScale}级")
+                        }
+                    } else {
+                        AppLogger.w(TAG, "❌ [和风实况请求失败] 保留冷却锁未毒化，等待重试: ${nowResult.exceptionOrNull()?.message}")
+                    }
+                }
+            }
+
+            val baseScene = omScene ?: _sceneConfig.value
             val sunriseUnix = openMeteoRepo.lastSunriseUnix
             val sunsetUnix = openMeteoRepo.lastSunsetUnix
             val pop = openMeteoRepo.lastMaxPrecipProbability
@@ -178,47 +281,31 @@ class WeatherFusionEngine(
                 WeatherState.SLEET -> 68
             }
 
-            // 步骤 2：强制刷新时重置熔断标记，并判断是否启用了和风天气且配置了 Key
-            if (force) {
-                qWeatherRepo.resetCircuitBreaker()
+            val anyOnlineSuccess = if (qWeatherEnabled) (qNowOnlineOk || (!needNowUpdate && omOnlineOk)) else omOnlineOk
+            if (anyOnlineSuccess) {
+                lastOnlineSuccessTimeMs = nowMs
+                consecutiveFailureCount = 0
+                retryJob?.cancel()
+            } else {
+                // 在线拉取全部失败（刚点火断网/地库弱网），自动启动阶梯退避重试！
+                scheduleFailureRetry(lat, lon)
             }
-            if (!qWeatherRepo.configManager.isEnabled || !qWeatherRepo.configManager.isConfigured() || qWeatherRepo.isCircuitBroken) {
-                // 纯免费 Open-Meteo 兜底模式
-                _sceneConfig.value = baseScene
+
+            if (!qWeatherEnabled) {
+                // 纯免费 Open-Meteo 模式：仅当在线成功或当前还是默认空场景时更新界面，防止覆盖有效缓存
+                if (omOnlineOk || _sceneConfig.value == WeatherSceneConfig.DEFAULT) {
+                    _sceneConfig.value = baseScene
+                }
                 return@launch
             }
 
-            // 步骤 3：高精地面站实况 (weather/now) - 15分钟或位移超3km或强制刷新
-            val distMeters = if (lastQWeatherLat != 0.0 && lastQWeatherLon != 0.0) {
-                val results = FloatArray(1)
-                Location.distanceBetween(lastQWeatherLat, lastQWeatherLon, lat, lon, results)
-                results[0]
-            } else {
-                Float.MAX_VALUE
-            }
-            val isLocationMoved = distMeters >= 3000f
-            val needNowUpdate = force || isLocationMoved || (nowMs - lastQWeatherNowTimeMs >= 15 * 60 * 1000L)
-            if (needNowUpdate) {
-                Log.d(TAG, "📡 正在请求和风实况 weather/now (lon=${PrivacyUtil.maskCoordinate(lon)}, lat=${PrivacyUtil.maskCoordinate(lat)}, moved=$isLocationMoved, force=$force)...")
-                val nowResult = qWeatherRepo.getWeatherNow(lat, lon)
-                if (nowResult.isSuccess) {
-                    lastQNow = nowResult.getOrNull()
-                    lastQWeatherNowTimeMs = nowMs
-                    lastQWeatherLat = lat
-                    lastQWeatherLon = lon
-                    Log.d(TAG, "✅ 和风实况返回: temp=${lastQNow?.temp}℃, text=${lastQNow?.text}, wind=${lastQNow?.windDir} ${lastQNow?.windScale}级")
-                } else {
-                    Log.w(TAG, "❌ 和风实况请求失败: ${nowResult.exceptionOrNull()?.message}")
-                }
-            }
-
-            // 步骤 4：降水守门人 (Rain Gatekeeper) —— POP >= 20% 或当前基础为雨雪天时唤醒分钟降水
+            // 步骤 3：降水守门人 (Rain Gatekeeper) —— POP >= 20% 或当前基础为雨雪天时唤醒分钟降水
             val isRainSign = pop >= 20 || baseScene.weatherState in listOf(
                 WeatherState.RAIN, WeatherState.SNOW, WeatherState.STORM, WeatherState.SLEET
             )
-            val cooldownOk = (nowMs - lastQWeatherMinutelyTimeMs >= MIN_COOLDOWN_MS)
+            val cooldownOk = (lastQWeatherMinutelyTimeMs == 0L || nowMs - lastQWeatherMinutelyTimeMs >= MIN_COOLDOWN_MS)
 
-            if ((isRainSign && cooldownOk) || force || isLocationMoved) {
+            if ((isRainSign && cooldownOk) || (qNowOnlineOk && (force || isLocationMoved))) {
                 val minResult = qWeatherRepo.getMinutelyPrecipitation(lat, lon)
                 if (minResult.isSuccess) {
                     lastMinutelyResp = minResult.getOrNull()
@@ -227,7 +314,7 @@ class WeatherFusionEngine(
                 }
             }
 
-            // 步骤 5：综合融合仲裁映射
+            // 步骤 4：综合融合仲裁映射
             val mergedScene = WeatherSceneMapper.mapQWeatherToScene(
                 qNow = lastQNow,
                 minutely = lastMinutelyResp,
@@ -412,6 +499,15 @@ class WeatherFusionEngine(
                     updatedScene.weatherState != current.weatherState) {
                     _sceneConfig.value = updatedScene
                 }
+
+                // C. 挂钟时间保底检测：车机 STR 休眠时协程 uptimeMillis 会暂停计时，导致 15 分钟 pollJob 延后；
+                //    此处以真实挂钟时间 (System.currentTimeMillis) 校验，一旦距上次真实在线成功超 15 分钟且当前不在刷新，立即补偿拉取！
+                val nowMs = System.currentTimeMillis()
+                val isStaleByWallClock = (lastOnlineSuccessTimeMs > 0L && nowMs - lastOnlineSuccessTimeMs >= 15 * 60 * 1000L)
+                if (isStaleByWallClock && refreshJob?.isActive != true) {
+                    AppLogger.i(TAG, "🕒 [挂钟保底] 距上次真实在线刷新已过 ${(nowMs - lastOnlineSuccessTimeMs) / 1000}s，主动触发补偿拉取")
+                    refreshWeather(force = false)
+                }
             }
         }
     }
@@ -443,5 +539,6 @@ class WeatherFusionEngine(
     companion object {
         private const val TAG = "WeatherFusionEngine"
         private const val MIN_COOLDOWN_MS = 8 * 60 * 1000L
+        private val RETRY_DELAYS_MS = longArrayOf(15_000L, 30_000L, 60_000L, 120_000L)
     }
 }

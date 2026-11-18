@@ -296,10 +296,18 @@ class GearCubeFlipView @JvmOverloads constructor(
     private var vignetteLeftShader: LinearGradient? = null
     private var vignetteRightShader: LinearGradient? = null
 
-    // 离线池化 Bitmap
+    // 离线池化 Bitmap (按需懒加载)
     private var cachedBitmap: Bitmap? = null
     private var cachedCanvas: Canvas? = null
     private var hasValidSnapshot = false
+
+    private fun ensureCachedCanvas(): Canvas {
+        if (cachedBitmap == null || cachedBitmap?.isRecycled == true) {
+            cachedBitmap = Bitmap.createBitmap(LOGICAL_WIDTH.toInt(), LOGICAL_HEIGHT.toInt(), Bitmap.Config.ARGB_8888)
+            cachedCanvas = Canvas(cachedBitmap!!)
+        }
+        return cachedCanvas!!
+    }
 
     // 纯净暗色底图 Shader (当无外部快照时的纯净优雅衬底，彻底废除图三测试页面)
     private var fallbackBaseShader: RadialGradient? = null
@@ -315,10 +323,6 @@ class GearCubeFlipView @JvmOverloads constructor(
     private val mainHandler = Handler(Looper.getMainLooper())
 
     init {
-        // 立即预分配池化快照 Bitmap，确保首次切档时 cachedCanvas 永不为 null
-        cachedBitmap = Bitmap.createBitmap(LOGICAL_WIDTH.toInt(), LOGICAL_HEIGHT.toInt(), Bitmap.Config.ARGB_8888)
-        cachedCanvas = Canvas(cachedBitmap!!)
-
         // 加载 Orbitron Bold 字体
         HmiFontManager.getOrbitronBold(context).let {
             letterPaint.typeface = it
@@ -441,10 +445,8 @@ class GearCubeFlipView @JvmOverloads constructor(
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
-        if (cachedBitmap == null && w > 0 && h > 0) {
-            cachedBitmap = Bitmap.createBitmap(LOGICAL_WIDTH.toInt(), LOGICAL_HEIGHT.toInt(), Bitmap.Config.ARGB_8888)
-            cachedCanvas = Canvas(cachedBitmap!!)
-            Log.i(TAG, "常驻池化 Bitmap 已分配: 1920×384 (零运行时再次分配)")
+        if (cachedBitmap == null && w > 0 && h > 0 && visibility == VISIBLE) {
+            ensureCachedCanvas()
         }
     }
 
@@ -498,7 +500,7 @@ class GearCubeFlipView @JvmOverloads constructor(
 
             // 单次就地离线快照
             if (snapshotProvider != null) {
-                cachedCanvas?.let { c ->
+                ensureCachedCanvas().let { c ->
                     c.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
                     snapshotProvider.invoke(c)
                     hasValidSnapshot = true
@@ -671,7 +673,7 @@ class GearCubeFlipView @JvmOverloads constructor(
 
         // 翻回前重新就地捕获最新时钟气象画面，杜绝露出2秒前的旧时间快照
         currentSnapshotProvider?.let { provider ->
-            cachedCanvas?.let { c ->
+            ensureCachedCanvas().let { c ->
                 c.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
                 provider.invoke(c)
                 hasValidSnapshot = true
@@ -723,6 +725,9 @@ class GearCubeFlipView @JvmOverloads constructor(
     override fun onDetachedFromWindow() {
         dismiss()
         cancelAllAnimators()
+        cachedBitmap?.recycle()
+        cachedBitmap = null
+        cachedCanvas = null
         super.onDetachedFromWindow()
     }
 

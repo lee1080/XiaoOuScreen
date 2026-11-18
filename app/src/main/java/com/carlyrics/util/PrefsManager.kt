@@ -325,10 +325,24 @@ object PrefsManager {
         get().edit().putBoolean(KEY_BOTTOM_LEFT_GEAR_HUD_ENABLED, enabled).apply()
     }
 
+    // ----- 未匹配到歌词显示默认时钟画面 (默认开启 true) -----
+    private const val KEY_SHOW_DEFAULT_CLOCK_WHEN_NO_LYRICS = "show_default_clock_when_no_lyrics"
+    fun isShowDefaultClockWhenNoLyrics(): Boolean = get().getBoolean(KEY_SHOW_DEFAULT_CLOCK_WHEN_NO_LYRICS, true)
+    fun setShowDefaultClockWhenNoLyrics(enabled: Boolean) {
+        get().edit().putBoolean(KEY_SHOW_DEFAULT_CLOCK_WHEN_NO_LYRICS, enabled).apply()
+    }
+
     // ----- 最新实况天气场景持久化缓存 (冷启动首帧直接加载，杜绝默认晴朗20°跳变) -----
     private const val KEY_LAST_WEATHER_SCENE_JSON = "key_last_weather_scene_json"
     fun getLastWeatherSceneJson(): String? = get().getString(KEY_LAST_WEATHER_SCENE_JSON, null)
     fun setLastWeatherSceneJson(json: String) {
         get().edit().putString(KEY_LAST_WEATHER_SCENE_JSON, json).apply()
+    }
+
+    // ----- 优先使用实车车外温度传感器开关 (0x11600703，与仪表盘同步，默认开启 true) -----
+    private const val KEY_USE_CAR_OUTSIDE_TEMP = "use_car_outside_temp"
+    fun isUseCarOutsideTempEnabled(): Boolean = get().getBoolean(KEY_USE_CAR_OUTSIDE_TEMP, true)
+    fun setUseCarOutsideTempEnabled(enabled: Boolean) {
+        get().edit().putBoolean(KEY_USE_CAR_OUTSIDE_TEMP, enabled).apply()
     }
 }

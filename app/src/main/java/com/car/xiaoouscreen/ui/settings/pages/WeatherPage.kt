@@ -24,9 +24,11 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -54,9 +56,11 @@ import com.car.xiaoouscreen.ui.settings.theme.neuInset
 @Composable
 fun WeatherPage(
     state: WeatherState,
+    onToggleUseCarOutsideTemp: (Boolean) -> Unit = {},
     onToggleEnableQWeather: (Boolean) -> Unit,
     onSaveHost: (String) -> Unit,
     onSaveKey: (String) -> Unit,
+    onSilentPersistDraft: (String, String) -> Unit = { _, _ -> },
     onTestConnection: () -> Unit,
     onClearCredentials: () -> Unit,
     onRefreshWeather: () -> Unit = {},
@@ -65,7 +69,17 @@ fun WeatherPage(
 ) {
     var hostInput by remember(state.apiHost) { mutableStateOf(state.apiHost) }
     var keyInput by remember(state.apiKey) { mutableStateOf(state.apiKey) }
+    val latestHostInput by rememberUpdatedState(hostInput)
+    val latestKeyInput by rememberUpdatedState(keyInput)
+    val latestSilentPersist by rememberUpdatedState(onSilentPersistDraft)
     val canUseQWeather = state.enableQWeather && state.apiKey.isNotBlank()
+
+    // 切页或退出设置时，自动将输入框里未点「应用」的非空改动同步落盘到本地，防止丢失
+    DisposableEffect(Unit) {
+        onDispose {
+            latestSilentPersist(latestHostInput, latestKeyInput)
+        }
+    }
 
     Column(
         modifier = modifier.fillMaxWidth(),
@@ -131,7 +145,94 @@ fun WeatherPage(
             }
         }
 
-        // 3.2 开启和风高精度天气主开关卡片 (排在即时更新下方)
+        // 3.2 优先使用实车车外温度开关卡片 (位于“开启和风高精度天气”上方)
+        val hasCarTemp = state.carOutsideTempC != null
+        val formattedCarTemp = state.carOutsideTempC?.let {
+            String.format(java.util.Locale.US, "%.1f", it).removeSuffix(".0")
+        }
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .neuCard(
+                    cornerRadius = 18.dp,
+                    borderColor = if (state.useCarOutsideTemp) Color(0xFFBFDBFE) else NeuColors.BorderCard
+                )
+                .padding(16.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "优先使用实车车外温度",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = NeuColors.TextPrimary
+                        )
+
+                        Box(
+                            modifier = Modifier
+                                .background(
+                                    color = when {
+                                        !state.useCarOutsideTemp -> Color(0xFFE2E8F0)
+                                        hasCarTemp -> Color(0xFFDCFCE7)
+                                        else -> Color(0xFFDBEAFE)
+                                    },
+                                    shape = RoundedCornerShape(12.dp)
+                                )
+                                .padding(horizontal = 8.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = when {
+                                    !state.useCarOutsideTemp -> "已关闭 · 使用在线气象站温度"
+                                    hasCarTemp -> "已开启 · 实车车外 ${formattedCarTemp}°C"
+                                    else -> "已开启 · 等待实车信号（自动回退在线）"
+                                },
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = when {
+                                    !state.useCarOutsideTemp -> NeuColors.TextSecondary
+                                    hasCarTemp -> Color(0xFF15803D)
+                                    else -> NeuColors.AccentBlue
+                                }
+                            )
+                        }
+
+                        NeuInfoButton(
+                            info = AnnotationInfo(
+                                title = "实车车外温度融合说明",
+                                content = "开启后，小欧屏主气温将直接读取车辆 CAN 总线车外环境温度传感器（与原车仪表盘实时同步，零网络延迟、地库/山区/隧道更贴近真实体感）；天空天气现象、风向风级与分钟降水仍由在线气象源驱动。未读到有效车辆信号时自动无缝回退在线气温。",
+                                recommend = "推荐开启 · 与仪表盘车外温度完全一致"
+                            ),
+                            onShowInfo = onShowInfo
+                        )
+                    }
+
+                    Text(
+                        text = "直接读取车辆车外温度传感器并与仪表同步；天空现象、风力及降水仍由在线气象源提供，无传感器信号时自动回退在线温度。",
+                        fontSize = 11.sp,
+                        color = NeuColors.TextSecondary
+                    )
+                }
+
+                NeuSwitch(
+                    checked = state.useCarOutsideTemp,
+                    onCheckedChange = onToggleUseCarOutsideTemp,
+                    modifier = Modifier.padding(start = 12.dp)
+                )
+            }
+        }
+
+        // 3.3 开启和风高精度天气主开关卡片 (排在实车车外温度下方)
         Box(
             modifier = Modifier
                 .fillMaxWidth()

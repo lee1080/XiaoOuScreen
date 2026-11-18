@@ -110,12 +110,13 @@ class WeatherOverlayWindow(
     private var pendingCallInfo: CarCallManager.CallInfo? = null
     private var wasInLyricsBeforeCall: Boolean = false
 
-    // 缓存独立全屏车载歌词的全部状态，确保 Presentation 重新登顶或重置时 100% 继承，绝不重置到第 0 行
+    // 缓存独立全屏车载歌词与画布歌词的全部状态，确保 Presentation 重新登顶或重置时 100% 继承，绝不重置到第 0 行
     private var lastLyricsTrackTitle: String = ""
     private var lastLyricsTrackArtist: String = ""
     private var lastLyricsCoverUrl: String? = null
     private var lastLyricLines: List<LyricLine> = emptyList()
     private var lastLyricsProgressMs: Long = 0L
+    private var lastCanvasLyricsProgressMs: Long = 0L
 
     private val autoHideHandler = Handler(Looper.getMainLooper())
     private val hideCloseRunnable = Runnable {
@@ -686,10 +687,14 @@ class WeatherOverlayWindow(
 
     fun setCanvasLyrics(lines: List<LyricLine>) {
         pendingCanvasLyricLines = lines
+        if (lines.isEmpty()) {
+            lastCanvasLyricsProgressMs = 0L
+        }
         weatherCanvasView?.setLyrics(lines)
     }
 
     fun updateCanvasLyricsProgress(positionMs: Long) {
+        lastCanvasLyricsProgressMs = positionMs
         weatherCanvasView?.updateLyricsProgress(positionMs)
     }
 
@@ -816,29 +821,33 @@ class WeatherOverlayWindow(
     fun reassertTop(force: Boolean = false): Boolean {
         if (!isAttached) return false
         val now = SystemClock.elapsedRealtime()
-        if (!force && now - lastReassertTime < 3500L) {
-            AppLogger.d(TAG, "🛡️ 置顶重登节流保护 (3500ms 内已执行)，跳过重复调用")
+        if (!force && now - lastReassertTime < 2000L) {
+            AppLogger.d(TAG, "🛡️ 置顶重登节流保护 (2000ms 内已执行)，跳过重复调用")
             return false
         }
-        if (!force && consecutiveReassertCount >= 4 && now - lastReassertTime < 15000L) {
-            AppLogger.w(TAG, "🛡️ 连续失焦重登已达上限 (4次)，为防死循环暂停自动重登")
+        if (!force && consecutiveReassertCount >= 6 && now - lastReassertTime < 15000L) {
+            AppLogger.w(TAG, "🛡️ 连续失焦重登已达上限 (6次)，为防死循环暂停自动重登")
             return false
         }
         if (now - lastReassertTime > 15000L || force) {
             consecutiveReassertCount = 0
         }
         lastReassertTime = now
-        consecutiveReassertCount++
+        if (!force) {
+            consecutiveReassertCount++
+        }
 
         return try {
             if (mode == Mode.FITNESS && targetDisplay.displayId != Display.DEFAULT_DISPLAY) {
                 AppLogger.i(TAG, "🛡️ 开始执行 Presentation (2037) 无缝重新登顶，压制系统自带媒体界面...")
                 val oldPres = presentation
+                // 核心零闪烁重构：先构造新 Presentation（不立即 show()），在其首次上屏渲染前将全部状态、
+                // 天气场景、实时歌词行与精确毫秒进度、页面显隐 100% 瞬间预注入完毕，再调用 show()！
+                // 彻底根除“新窗口首帧先画初始化大时钟，100ms 后再跳回歌词页”的闪屏问题！
                 val newPres = InternalPresentation(appContext, targetDisplay).apply {
                     setOnTouchCallback { resetCloseButtonTimer() }
                     setOnCloseCallback { onCloseListener?.invoke() }
                     setOnFocusLostCallback { onFocusLostListener?.invoke() }
-                    show()
                 }
                 presentation = newPres
                 weatherCanvasView = newPres.canvasView
@@ -847,50 +856,81 @@ class WeatherOverlayWindow(
                 driveModeView = newPres.driveModeView
                 bottomLeftGearHudView = newPres.bottomLeftGearHudView
                 closeButtonContainer = newPres.closeContainer
-                if (isMusicPlaying && lastMusicTitle.isNotEmpty()) {
-                    setTopMusicTrackInfo(lastMusicTitle, lastMusicArtist, true)
-                }
-                setupNativeAnimationViews()
-                setupBottomLeftGearHudView()
-                resetCloseButtonTimer()
 
-                pendingSceneConfig?.let { weatherCanvasView?.updateScene(it) }
-                pendingCanvasLyricLines?.let { weatherCanvasView?.setLyrics(it) }
-                pendingCanvasLyricsActive?.let { weatherCanvasView?.setLyricsActive(it, smooth = false) }
-                pendingCallInfo?.let { weatherCanvasView?.setCallInfo(it) }
                 val shouldAvoid = PrefsManager.isXiaoOuAvatarEnabled()
                 lyricsContainerView?.xiaoOuAvoidanceEnabled = shouldAvoid
                 weatherCanvasView?.setXiaoOuAvoidance(shouldAvoid)
                 weatherCanvasView?.setLiquidGlassEnabled(PrefsManager.isLiquidGlassClockEnabled(), smooth = false)
 
-                // 核心修复：无缝恢复独立全屏车载歌词的全部状态，绝不回滚至开头重新滚动
-                if (lastLyricsTrackTitle.isNotEmpty()) {
-                    lyricsContainerView?.setTrackInfo(lastLyricsTrackTitle, lastLyricsTrackArtist)
+                // 1. 无动画直接恢复天气场景与通话卡片
+                pendingSceneConfig?.let { weatherCanvasView?.updateScene(it, animate = false) }
+                pendingCallInfo?.let { weatherCanvasView?.setCallInfo(it) }
+
+                // 2. 无动画恢复顶栏音乐胶囊
+                if (isMusicPlaying && lastMusicTitle.isNotEmpty() && currentPage != ActivePage.LYRICS && !PrefsManager.isStandaloneLyricsEnabled()) {
+                    weatherCanvasView?.setTopMusicTrackInfo(lastMusicTitle, lastMusicArtist, isPlaying = true, smooth = false)
+                } else {
+                    weatherCanvasView?.setTopMusicTrackInfo("", "", isPlaying = false, smooth = false)
                 }
-                if (lastLyricsCoverUrl != null) {
-                    lyricsContainerView?.setCoverUrl(lastLyricsCoverUrl)
+
+                // 3. 无动画瞬间恢复画布五行居中歌词：必须【先注入进度，再注入歌词行】，
+                //    利用 prevIdx == -1 瞬间精准定位到当前播放行，0 滚屏动画、0 回退到第 0 行！
+                val effectiveCanvasProgress = if (lastCanvasLyricsProgressMs > 0L) lastCanvasLyricsProgressMs else lastLyricsProgressMs
+                if (effectiveCanvasProgress > 0L) {
+                    weatherCanvasView?.updateLyricsProgress(effectiveCanvasProgress)
                 }
-                if (lastLyricLines.isNotEmpty()) {
-                    lyricsContainerView?.setLyrics(lastLyricLines)
-                    if (lastLyricsProgressMs > 0L) {
-                        lyricsContainerView?.updateProgress(lastLyricsProgressMs)
+                pendingCanvasLyricLines?.let { weatherCanvasView?.setLyrics(it) }
+                pendingCanvasLyricsActive?.let { weatherCanvasView?.setLyricsActive(it, smooth = false) }
+
+                // 4. 完整预注入独立全屏歌词皮肤、排版参数与当前精确播放进度
+                lyricsContainerView?.let { lv ->
+                    lv.reloadSkin(PrefsManager.getSkinType())
+                    lv.getSkin()?.let { skin ->
+                        skin.fontSizeSp = PrefsManager.getFontSizeSp()
+                        skin.splitRatio = PrefsManager.getSplitRatio()
+                        skin.lyricsTextAlignment = PrefsManager.getLyricsAlignment()
+                        skin.marqueeEnabled = PrefsManager.isMarqueeEnabled()
+                        skin.scaleFactor = PrefsManager.getDpiScale()
+                        skin.infoFontScale = PrefsManager.getInfoFontScale()
+                        skin.lyricsOffsetMs = PrefsManager.lyricsOffsetMs
+                    }
+                    if (lastLyricsTrackTitle.isNotEmpty()) {
+                        lv.setTrackInfo(lastLyricsTrackTitle, lastLyricsTrackArtist)
+                    }
+                    if (lastLyricsCoverUrl != null) {
+                        lv.setCoverUrl(lastLyricsCoverUrl)
+                    }
+                    if (lastLyricLines.isNotEmpty()) {
+                        lv.setLyrics(lastLyricLines)
+                        if (lastLyricsProgressMs > 0L) {
+                            lv.updateProgress(lastLyricsProgressMs)
+                        }
                     }
                 }
+
+                // 5. 同步挡位 HUD 与页面显隐（在 show() 前就位，避免全屏歌词页闪现天气页）
+                setupNativeAnimationViews()
+                setupBottomLeftGearHudView()
+                resetCloseButtonTimer()
 
                 if (currentPage == ActivePage.LYRICS) {
                     lyricsContainerView?.visibility = View.VISIBLE
                     lyricsContainerView?.alpha = 1f
                     lyricsContainerView?.resume()
                     weatherCanvasView?.visibility = View.GONE
+                    weatherCanvasView?.pauseAnimation()
                 } else {
                     weatherCanvasView?.visibility = View.VISIBLE
                     weatherCanvasView?.alpha = 1f
+                    weatherCanvasView?.resumeAnimation()
                     lyricsContainerView?.visibility = View.GONE
                     lyricsContainerView?.pause()
                 }
 
-                // 销毁旧 Presentation：延迟 150ms 等新 Presentation 窗口与画布完全渲染上屏后再 dismiss 旧窗口，
-                // 彻底杜绝同步 dismiss 导致底色/原生画面瞬透的闪烁！
+                // 6. 全部视图状态 100% 就绪后正式上屏！首帧即与当前播放画面像素级一致
+                newPres.show()
+
+                // 7. 销毁旧 Presentation：延迟 150ms 等新 Presentation 完成合成上屏后再静默 dismiss 旧窗口
                 newPres.canvasView.postDelayed({
                     try {
                         oldPres?.canvasView?.pauseAnimation()

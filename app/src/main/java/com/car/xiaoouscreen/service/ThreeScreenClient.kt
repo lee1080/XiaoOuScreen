@@ -128,11 +128,14 @@ class ThreeScreenClient(
     }
 
     /**
-     * 判断指定视图名是否为原厂媒体类界面 (蓝牙音乐、酷狗音乐等)
+     * 判断指定视图名是否为原厂媒体类界面 (蓝牙音乐、酷狗音乐、车机电台等)
      */
     fun isMediaView(viewType: String?): Boolean {
         if (viewType.isNullOrBlank()) return false
-        return viewType.contains(VIEW_MEDIA, ignoreCase = true)
+        return viewType.contains(VIEW_MEDIA, ignoreCase = true) ||
+            viewType.contains("RADIO", ignoreCase = true) ||
+            viewType.contains("AUDIO", ignoreCase = true) ||
+            viewType.contains("MUSIC", ignoreCase = true)
     }
 
     /**

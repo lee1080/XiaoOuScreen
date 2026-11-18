@@ -37,6 +37,13 @@ class CarGearManager private constructor(private val context: Context) {
         const val ID_VENDOR_DRIVER_MODE_SET = 0x2140f030 // 557903920
         const val ID_DRIVING_MODE_ALL = 0x2141f08e       // 557969550
 
+        // 实车车外环境温度属性 ID (AOSP 标准属性，CarSensorManager / CarHvacManager 共享，Float ℃，normal 权限)
+        const val SENSOR_TYPE_ENV_OUTSIDE_TEMPERATURE = 0x11600703 // 291505923
+
+        // 车外温度合理物理区间 (过滤 CAN 未就绪/传感器故障常见的 -40℃ / 87.5℃ / NaN 占位值)
+        private const val MIN_VALID_OUTSIDE_TEMP_C = -39.5f
+        private const val MAX_VALID_OUTSIDE_TEMP_C = 65.0f
+
         // 驾驶模式常量
         const val MODE_ECO = "ECO"
         const val MODE_NORMAL = "NORMAL"
@@ -97,12 +104,17 @@ class CarGearManager private constructor(private val context: Context) {
         fun onDriveModeChanged(mode: String, rawValue: Int)
     }
 
+    interface OutsideTempListener {
+        fun onOutsideTempChanged(tempCelsius: Float)
+    }
+
     private val mainHandler = Handler(Looper.getMainLooper())
     private val workerExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "CarGear-Worker").apply { isDaemon = true }
     }
     private val listeners = CopyOnWriteArrayList<GearListener>()
     private val driveModeListeners = CopyOnWriteArrayList<DriveModeListener>()
+    private val outsideTempListeners = CopyOnWriteArrayList<OutsideTempListener>()
 
     @Volatile private var cachedGetPropertyIdMethod: Method? = null
     @Volatile private var cachedGetValueMethod: Method? = null
@@ -110,9 +122,12 @@ class CarGearManager private constructor(private val context: Context) {
     private var carInstance: Any? = null
     private var cabinManager: Any? = null
     private var mcuManager: Any? = null
-    // 保持对动态代理回调的强引用，防止在内存紧张 (TrimMemory) 时被垃圾回收机制 (GC) 提前回收导致档位事件静默失联
+    private var sensorManager: Any? = null
+    private var hvacManager: Any? = null
+    // 保持对动态代理回调的强引用，防止在内存紧张 (TrimMemory) 时被垃圾回收机制 (GC) 提前回收导致事件静默失联
     private var cabinCallbackProxy: Any? = null
     private var mcuCallbackProxy: Any? = null
+    private var sensorCallbackProxy: Any? = null
     private var isCarSupported = false
     private var isConnected = false
     private var isInitialized = false
@@ -126,6 +141,9 @@ class CarGearManager private constructor(private val context: Context) {
 
     private var currentDriveMode = MODE_NORMAL
     private var currentRawDriveMode = 1
+
+    @Volatile
+    private var currentOutsideTempC: Float? = null
 
     fun registerListener(listener: GearListener) {
         if (!listeners.contains(listener)) {
@@ -150,10 +168,24 @@ class CarGearManager private constructor(private val context: Context) {
         driveModeListeners.remove(listener)
     }
 
+    fun registerOutsideTempListener(listener: OutsideTempListener) {
+        if (!outsideTempListeners.contains(listener)) {
+            outsideTempListeners.add(listener)
+            currentOutsideTempC?.let { temp ->
+                mainHandler.post { listener.onOutsideTempChanged(temp) }
+            }
+        }
+    }
+
+    fun unregisterOutsideTempListener(listener: OutsideTempListener) {
+        outsideTempListeners.remove(listener)
+    }
+
     fun getCurrentGear(): String = currentGearLabel
     fun getCurrentRawGear(): Int = currentRawGear
     fun getCurrentDriveMode(): String = currentDriveMode
     fun getCurrentRawDriveMode(): Int = currentRawDriveMode
+    fun getCurrentOutsideTempC(): Float? = currentOutsideTempC
     fun isConnectedToCar(): Boolean = isConnected
 
     /**
@@ -186,10 +218,13 @@ class CarGearManager private constructor(private val context: Context) {
                         isInitialized = false
                         cabinManager = null
                         mcuManager = null
+                        sensorManager = null
+                        hvacManager = null
                         cabinCallbackProxy = null
                         mcuCallbackProxy = null
+                        sensorCallbackProxy = null
                         mainHandler.postDelayed({
-                            if (listeners.isNotEmpty() || driveModeListeners.isNotEmpty()) {
+                            if (listeners.isNotEmpty() || driveModeListeners.isNotEmpty() || outsideTempListeners.isNotEmpty()) {
                                 init()
                             }
                         }, 3000L)
@@ -246,8 +281,170 @@ class CarGearManager private constructor(private val context: Context) {
                 AppLogger.w(TAG, "未启用/未找到 mcu_service: ${e.message}")
             }
 
+            // 3. 获取 CarSensorManager (服务名: "sensor") 读取并订阅车外环境温度 (0x11600703, normal 权限)
+            try {
+                sensorManager = getCarManagerMethod.invoke(car, "sensor")
+                if (sensorManager != null) {
+                    AppLogger.i(TAG, "成功获取 CarSensorManager 实例，开始接入车外温度传感器 (0x11600703)")
+                    registerOutsideTempSensor(sensorManager!!)
+                    readInitialOutsideTemp(sensorManager!!)
+                } else {
+                    AppLogger.w(TAG, "未能获取到 CarSensorManager (sensor)")
+                }
+            } catch (e: Exception) {
+                AppLogger.w(TAG, "获取 CarSensorManager 异常: ${e.message}")
+            }
+
+            // 4. 备选通道：若 CarSensorManager 尚未给出有效初始车外温度，尝试通过 CarHvacManager 读取同源属性 0x11600703
+            if (currentOutsideTempC == null) {
+                try {
+                    hvacManager = getCarManagerMethod.invoke(car, "hvac")
+                    hvacManager?.let { readOutsideTempFromHvac(it) }
+                } catch (_: Exception) {}
+            }
+
         } catch (t: Throwable) {
             AppLogger.e(TAG, "initManagers 异常: ${t.message}", t)
+        }
+    }
+
+    /**
+     * 通过 CarSensorManager 主动读取最新车外温度事件 (0x11600703)
+     */
+    private fun readInitialOutsideTemp(sensorMgr: Any) {
+        try {
+            val getLatestMethod = sensorMgr.javaClass.getMethod(
+                "getLatestSensorEvent",
+                Int::class.javaPrimitiveType
+            )
+            val event = getLatestMethod.invoke(sensorMgr, SENSOR_TYPE_ENV_OUTSIDE_TEMPERATURE)
+            if (event != null) {
+                handleOutsideTempSensorEvent(event, source = "Sensor初始查询")
+            } else {
+                AppLogger.d(TAG, "🌡️ 实车初始车外温度事件暂为空，等待 CAN 总线上报...")
+            }
+        } catch (t: Throwable) {
+            AppLogger.w(TAG, "读取初始车外温度异常: ${t.message}")
+        }
+    }
+
+    /**
+     * 备选通过 CarHvacManager 读取同源属性 ID_OUTSIDE_AIR_TEMP (0x11600703)
+     */
+    private fun readOutsideTempFromHvac(hvacMgr: Any) {
+        try {
+            val getFloatMethod = hvacMgr.javaClass.getMethod(
+                "getFloatProperty",
+                Int::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType
+            )
+            val temp = getFloatMethod.invoke(hvacMgr, SENSOR_TYPE_ENV_OUTSIDE_TEMPERATURE, 0) as? Float
+            if (temp != null) {
+                processOutsideTempValue(temp, source = "Hvac初始查询")
+            }
+        } catch (_: Throwable) {}
+    }
+
+    /**
+     * 注册 CarSensorManager.OnSensorChangedListener 监听实车车外温度实时变化
+     */
+    private fun registerOutsideTempSensor(sensorMgr: Any) {
+        try {
+            val classLoader = sensorMgr.javaClass.classLoader ?: context.classLoader
+            val listenerClass = Class.forName(
+                "android.car.hardware.CarSensorManager\$OnSensorChangedListener",
+                true,
+                classLoader
+            )
+            val callbackProxy = Proxy.newProxyInstance(
+                classLoader,
+                arrayOf(listenerClass)
+            ) { proxy, method, args ->
+                when (method.name) {
+                    "onSensorChanged" -> {
+                        if (args != null && args.isNotEmpty() && args[0] != null) {
+                            handleOutsideTempSensorEvent(args[0]!!, source = "Sensor实时回调")
+                        }
+                        getDefaultReturnValue(method.returnType)
+                    }
+                    "equals" -> proxy === (args?.firstOrNull())
+                    "hashCode" -> System.identityHashCode(proxy)
+                    "toString" -> "CarSensorOutsideTempProxy@${Integer.toHexString(System.identityHashCode(proxy))}"
+                    else -> getDefaultReturnValue(method.returnType)
+                }
+            }
+
+            // 优先使用反射读取 CarSensorManager.SENSOR_RATE_NORMAL (通常为 3)，兜底为 3
+            val rateNormal = try {
+                sensorMgr.javaClass.getField("SENSOR_RATE_NORMAL").getInt(null)
+            } catch (_: Exception) { 3 }
+
+            val registerMethod = sensorMgr.javaClass.getMethod(
+                "registerListener",
+                listenerClass,
+                Int::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType
+            )
+            val ok = registerMethod.invoke(
+                sensorMgr,
+                callbackProxy,
+                SENSOR_TYPE_ENV_OUTSIDE_TEMPERATURE,
+                rateNormal
+            ) as? Boolean ?: false
+
+            sensorCallbackProxy = callbackProxy
+            AppLogger.i(TAG, "🌡️ 订阅实车车外温度传感器 (0x11600703, rate=$rateNormal) 结果: $ok")
+        } catch (t: Throwable) {
+            AppLogger.w(TAG, "注册车外温度传感器监听异常: ${t.message}")
+        }
+    }
+
+    private fun handleOutsideTempSensorEvent(event: Any, source: String) {
+        try {
+            val sensorType = try {
+                event.javaClass.getField("sensorType").getInt(event)
+            } catch (_: Exception) {
+                SENSOR_TYPE_ENV_OUTSIDE_TEMPERATURE
+            }
+            if (sensorType != SENSOR_TYPE_ENV_OUTSIDE_TEMPERATURE) return
+
+            val floatValues = event.javaClass.getField("floatValues").get(event) as? FloatArray
+            val rawTemp = floatValues?.firstOrNull() ?: return
+            processOutsideTempValue(rawTemp, source)
+        } catch (t: Throwable) {
+            AppLogger.w(TAG, "解析车外温度事件异常: ${t.message}")
+        }
+    }
+
+    private fun processOutsideTempValue(rawTemp: Float, source: String) {
+        if (rawTemp.isNaN() || rawTemp.isInfinite() || rawTemp < MIN_VALID_OUTSIDE_TEMP_C || rawTemp > MAX_VALID_OUTSIDE_TEMP_C) {
+            AppLogger.d(TAG, "🌡️ 忽略无效车外温度帧 ($source): raw=$rawTemp")
+            return
+        }
+        // 车规精度规整：四舍五入至 0.5℃ 刻度，与原车仪表步进一致，杜绝浮点噪点频闪
+        val normalized = kotlin.math.round(rawTemp * 2f) / 2f
+        val prev = currentOutsideTempC
+        if (prev != null && kotlin.math.abs(normalized - prev) < 0.25f) {
+            return
+        }
+        currentOutsideTempC = normalized
+        AppLogger.i(TAG, "🌡️ [$source] 实车车外温度更新: ${normalized}℃ (raw=$rawTemp)")
+        mainHandler.post {
+            for (listener in outsideTempListeners) {
+                listener.onOutsideTempChanged(normalized)
+            }
+        }
+    }
+
+    /**
+     * 车机亮屏唤醒或手动刷新天气时，主动补读一次车外温度最新帧
+     */
+    fun refreshOutsideTempNow() {
+        workerExecutor.execute {
+            sensorManager?.let { readInitialOutsideTemp(it) }
+            if (currentOutsideTempC == null) {
+                hvacManager?.let { readOutsideTempFromHvac(it) }
+            }
         }
     }
 
@@ -595,8 +792,11 @@ class CarGearManager private constructor(private val context: Context) {
                 carInstance = null
                 cabinManager = null
                 mcuManager = null
+                sensorManager = null
+                hvacManager = null
                 cabinCallbackProxy = null
                 mcuCallbackProxy = null
+                sensorCallbackProxy = null
                 cachedGetPropertyIdMethod = null
                 cachedGetValueMethod = null
             }

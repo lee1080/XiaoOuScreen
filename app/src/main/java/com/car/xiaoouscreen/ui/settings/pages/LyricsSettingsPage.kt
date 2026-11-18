@@ -49,6 +49,7 @@ import com.car.xiaoouscreen.ui.settings.components.NeuCenteredSlider
 import com.car.xiaoouscreen.ui.settings.components.NeuCheckbox
 import com.car.xiaoouscreen.ui.settings.components.NeuDropdown
 import com.car.xiaoouscreen.ui.settings.components.NeuInfoButton
+import com.car.xiaoouscreen.ui.settings.components.NeuSwitch
 import com.car.xiaoouscreen.ui.settings.model.LyricSourceItemState
 import com.car.xiaoouscreen.ui.settings.model.LyricsState
 import com.car.xiaoouscreen.ui.settings.theme.NeuColors
@@ -70,6 +71,7 @@ fun LyricsSettingsPage(
     onToggleSourceEnabled: (String) -> Unit,
     onReorderSources: (List<String>) -> Unit = {},
     onOpenSourceManagerDialog: () -> Unit,
+    onToggleShowDefaultClockWhenNoLyrics: (Boolean) -> Unit = {},
     onTimeOffsetChange: (Int) -> Unit,
     onSaveCustomLyricUrl: (String) -> Unit,
     onSaveCustomCoverUrl: (String) -> Unit,
@@ -394,6 +396,57 @@ fun LyricsSettingsPage(
                         }
                     }
                 }
+            }
+        }
+
+        // ====================================================================
+        // 未匹配到歌词显示默认时钟画面
+        // ====================================================================
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .neuCard(cornerRadius = 16.dp)
+                .padding(horizontal = 16.dp, vertical = 14.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "未匹配到歌词显示默认时钟画面",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = NeuColors.TextPrimary
+                        )
+                        NeuInfoButton(
+                            info = AnnotationInfo(
+                                title = "未匹配到歌词显示默认时钟画面",
+                                content = "开启后，若当前播放的音乐未能匹配到歌词，小欧屏将自动保持或退回展示默认时钟与天气主界面，避免展示暂无歌词或空白歌词占位。",
+                                recommend = "默认保持开启"
+                            ),
+                            onShowInfo = onShowInfo
+                        )
+                    }
+                    Text(
+                        text = "播放音乐未检索到对应歌词时，自动切回默认时钟与天气仪表界面",
+                        fontSize = 11.sp,
+                        color = NeuColors.TextSecondary
+                    )
+                }
+
+                NeuSwitch(
+                    checked = state.showDefaultClockWhenNoLyrics,
+                    onCheckedChange = onToggleShowDefaultClockWhenNoLyrics
+                )
             }
         }
 

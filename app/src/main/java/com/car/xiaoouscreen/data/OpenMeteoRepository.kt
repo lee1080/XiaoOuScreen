@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import android.util.Log
 import com.car.xiaoouscreen.domain.WeatherSceneConfig
 import com.car.xiaoouscreen.domain.WeatherSceneMapper
+import com.carlyrics.util.AppLogger
 import com.google.gson.Gson
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -30,6 +31,14 @@ class OpenMeteoRepository(context: Context) {
         private set
 
     var lastSunsetUnix: Long = 0L
+        private set
+
+    @Volatile
+    var lastFetchFromNetwork: Boolean = false
+        private set
+
+    @Volatile
+    var lastOnlineSuccessTimeMs: Long = 0L
         private set
 
     init {
@@ -87,6 +96,8 @@ class OpenMeteoRepository(context: Context) {
 
                 // 写入本地持久化缓存
                 saveToCache(response)
+                lastFetchFromNetwork = true
+                lastOnlineSuccessTimeMs = System.currentTimeMillis()
 
                 val scene = WeatherSceneMapper.mapToScene(
                     wmoCode = current.weatherCode,
@@ -97,9 +108,11 @@ class OpenMeteoRepository(context: Context) {
                     temperature = current.temperature2m,
                     windDirection = current.windDirection10m
                 )
+                AppLogger.i(TAG, "✅ [Open-Meteo] 在线刷新成功: temp=${scene.temperatureCelsius}℃, state=${scene.weatherState}, wind=${scene.windSpeedKmh}km/h, pop=$lastMaxPrecipProbability%")
                 Result.success(scene)
             } catch (e: Exception) {
-                Log.w(TAG, "Network weather request failed: ${e.message}, falling back to cache")
+                lastFetchFromNetwork = false
+                AppLogger.w(TAG, "⚠️ [Open-Meteo] 网络请求失败 (${e.message})，暂时回退本地缓存并交由退避引擎重试")
                 val cachedScene = loadFromCache(nowUnix)
                 if (cachedScene != null) {
                     Result.success(cachedScene)

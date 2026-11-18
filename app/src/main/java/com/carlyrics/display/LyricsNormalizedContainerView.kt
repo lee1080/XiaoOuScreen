@@ -8,12 +8,14 @@ import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Shader
+import android.os.SystemClock
 import android.util.AttributeSet
 import android.view.Gravity
 import android.view.View
 import android.widget.FrameLayout
 import android.widget.ImageView
 import com.car.xiaoouscreen.R
+import com.car.xiaoouscreen.ui.BurnInProtection
 import com.carlyrics.model.LyricLine
 import com.carlyrics.skin.LyricsSkin
 import com.carlyrics.skin.SkinFactory
@@ -94,6 +96,31 @@ class LyricsNormalizedContainerView @JvmOverloads constructor(
 
     private var isPaused = false
 
+    // 防烧屏微距像素漂移低频心跳（生产常亮投屏模式生效，即使暂停歌曲也能持续缓慢防残影）
+    private var isBurnInTickerRunning = false
+    private val burnInShiftRunnable = object : Runnable {
+        override fun run() {
+            if (showAvatarIndicator || isPaused || !isAttachedToWindow || visibility != VISIBLE) {
+                isBurnInTickerRunning = false
+                return
+            }
+            invalidate()
+            postDelayed(this, BurnInProtection.STATIC_REFRESH_INTERVAL_MS)
+        }
+    }
+
+    private fun updateBurnInTicker() {
+        val shouldRun = !showAvatarIndicator && !isPaused && isAttachedToWindow && visibility == VISIBLE
+        if (shouldRun && !isBurnInTickerRunning) {
+            isBurnInTickerRunning = true
+            removeCallbacks(burnInShiftRunnable)
+            postDelayed(burnInShiftRunnable, BurnInProtection.STATIC_REFRESH_INTERVAL_MS)
+        } else if (!shouldRun && isBurnInTickerRunning) {
+            isBurnInTickerRunning = false
+            removeCallbacks(burnInShiftRunnable)
+        }
+    }
+
     // 状态数据持久留存，换肤与运行时刷新平滑迁移
     private var savedTitle: String = ""
     private var savedArtist: String = ""
@@ -108,6 +135,7 @@ class LyricsNormalizedContainerView @JvmOverloads constructor(
         set(value) {
             field = value
             updateAvatarVisibility()
+            updateBurnInTicker()
         }
 
     var xiaoOuAvoidanceEnabled: Boolean = false
@@ -228,6 +256,7 @@ class LyricsNormalizedContainerView @JvmOverloads constructor(
     fun pause() {
         if (isPaused) return
         isPaused = true
+        updateBurnInTicker()
         (currentSkin as? View)?.visibility = View.INVISIBLE
     }
 
@@ -238,6 +267,7 @@ class LyricsNormalizedContainerView @JvmOverloads constructor(
         if (!isPaused) return
         isPaused = false
         (currentSkin as? View)?.visibility = View.VISIBLE
+        updateBurnInTicker()
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
@@ -278,7 +308,24 @@ class LyricsNormalizedContainerView @JvmOverloads constructor(
         canvas.translate(calculatedOffsetX, calculatedOffsetY)
         canvas.scale(calculatedScale, calculatedScale)
         canvas.clipRect(0f, 0f, LOGICAL_WIDTH, LOGICAL_HEIGHT)
-        super.dispatchDraw(canvas)
+        if (!showAvatarIndicator) {
+            // 生产常亮投屏：应用全局同步防烧屏微距漂移 + 1.6% 等比过扫描防止四边露黑缝
+            val nowShiftMs = SystemClock.uptimeMillis()
+            val shiftX = BurnInProtection.getShiftX(nowShiftMs)
+            val shiftY = BurnInProtection.getShiftY(nowShiftMs)
+            canvas.save()
+            canvas.translate(shiftX, shiftY)
+            canvas.scale(
+                BurnInProtection.FULLSCREEN_OVERSCAN_SCALE,
+                BurnInProtection.FULLSCREEN_OVERSCAN_SCALE,
+                LOGICAL_WIDTH / 2f,
+                LOGICAL_HEIGHT / 2f
+            )
+            super.dispatchDraw(canvas)
+            canvas.restore()
+        } else {
+            super.dispatchDraw(canvas)
+        }
         // 绘制左右两侧 130px 物理安全暗角渐变，确保歌词视图与主屏时钟无缝一致
         canvas.drawRect(vignetteLeftRect, vignetteLeftPaint)
         canvas.drawRect(vignetteRightRect, vignetteRightPaint)
@@ -295,7 +342,19 @@ class LyricsNormalizedContainerView @JvmOverloads constructor(
         return handled
     }
 
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        updateBurnInTicker()
+    }
+
+    override fun onVisibilityChanged(changedView: View, visibility: Int) {
+        super.onVisibilityChanged(changedView, visibility)
+        updateBurnInTicker()
+    }
+
     override fun onDetachedFromWindow() {
+        isBurnInTickerRunning = false
+        removeCallbacks(burnInShiftRunnable)
         pause()
         super.onDetachedFromWindow()
     }
@@ -304,7 +363,24 @@ class LyricsNormalizedContainerView @JvmOverloads constructor(
      * 将歌词内容绘制到指定的严格 1920×384 Canvas 上
      */
     fun drawStrict1920(canvas: Canvas) {
-        contentFrame.draw(canvas)
+        if (!showAvatarIndicator) {
+            val nowShiftMs = SystemClock.uptimeMillis()
+            val shiftX = BurnInProtection.getShiftX(nowShiftMs)
+            val shiftY = BurnInProtection.getShiftY(nowShiftMs)
+            canvas.save()
+            canvas.clipRect(0f, 0f, LOGICAL_WIDTH, LOGICAL_HEIGHT)
+            canvas.translate(shiftX, shiftY)
+            canvas.scale(
+                BurnInProtection.FULLSCREEN_OVERSCAN_SCALE,
+                BurnInProtection.FULLSCREEN_OVERSCAN_SCALE,
+                LOGICAL_WIDTH / 2f,
+                LOGICAL_HEIGHT / 2f
+            )
+            contentFrame.draw(canvas)
+            canvas.restore()
+        } else {
+            contentFrame.draw(canvas)
+        }
     }
 
     /**

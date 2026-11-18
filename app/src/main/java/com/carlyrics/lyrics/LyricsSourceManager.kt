@@ -41,9 +41,7 @@ object LyricsSourceManager {
     private var isInitialized = false
 
     fun init(context: Context) {
-        if (isInitialized) return
         synchronized(lock) {
-            if (isInitialized) return
             appContext = com.carlyrics.util.PrefsManager.getSafeStorageContext(context)
             prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             sourcesDir = File(appContext.filesDir, "lyrics_sources")
@@ -62,10 +60,13 @@ object LyricsSourceManager {
     private fun syncBuiltinSourcesFromAssets() {
         try {
             val assetManager = appContext.assets
-            val assetFiles = assetManager.list("lyrics_sources") ?: return
+            val builtinFiles = listOf("gdstudio.js")
+            val assetFiles = (assetManager.list("lyrics_sources")?.toList() ?: emptyList()).plus(builtinFiles).distinct()
             for (filename in assetFiles) {
                 if (!filename.endsWith(".js")) continue
-                val script = assetManager.open("lyrics_sources/$filename").bufferedReader().use { it.readText() }
+                val script = try {
+                    assetManager.open("lyrics_sources/$filename").bufferedReader().use { it.readText() }
+                } catch (_: Exception) { continue }
                 val defaultId = filename.substringBeforeLast(".")
                 val assetMeta = LyricsSourceRunner.parseMetadata(script, defaultId)
                 if (assetMeta.id.isBlank()) continue
@@ -86,12 +87,13 @@ object LyricsSourceManager {
                     }
                 }
 
+                android.util.Log.i(TAG, "syncBuiltinSources: file=$filename, id=${assetMeta.id}, exists=${localFile.exists()}, shouldUpdate=$shouldUpdate")
                 if (shouldUpdate) {
                     localFile.writeText(script)
                     if (!prefs.contains(KEY_ENABLED_PREFIX + assetMeta.id)) {
                         prefs.edit().putBoolean(KEY_ENABLED_PREFIX + assetMeta.id, true).apply()
                     }
-                    AppLogger.d(TAG, "内置歌词源同步/升级: ${assetMeta.id} v${assetMeta.version}")
+                    android.util.Log.i(TAG, "内置歌词源同步/升级成功: ${assetMeta.id} v${assetMeta.version}")
                 }
             }
         } catch (e: Exception) {
@@ -120,6 +122,7 @@ object LyricsSourceManager {
         synchronized(lock) {
             val list = mutableListOf<LyricsSource>()
             val files = sourcesDir.listFiles { _, name -> name.endsWith(".js") } ?: emptyArray()
+            android.util.Log.i(TAG, "reloadSources: found ${files.size} files in sourcesDir: ${files.map { it.name }}")
 
             val orderJson = prefs.getString(KEY_ORDER_LIST, "[]") ?: "[]"
             val orderList: List<String> = try {
@@ -168,6 +171,9 @@ object LyricsSourceManager {
      */
     fun getAllSources(): List<LyricsSource> {
         synchronized(lock) {
+            if (cachedSources.isEmpty() && ::sourcesDir.isInitialized) {
+                reloadSources()
+            }
             return cachedSources.toList()
         }
     }
@@ -177,6 +183,9 @@ object LyricsSourceManager {
      */
     fun getEnabledSources(): List<LyricsSource> {
         synchronized(lock) {
+            if (cachedSources.isEmpty() && ::sourcesDir.isInitialized) {
+                reloadSources()
+            }
             return cachedSources.filter { it.isEnabled }.sortedBy { it.order }
         }
     }

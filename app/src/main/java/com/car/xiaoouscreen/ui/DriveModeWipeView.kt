@@ -280,10 +280,18 @@ class DriveModeWipeView @JvmOverloads constructor(
     // 虚线 PathEffect (CUSTOM 刻度标尺)
     private val dashEffect = DashPathEffect(floatArrayOf(4f, 12f), 0f)
 
-    // 离线池化 Bitmap (承载主屏快照)
+    // 离线池化 Bitmap (承载主屏快照，按需懒加载)
     private var cachedBitmap: Bitmap? = null
     private var cachedCanvas: Canvas? = null
     private var hasValidSnapshot = false
+
+    private fun ensureCachedCanvas(): Canvas {
+        if (cachedBitmap == null || cachedBitmap?.isRecycled == true) {
+            cachedBitmap = Bitmap.createBitmap(LOGICAL_WIDTH.toInt(), LOGICAL_HEIGHT.toInt(), Bitmap.Config.ARGB_8888)
+            cachedCanvas = Canvas(cachedBitmap!!)
+        }
+        return cachedCanvas!!
+    }
 
     // 纯净深空暗底 Shader (当快照为空时的纯净暗色背景，彻底废除图三测试页面)
     private var fallbackBaseShader: RadialGradient? = null
@@ -301,10 +309,6 @@ class DriveModeWipeView @JvmOverloads constructor(
     private val mainHandler = Handler(Looper.getMainLooper())
 
     init {
-        // 立即预分配池化快照 Bitmap，确保首次擦除时 cachedCanvas 永不为 null
-        cachedBitmap = Bitmap.createBitmap(LOGICAL_WIDTH.toInt(), LOGICAL_HEIGHT.toInt(), Bitmap.Config.ARGB_8888)
-        cachedCanvas = Canvas(cachedBitmap!!)
-
         // 配置 Orbitron 字体
         HmiFontManager.getOrbitronBold(context).let {
             heroTextPaint.typeface = it
@@ -461,10 +465,8 @@ class DriveModeWipeView @JvmOverloads constructor(
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
-        if (cachedBitmap == null && w > 0 && h > 0) {
-            cachedBitmap = Bitmap.createBitmap(LOGICAL_WIDTH.toInt(), LOGICAL_HEIGHT.toInt(), Bitmap.Config.ARGB_8888)
-            cachedCanvas = Canvas(cachedBitmap!!)
-            Log.i(TAG, "DriveMode 离线快照池化 Bitmap 已分配: 1920×384")
+        if (cachedBitmap == null && w > 0 && h > 0 && visibility == VISIBLE) {
+            ensureCachedCanvas()
         }
     }
 
@@ -511,7 +513,7 @@ class DriveModeWipeView @JvmOverloads constructor(
 
             // 离线捕获底层画面
             if (snapshotProvider != null) {
-                cachedCanvas?.let { c ->
+                ensureCachedCanvas().let { c ->
                     c.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
                     snapshotProvider.invoke(c)
                     hasValidSnapshot = true
@@ -587,7 +589,7 @@ class DriveModeWipeView @JvmOverloads constructor(
             currentSnapshotProvider = snapshotProvider
 
             if (snapshotProvider != null) {
-                cachedCanvas?.let { c ->
+                ensureCachedCanvas().let { c ->
                     c.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
                     snapshotProvider.invoke(c)
                     hasValidSnapshot = true
@@ -685,7 +687,7 @@ class DriveModeWipeView @JvmOverloads constructor(
 
         // 擦除退场前立即重新就地抓取最新原生时钟气象画面，杜绝露出2秒前的旧时间快照 (彻底解决图四问题)
         currentSnapshotProvider?.let { provider ->
-            cachedCanvas?.let { c ->
+            ensureCachedCanvas().let { c ->
                 c.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
                 provider.invoke(c)
                 hasValidSnapshot = true
@@ -737,6 +739,9 @@ class DriveModeWipeView @JvmOverloads constructor(
     override fun onDetachedFromWindow() {
         dismiss()
         cancelAllAnimators()
+        cachedBitmap?.recycle()
+        cachedBitmap = null
+        cachedCanvas = null
         super.onDetachedFromWindow()
     }
 

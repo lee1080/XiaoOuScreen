@@ -284,7 +284,7 @@ object LyricsSourceRunner {
 
         override fun observeInstructionCount(cx: Context?, instructionCount: Int) {
             val startTime = cx?.getThreadLocal("startTime") as? Long ?: return
-            val maxDurationMs = cx.getThreadLocal("maxDurationMs") as? Long ?: 3500L
+            val maxDurationMs = cx.getThreadLocal("maxDurationMs") as? Long ?: 8000L
             val elapsed = System.currentTimeMillis() - startTime
             if (elapsed > maxDurationMs) {
                 throw IllegalStateException("JS 脚本执行超时已超过 ${maxDurationMs}ms (累计执行指令: $instructionCount)")
@@ -304,7 +304,7 @@ object LyricsSourceRunner {
         val cx = sandboxFactory.enterContext()
         return try {
             cx.putThreadLocal("startTime", System.currentTimeMillis())
-            cx.putThreadLocal("maxDurationMs", 4000L)
+            cx.putThreadLocal("maxDurationMs", 8000L)
 
             // 使用安全标准对象 (不暴露 Packages, JavaAdapter, JavaImporter)
             val scope = cx.initSafeStandardObjects()

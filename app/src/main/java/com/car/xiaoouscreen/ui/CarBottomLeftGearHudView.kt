@@ -123,6 +123,31 @@ class CarBottomLeftGearHudView @JvmOverloads constructor(
     private var hudAlpha = 1.0f
     private var fadeAnimator: ValueAnimator? = null
 
+    // 防烧屏微距像素漂移低频心跳（长途巡航静态停留在 D 档时每 8 秒驱动微移，0 额外线程）
+    private var isBurnInTickerRunning = false
+    private val burnInShiftRunnable = object : Runnable {
+        override fun run() {
+            if (!isAttachedToWindow || !isHudVisible || visibility != VISIBLE) {
+                isBurnInTickerRunning = false
+                return
+            }
+            invalidate()
+            postDelayed(this, BurnInProtection.STATIC_REFRESH_INTERVAL_MS)
+        }
+    }
+
+    private fun updateBurnInTicker() {
+        val shouldRun = isAttachedToWindow && isHudVisible && visibility == VISIBLE
+        if (shouldRun && !isBurnInTickerRunning) {
+            isBurnInTickerRunning = true
+            removeCallbacks(burnInShiftRunnable)
+            postDelayed(burnInShiftRunnable, BurnInProtection.STATIC_REFRESH_INTERVAL_MS)
+        } else if (!shouldRun && isBurnInTickerRunning) {
+            isBurnInTickerRunning = false
+            removeCallbacks(burnInShiftRunnable)
+        }
+    }
+
     // 液态磨砂玻璃离屏缓冲 (4x 降采样)
     private val glassBgBitmap = Bitmap.createBitmap(GLASS_BUFFER_W, GLASS_BUFFER_H, Bitmap.Config.ARGB_8888)
     private val glassBgCanvas = Canvas(glassBgBitmap)
@@ -393,12 +418,14 @@ class CarBottomLeftGearHudView @JvmOverloads constructor(
         if (!animate) {
             hudAlpha = if (enabled) 1f else 0f
             visibility = if (enabled) VISIBLE else GONE
+            updateBurnInTicker()
             invalidate()
             return
         }
 
         if (enabled) {
             visibility = VISIBLE
+            updateBurnInTicker()
         }
 
         val startAlpha = hudAlpha
@@ -410,6 +437,7 @@ class CarBottomLeftGearHudView @JvmOverloads constructor(
                 alpha = hudAlpha
                 if (hudAlpha <= 0.01f && !enabled) {
                     visibility = GONE
+                    updateBurnInTicker()
                 }
                 invalidate()
             }
@@ -451,11 +479,17 @@ class CarBottomLeftGearHudView @JvmOverloads constructor(
         canvas.scale(scale, scale)
         canvas.clipRect(0f, 0f, LOGICAL_WIDTH, LOGICAL_HEIGHT)
 
+        // 全局同步防烧屏微距像素漂移（与上方左侧天气文字严格同步对齐，不破坏左对齐美学）
+        val nowShiftMs = android.os.SystemClock.uptimeMillis()
+        val shiftX = BurnInProtection.getShiftX(nowShiftMs)
+        val shiftY = BurnInProtection.getShiftY(nowShiftMs)
+        canvas.translate(shiftX, shiftY)
+
         // 1. 绘制极轻柔通透环境悬浮投影 (消除黑框，通透悬浮)
         canvas.drawRoundRect(slotRect, SLOT_RADIUS, SLOT_RADIUS, shadowAmbientPaint)
 
         // 2. 抓取并渲染局部 28px 磨砂玻璃背景 (主动清除脏帧，严格 170% 动态饱和度)
-        drawFrostedGlassBackground(canvas)
+        drawFrostedGlassBackground(canvas, shiftX, shiftY)
 
         // 3. 绘制与大时间 100% 统一的液态玻璃材质层 (10%白底叠层 + 表面微流光 + inet 1px 1px #fff8 边缘厚度)
         drawLiquidGlassSlotLayers(canvas)
@@ -472,28 +506,28 @@ class CarBottomLeftGearHudView @JvmOverloads constructor(
     /**
      * 2. 绘制局部磨砂玻璃背景 (28px 快速盒式模糊 + 170% 饱和度 + 节流复用，避免切档动画 60fps 重复模糊)
      */
-    private fun drawFrostedGlassBackground(canvas: Canvas) {
+    private fun drawFrostedGlassBackground(canvas: Canvas, shiftX: Float, shiftY: Float) {
         val provider = backgroundProvider ?: return
         canvas.save()
         canvas.clipPath(slotPath)
 
         val nowMs = android.os.SystemClock.uptimeMillis()
         val isSlidingAnim = slideAnimator?.isRunning == true
-        // 切档滑移动画执行期间暂缓盒式模糊重算，直接复用当前快照，保证 60FPS 满帧无卡顿
-        if (!isSlidingAnim && (isBackgroundDirty || lastGlassBlurUpdateTime == 0L || (nowMs - lastGlassBlurUpdateTime >= 350L))) {
+        // 切档滑移动画执行期间暂缓盒式模糊重算，直接复用当前快照，保证 60FPS 满帧无卡顿，平时节流至 2500ms
+        if (!isSlidingAnim && (isBackgroundDirty || lastGlassBlurUpdateTime == 0L || (nowMs - lastGlassBlurUpdateTime >= 2500L))) {
             lastGlassBlurUpdateTime = nowMs
             isBackgroundDirty = false
 
             // 关键：清空缓冲脏数据，防止白天冷蓝像素残留至黄昏/夜晚
             glassBgCanvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
 
-            // 抓取底层实时天气到 4x 降采样缓冲
+            // 抓取底层实时天气到 4x 降采样缓冲（同步叠加防烧屏偏移以精确匹配实际落点底图）
             glassBgCanvas.save()
             glassBgCanvas.scale(
                 GLASS_BUFFER_W / slotRect.width(),
                 GLASS_BUFFER_H / slotRect.height()
             )
-            glassBgCanvas.translate(-slotRect.left, -slotRect.top)
+            glassBgCanvas.translate(-(slotRect.left + shiftX), -(slotRect.top + shiftY))
             provider.invoke(glassBgCanvas, slotRect)
             glassBgCanvas.restore()
 
@@ -700,7 +734,19 @@ class CarBottomLeftGearHudView @JvmOverloads constructor(
         }
     }
 
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        updateBurnInTicker()
+    }
+
+    override fun onVisibilityChanged(changedView: View, visibility: Int) {
+        super.onVisibilityChanged(changedView, visibility)
+        updateBurnInTicker()
+    }
+
     fun dismiss() {
+        isBurnInTickerRunning = false
+        removeCallbacks(burnInShiftRunnable)
         slideAnimator?.cancel()
         slideAnimator = null
         fadeAnimator?.cancel()

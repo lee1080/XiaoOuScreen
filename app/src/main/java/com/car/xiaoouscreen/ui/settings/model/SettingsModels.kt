@@ -134,6 +134,8 @@ data class XiaoOuState(
  * 天气服务状态
  */
 data class WeatherState(
+    val useCarOutsideTemp: Boolean = true,
+    val carOutsideTempC: Float? = null,
     val enableQWeather: Boolean = false,
     val apiHost: String = "devapi.qweather.com",
     val apiKey: String = "",
@@ -155,6 +157,7 @@ data class LyricsState(
     val titleFontSize: Int = 27,      // 14..36, 默认 27 (px)
     val lyricFontSize: Int = 88,      // 50..130, 默认 88 (px)
     val preferredSourceId: String = "",
+    val showDefaultClockWhenNoLyrics: Boolean = true,
     val timeOffset: Int = 0,          // -2000..2000, 默认 0 (ms)
     val customLyricUrl: String = "",
     val customCoverUrl: String = "",

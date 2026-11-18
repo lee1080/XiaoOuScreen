@@ -86,3 +86,13 @@ data class LyricData(
     val sourceName: String = "",
     val rawLrc: String? = null
 )
+
+/**
+ * 通知栏实时嗅探提取到的歌词信息
+ */
+data class NotificationLyric(
+    val text: String,
+    val packageName: String,
+    val timestamp: Long = System.currentTimeMillis()
+)
+

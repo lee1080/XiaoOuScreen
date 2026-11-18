@@ -37,6 +37,7 @@ import com.carlyrics.display.LyricsNormalizedContainerView
 import com.carlyrics.lyrics.LyricsApiManager
 import com.carlyrics.model.CurrentTrack
 import com.carlyrics.model.LyricLine
+import com.carlyrics.model.NotificationLyric
 import com.carlyrics.recognition.MusicRecognitionEngine
 import com.carlyrics.util.PrefsManager
 import kotlinx.coroutines.CancellationException
@@ -486,6 +487,28 @@ class CarSubscreenActivity : AppCompatActivity(),
                 onTrackStateChanged(track)
             }
         }
+        lifecycleScope.launch {
+            CarLyricsApplication.recognitionEngine.liveNotificationLyric.collectLatest { notifLyric ->
+                onNotificationLyricChanged(notifLyric)
+            }
+        }
+    }
+
+    private fun onNotificationLyricChanged(notifLyric: NotificationLyric?) {
+        if (notifLyric == null || notifLyric.text.isBlank()) return
+        if (!isMusicPlaying) return
+
+        // 核心兜底策略：如果当前没有完整的在线词轨（例如网络未连接、或只有占位提示、或在线词尚未返回），
+        // 立即使用通知栏实时动态嗅探出的单行歌词进行平滑渲染，消灭等待期与空白！
+        val hasFullLyrics = currentLyricLines.size > 2 && currentLyricLines.any { it.timestamp in 1L until 86_400_000L }
+        if (!hasFullLyrics) {
+            val singleLine = listOf(
+                LyricLine(timestamp = 0L, text = notifLyric.text),
+                LyricLine(timestamp = 86_400_000L, text = "")
+            )
+            currentLyricLines = singleLine
+            lyricsContainerView.setLyrics(singleLine)
+        }
     }
 
     private fun onTrackStateChanged(track: CurrentTrack?) {
@@ -524,7 +547,10 @@ class CarSubscreenActivity : AppCompatActivity(),
                 // 音乐恢复播放但界面不在前台，登顶接管
                 bringActivityToFront()
             }
-            if (PrefsManager.isStandaloneLyricsEnabled()) {
+            val hasRealLyrics = currentLyricLines.isNotEmpty() && currentLyricLines.none { it.text == "暂无未匹配到歌词" }
+            if (PrefsManager.isShowDefaultClockWhenNoLyrics() && !hasRealLyrics) {
+                switchToWeatherPage(smooth = false)
+            } else if (PrefsManager.isStandaloneLyricsEnabled()) {
                 switchToLyricsPage(smooth = true)
             } else {
                 switchToWeatherPage(smooth = false)
@@ -583,7 +609,13 @@ class CarSubscreenActivity : AppCompatActivity(),
                     currentTrack!!.nativeLyrics!!
                 } else {
                     val lyricResult = try {
-                        lyricsApi.fetchLyrics(title, artist)
+                        lyricsApi.fetchLyrics(
+                            title = title,
+                            artist = artist,
+                            duration = currentTrack?.duration ?: 0L,
+                            mediaId = currentTrack?.mediaId,
+                            packageName = currentTrack?.packageName ?: ""
+                        )
                     } catch (ce: CancellationException) {
                         throw ce
                     } catch (_: Exception) { null }
@@ -617,6 +649,12 @@ class CarSubscreenActivity : AppCompatActivity(),
                         lyricsContainerView.setLyrics(lines)
                         if (isMusicPlaying) {
                             setTopMusicTrackInfo(title, artist, isPlaying = true)
+                        }
+                        val isLyricsMatched = lines.isNotEmpty() && lines.none { it.text == "暂无未匹配到歌词" }
+                        if (!isLyricsMatched && PrefsManager.isShowDefaultClockWhenNoLyrics()) {
+                            switchToWeatherPage(smooth = true)
+                        } else if (PrefsManager.isStandaloneLyricsEnabled() && isMusicPlaying) {
+                            switchToLyricsPage(smooth = true)
                         }
                     }
                 }

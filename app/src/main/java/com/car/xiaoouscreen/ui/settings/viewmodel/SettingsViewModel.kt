@@ -64,11 +64,24 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     private var toastJob: Job? = null
 
+    private val outsideTempListener = object : com.car.xiaoouscreen.car.CarGearManager.OutsideTempListener {
+        override fun onOutsideTempChanged(tempCelsius: Float) {
+            _uiState.update { it.copy(weather = it.weather.copy(carOutsideTempC = tempCelsius)) }
+        }
+    }
+
     init {
         loadPersistedSettings()
         refreshSourcesAsync()
         refreshPermissionStatesAsync()
         refreshCacheSize()
+
+        try {
+            com.car.xiaoouscreen.car.CarGearManager.getInstance(context).apply {
+                init()
+                registerOutsideTempListener(outsideTempListener)
+            }
+        } catch (_: Exception) {}
 
         // 实时观察全局音乐识别音轨，自动回显右上角状态栏展示歌词的歌名
         viewModelScope.launch {
@@ -111,6 +124,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         val lyricFontSize = rawFontSize.roundToInt().coerceIn(50, 130)
 
         val timeOffset = try { PrefsManager.lyricsOffsetMs.toInt().coerceIn(-2000, 2000) } catch (_: Exception) { 0 }
+        val showDefaultClockWhenNoLyrics = try { PrefsManager.isShowDefaultClockWhenNoLyrics() } catch (_: Exception) { true }
         val longMarquee = true
 
         val skinTheme = try { PrefsManager.getSkinType().name } catch (_: Exception) { SkinType.DEFAULT.name }
@@ -157,6 +171,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         }
 
         val isProjecting = (WeatherOverlayService.instance?.isShowing() == true) || PrefsManager.getOverlayVisible()
+        val useCarOutsideTemp = PrefsManager.isUseCarOutsideTempEnabled()
+        val currentCarOutsideTemp = com.car.xiaoouscreen.car.CarGearManager.getInstance(context).getCurrentOutsideTempC()
 
         _uiState.update { current ->
             current.copy(
@@ -167,6 +183,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                     miniGearFloat = miniGearFloat
                 ),
                 weather = current.weather.copy(
+                    useCarOutsideTemp = useCarOutsideTemp,
+                    carOutsideTempC = currentCarOutsideTemp,
                     enableQWeather = qEnabled,
                     apiHost = qHost,
                     apiKey = qKey,
@@ -183,6 +201,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                     titleFontSize = titleFontSize,
                     lyricFontSize = lyricFontSize,
                     timeOffset = timeOffset,
+                    showDefaultClockWhenNoLyrics = showDefaultClockWhenNoLyrics,
                     customLyricUrl = customLyricUrl,
                     customCoverUrl = customCoverUrl,
                     customApiKey = customApiKey
@@ -452,6 +471,26 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     // ==================== 模块 3：天气服务设置 ====================
 
+    fun toggleUseCarOutsideTemp(enabled: Boolean) {
+        _uiState.update { it.copy(weather = it.weather.copy(useCarOutsideTemp = enabled)) }
+        try {
+            PrefsManager.setUseCarOutsideTempEnabled(enabled)
+            WeatherOverlayService.updateCarOutsideTempState(context, enabled)
+        } catch (_: Exception) {}
+        val currentCarTemp = _uiState.value.weather.carOutsideTempC
+        showToast(
+            if (enabled) {
+                if (currentCarTemp != null) {
+                    "已开启实车车外温度优先 (当前 ${String.format(java.util.Locale.US, "%.1f", currentCarTemp).removeSuffix(".0")}°C)"
+                } else {
+                    "已开启实车车外温度优先 · 收到车辆传感器信号后自动同步"
+                }
+            } else {
+                "已关闭实车车外温度 · 恢复使用在线气象站温度"
+            }
+        )
+    }
+
     fun toggleEnableQWeather(enabled: Boolean) {
         qWeatherConfig.isEnabled = enabled
         val isConn = enabled && qWeatherConfig.apiKey.isNotBlank()
@@ -465,19 +504,58 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         } catch (_: Exception) {}
     }
 
-    fun saveQWeatherHost(host: String) {
-        val trimmed = host.trim().ifBlank { "devapi.qweather.com" }
-        _uiState.update { it.copy(weather = it.weather.copy(apiHost = trimmed)) }
-        qWeatherConfig.apiHost = trimmed
-        showToast("已保存专属 API Host：$trimmed")
+    fun saveQWeatherHost(host: String, silent: Boolean = false) {
+        val cleaned = qWeatherConfig.cleanHost(host).ifBlank { "devapi.qweather.com" }
+        _uiState.update { it.copy(weather = it.weather.copy(apiHost = cleaned)) }
+        qWeatherConfig.apiHost = cleaned
+        if (!silent) {
+            showToast("已保存专属 API Host：$cleaned")
+        }
     }
 
-    fun saveQWeatherKey(key: String) {
+    fun saveQWeatherKey(key: String, silent: Boolean = false) {
         val trimmed = key.trim()
         val isConn = _uiState.value.weather.enableQWeather && trimmed.isNotBlank()
         _uiState.update { it.copy(weather = it.weather.copy(apiKey = trimmed, isQWeatherConnected = isConn)) }
         qWeatherConfig.apiKey = trimmed
-        showToast("已保存和风天气 API Key")
+        if (!silent) {
+            showToast("已保存和风天气 API Key")
+        }
+    }
+
+    /**
+     * 页面切换/失焦时静默持久化未点「应用」的有效草稿，彻底防误丢
+     */
+    fun persistQWeatherDraftSilently(host: String, key: String) {
+        val cleanedHost = qWeatherConfig.cleanHost(host)
+        val trimmedKey = key.trim()
+        val cur = _uiState.value.weather
+        var changed = false
+        val targetHost = if (cleanedHost.isNotBlank() && cleanedHost != cur.apiHost) {
+            changed = true
+            cleanedHost
+        } else {
+            cur.apiHost
+        }
+        val targetKey = if (trimmedKey.isNotBlank() && trimmedKey != cur.apiKey) {
+            changed = true
+            trimmedKey
+        } else {
+            cur.apiKey
+        }
+        if (changed) {
+            qWeatherConfig.saveConfig(targetKey, targetHost)
+            val isConn = cur.enableQWeather && targetKey.isNotBlank()
+            _uiState.update {
+                it.copy(
+                    weather = it.weather.copy(
+                        apiHost = targetHost,
+                        apiKey = targetKey,
+                        isQWeatherConnected = isConn
+                    )
+                )
+            }
+        }
     }
 
     /**
@@ -711,6 +789,11 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         } catch (_: Exception) {}
     }
 
+    fun toggleShowDefaultClockWhenNoLyrics(enabled: Boolean) {
+        PrefsManager.setShowDefaultClockWhenNoLyrics(enabled)
+        _uiState.update { it.copy(lyrics = it.lyrics.copy(showDefaultClockWhenNoLyrics = enabled)) }
+    }
+
     fun resetSlidersToCenter() {
         _uiState.update { current ->
             current.copy(
@@ -894,5 +977,12 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             } catch (_: Exception) {}
             refreshCacheSize()
         }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        try {
+            com.car.xiaoouscreen.car.CarGearManager.getInstance(context).unregisterOutsideTempListener(outsideTempListener)
+        } catch (_: Exception) {}
     }
 }

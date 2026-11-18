@@ -191,8 +191,26 @@ class KuGouNativeClient(
         }
     }
 
+    private fun isKuGouInstalled(): Boolean {
+        return try {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                context.packageManager.getPackageInfo(KUGOU_PACKAGE, android.content.pm.PackageManager.PackageInfoFlags.of(0))
+            } else {
+                @Suppress("DEPRECATION")
+                context.packageManager.getPackageInfo(KUGOU_PACKAGE, 0)
+            }
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     private fun connectService() {
         if (isBound && remoteBinder?.isBinderAlive == true) return
+        if (!isKuGouInstalled()) {
+            AppLogger.d(TAG, "宿主未安装原车酷狗($KUGOU_PACKAGE)，跳过常驻绑定轮询")
+            return
+        }
         try {
             val intent = Intent().apply {
                 component = ComponentName(KUGOU_PACKAGE, KUGOU_SERVICE_CLASS)
@@ -200,11 +218,11 @@ class KuGouNativeClient(
             val ok = context.bindService(intent, connection, Context.BIND_AUTO_CREATE)
             AppLogger.d(TAG, "发起绑定原车酷狗服务结果: $ok")
             if (!ok) {
-                mainHandler.postDelayed(reconnectRunnable, 5000L)
+                mainHandler.postDelayed(reconnectRunnable, 10000L)
             }
         } catch (e: Exception) {
             AppLogger.e(TAG, "绑定原车酷狗服务异常: ${e.message}", e)
-            mainHandler.postDelayed(reconnectRunnable, 5000L)
+            mainHandler.postDelayed(reconnectRunnable, 10000L)
         }
     }
 

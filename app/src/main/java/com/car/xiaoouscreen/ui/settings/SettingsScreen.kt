@@ -723,9 +723,11 @@ private fun DetailPanel(
                             )
                             MenuItemId.WEATHER_SERVICE -> WeatherPage(
                                 state = state.weather,
+                                onToggleUseCarOutsideTemp = { viewModel.toggleUseCarOutsideTemp(it) },
                                 onToggleEnableQWeather = { viewModel.toggleEnableQWeather(it) },
                                 onSaveHost = { viewModel.saveQWeatherHost(it) },
                                 onSaveKey = { viewModel.saveQWeatherKey(it) },
+                                onSilentPersistDraft = { host, key -> viewModel.persistQWeatherDraftSilently(host, key) },
                                 onTestConnection = { viewModel.testQWeatherConnection() },
                                 onClearCredentials = { viewModel.clearQWeatherCredentials() },
                                 onRefreshWeather = { viewModel.refreshWeatherNow() },
@@ -737,6 +739,7 @@ private fun DetailPanel(
                                 onToggleSourceEnabled = { viewModel.toggleSourceEnabled(it) },
                                 onReorderSources = { viewModel.reorderSources(it) },
                                 onOpenSourceManagerDialog = { viewModel.showSourceManagerDialog(true) },
+                                onToggleShowDefaultClockWhenNoLyrics = { viewModel.toggleShowDefaultClockWhenNoLyrics(it) },
                                 onTimeOffsetChange = { viewModel.setTimeOffset(it) },
                                 onSaveCustomLyricUrl = { viewModel.saveCustomLyricUrl(it) },
                                 onSaveCustomCoverUrl = { viewModel.saveCustomCoverUrl(it) },

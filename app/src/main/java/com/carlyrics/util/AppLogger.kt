@@ -133,6 +133,10 @@ object AppLogger {
         } catch (_: Exception) {}
     }
 
+    fun v(tag: String, msg: String) {
+        Log.v(tag, msg)
+    }
+
     fun d(tag: String, msg: String) {
         Log.d(tag, msg)
         if (PrefsManager.isLogEnabled()) {

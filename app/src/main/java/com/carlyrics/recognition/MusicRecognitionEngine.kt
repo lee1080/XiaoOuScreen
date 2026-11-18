@@ -20,6 +20,7 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import com.carlyrics.model.CurrentTrack
 import com.carlyrics.model.MusicSource
+import com.carlyrics.model.NotificationLyric
 import com.carlyrics.util.AppLogger
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -95,6 +96,10 @@ class MusicRecognitionEngine(private val context: Context) {
 
     private val _currentTrack = MutableStateFlow<CurrentTrack?>(null)
     val currentTrack: StateFlow<CurrentTrack?> = _currentTrack
+
+    /** 通知栏实时反射嗅探提取到的实时歌词 */
+    private val _liveNotificationLyric = MutableStateFlow<NotificationLyric?>(null)
+    val liveNotificationLyric: StateFlow<NotificationLyric?> = _liveNotificationLyric
 
     /** 原车酷狗音乐专属 AIDL 客户端 (优先读取原车/U盘歌词与封面，无权限门槛) */
     val kuGouClient = KuGouNativeClient(context, object : KuGouNativeClient.KuGouListener {
@@ -242,12 +247,30 @@ class MusicRecognitionEngine(private val context: Context) {
             }
         }
 
+        val isNewTrack = (current?.title != candidate.title || current?.artist != candidate.artist)
+        if (isNewTrack) {
+            _liveNotificationLyric.value = null
+        }
+
+        val isSourceChanged = (current?.source != candidate.source || current?.packageName != candidate.packageName)
+        val isStateChanged = (current?.isPlaying != candidate.isPlaying)
+        val isSeekJump = current != null && kotlin.math.abs(candidate.position - current.position) > 3000L
+
+        // 核心优化：仅在首次注入、切歌、音源通道切换、在播状态改变或手动拖动进度(Seek)时，才判定为真正的“仲裁与状态变更事件”
+        val isRealArbitration = (current == null || isNewTrack || isSourceChanged || isStateChanged || isSeekJump)
+
         _currentTrack.value = candidate
         if (candidate.source == MusicSource.BLUETOOTH) {
             lastBluetoothTrack = candidate
         }
         lastDetectionSource = if (candidate.isPlaying) "$reason-Active" else "$reason-Paused"
-        AppLogger.d(TAG, "[$reason] 音源仲裁生效: title=${candidate.title}, artist=${candidate.artist}, isPlaying=${candidate.isPlaying}, pos=${candidate.position}, dur=${candidate.duration}, src=${candidate.source}")
+
+        if (isRealArbitration) {
+            AppLogger.i(TAG, "[$reason] 🎵 音源仲裁生效: title=${candidate.title}, artist=${candidate.artist}, isPlaying=${candidate.isPlaying}, pos=${candidate.position}, dur=${candidate.duration}, src=${candidate.source}, pkg=${candidate.packageName}")
+        } else {
+            // 平稳在播期间常规的秒级时间戳对齐，仅记录 Verbose Logcat，彻底消灭控制台与磁盘日志的高频刷屏
+            AppLogger.v(TAG, "[$reason] 进度对齐: pos=${candidate.position}/${candidate.duration}")
+        }
     }
 
     /**
@@ -843,6 +866,18 @@ class MusicRecognitionEngine(private val context: Context) {
         val album = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM) ?: ""
         val duration = metadata.getLong(MediaMetadata.METADATA_KEY_DURATION)
         val mediaId = metadata.getString(MediaMetadata.METADATA_KEY_MEDIA_ID) ?: ""
+        val pkg = try { controller.packageName } catch (_: Exception) { "" }
+        val wholeLyrics = metadata.getString("android.honor.media.metadata.LYRICS_WHOLE")
+            ?: metadata.getString("hicar.media.metadata.LYRICS")
+            ?: metadata.getString("android.media.metadata.LYRICS")
+            ?: metadata.getString("android.media.metadata.EXTRA_LYRICS")
+        val nativeLyrics = if (!wholeLyrics.isNullOrBlank()) {
+            val parsed = com.carlyrics.lyrics.LyricsApiManager.parseLrcText(wholeLyrics)
+            if (parsed.isNotEmpty()) {
+                Log.i(TAG, "从播放器($pkg) 成功捕获原生透传整首歌词! 行数: ${parsed.size}")
+                parsed
+            } else null
+        } else null
         val rawPos = state?.position?.takeIf { it != PlaybackState.PLAYBACK_POSITION_UNKNOWN } ?: 0L
         val current = _currentTrack.value
         val position = if (rawPos > 0L) {
@@ -853,7 +888,6 @@ class MusicRecognitionEngine(private val context: Context) {
             rawPos.coerceAtLeast(0L)
         }
 
-        val pkg = try { controller.packageName } catch (_: Exception) { "" }
         val isBt = pkg.contains("bluetooth")
         val isBtExplicitPaused = isBt && (state?.state == PlaybackState.STATE_PAUSED || state?.state == 3)
         val isPlaying = if (isBt) {
@@ -880,7 +914,8 @@ class MusicRecognitionEngine(private val context: Context) {
             source = source,
             packageName = pkg,
             isPlaying = resolvedPlaying,
-            mediaId = mediaId
+            mediaId = mediaId,
+            nativeLyrics = nativeLyrics
         )
         if (isBt) {
             lastBluetoothTrack = track
@@ -900,6 +935,17 @@ class MusicRecognitionEngine(private val context: Context) {
             val duration = metadata.getLong(MediaMetadata.METADATA_KEY_DURATION)
             val mediaId = metadata.getString(MediaMetadata.METADATA_KEY_MEDIA_ID) ?: ""
             val pkg = try { controller.packageName } catch (_: Exception) { "unknown" }
+            val wholeLyrics = metadata.getString("android.honor.media.metadata.LYRICS_WHOLE")
+                ?: metadata.getString("hicar.media.metadata.LYRICS")
+                ?: metadata.getString("android.media.metadata.LYRICS")
+                ?: metadata.getString("android.media.metadata.EXTRA_LYRICS")
+            val nativeLyrics = if (!wholeLyrics.isNullOrBlank()) {
+                val parsed = com.carlyrics.lyrics.LyricsApiManager.parseLrcText(wholeLyrics)
+                if (parsed.isNotEmpty()) {
+                    Log.i(TAG, "从播放器($pkg) 成功捕获原生透传整首歌词! 行数: ${parsed.size}")
+                    parsed
+                } else null
+            } else null
             val state = controller.playbackState
             val isBt = pkg.contains("bluetooth")
             val isBtExplicitPaused = isBt && (state?.state == PlaybackState.STATE_PAUSED || state?.state == 3)
@@ -938,7 +984,8 @@ class MusicRecognitionEngine(private val context: Context) {
                 source = source,
                 packageName = pkg,
                 isPlaying = resolvedPlaying,
-                mediaId = mediaId
+                mediaId = mediaId,
+                nativeLyrics = nativeLyrics
             )
             val appName = getAppDisplayName(pkg)
             updateCurrentTrack(track, "MediaSession($appName)")
@@ -1087,10 +1134,36 @@ class MusicRecognitionEngine(private val context: Context) {
 
     fun processNotification(sbn: StatusBarNotification) {
         try {
+            // 1. 核心前置：执行 RemoteViews 动态反射实时嗅探歌词 (无论是否已有活跃 MediaSession，通知栏歌词始终持续嗅探)
+            sniffAndDispatchNotificationLyrics(sbn)
+
+            // 2. 音轨元数据识别与仲裁
             processNotificationInternal(sbn)
         } catch (e: Exception) {
             Log.w(TAG, "processNotification error: ${e.message}", e)
         }
+    }
+
+    private fun sniffAndDispatchNotificationLyrics(sbn: StatusBarNotification) {
+        val notifLyric = NotificationLyricsSniffer.extractLyrics(context, sbn) ?: return
+        _liveNotificationLyric.value = notifLyric
+
+        // 对外发送双兼容歌词广播 (方便其它桌面小组件或服务独立接收)
+        try {
+            val intent = Intent("com.carlyrics.ACTION_LYRIC_UPDATE").apply {
+                putExtra("extra_lyric_text", notifLyric.text)
+                putExtra("extra_source_package", notifLyric.packageName)
+                putExtra("extra_timestamp", notifLyric.timestamp)
+            }
+            context.sendBroadcast(intent)
+
+            val changanIntent = Intent("com.changan.launcher.ACTION_LYRIC_UPDATE").apply {
+                putExtra("extra_lyric_text", notifLyric.text)
+                putExtra("extra_source_package", notifLyric.packageName)
+                putExtra("extra_timestamp", notifLyric.timestamp)
+            }
+            context.sendBroadcast(changanIntent)
+        } catch (_: Exception) {}
     }
 
     private fun processNotificationInternal(sbn: StatusBarNotification) {
@@ -1458,9 +1531,9 @@ class MusicRecognitionEngine(private val context: Context) {
 
     private fun scoreController(controller: MediaController): Long {
         var score = 0L
+        val pkg = try { controller.packageName } catch (_: Exception) { "" }
         val state = try { controller.playbackState } catch (_: Exception) { null }
         val metadata = try { controller.metadata } catch (_: Exception) { null }
-        val pkg = try { controller.packageName } catch (_: Exception) { "" }
         val isBt = pkg.contains("bluetooth")
         val stateCode = state?.state ?: PlaybackState.STATE_NONE
         val isBtExplicitPaused = isBt && (stateCode == PlaybackState.STATE_PAUSED || stateCode == 3)

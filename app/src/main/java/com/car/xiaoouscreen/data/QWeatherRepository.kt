@@ -3,6 +3,7 @@ package com.car.xiaoouscreen.data
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
+import com.carlyrics.util.AppLogger
 import com.carlyrics.util.PrivacyUtil
 import com.google.gson.Gson
 import kotlinx.coroutines.Dispatchers
@@ -146,16 +147,17 @@ class QWeatherRepository(private val context: Context) {
 
     /**
      * 获取地面国家站实况 (温度、体感温、风向风级、天气现象)
+     * 核心规范：仅在真实在线返回 HTTP 200 时返回 Result.success；
+     * 断网/超时/错误码严格返回 Result.failure，绝不伪装缓存为成功，杜绝毒化冷却锁导致上车后 15 分钟不更新！
      */
     suspend fun getWeatherNow(lat: Double, lon: Double): Result<QWeatherNowDto> =
         withContext(Dispatchers.IO) {
             if (!configManager.isConfigured() || isCircuitBroken) {
-                lastCachedNow?.let { return@withContext Result.success(it) }
                 return@withContext Result.failure(IllegalStateException("QWeather not configured or circuit broken"))
             }
 
             val loc = String.format(Locale.US, "%.2f,%.2f", lon, lat)
-            Log.d(TAG, "📡 [QWeather API] 实际请求实况数据: BaseUrl=${configManager.getBaseUrl()}, Location=${PrivacyUtil.maskCoordinate(lon)},${PrivacyUtil.maskCoordinate(lat)}")
+            AppLogger.d(TAG, "📡 [QWeather API] 请求实况数据: Host=${configManager.apiHost}, Location=${PrivacyUtil.maskCoordinate(lon)},${PrivacyUtil.maskCoordinate(lat)}")
             try {
                 val api = createApi()
                 val response = api.getWeatherNow(location = loc, key = configManager.apiKey)
@@ -167,30 +169,31 @@ class QWeatherRepository(private val context: Context) {
                     Result.success(now)
                 } else {
                     checkErrorCode(response.code)
-                    lastCachedNow?.let { Result.success(it) }
-                        ?: Result.failure(Exception("QWeather now error: ${response.code}"))
+                    AppLogger.w(TAG, "❌ [QWeather API] 实况接口异常返回: code=${response.code}")
+                    Result.failure(Exception("QWeather now error: ${response.code}"))
                 }
             } catch (e: HttpException) {
                 checkHttpException(e)
-                lastCachedNow?.let { Result.success(it) } ?: Result.failure(e)
+                AppLogger.w(TAG, "❌ [QWeather API] 实况 HTTP 异常: ${e.code()} ${e.message()}")
+                Result.failure(e)
             } catch (e: Exception) {
-                Log.w(TAG, "QWeather now request failed, using cache if available: ${e.message}")
-                lastCachedNow?.let { Result.success(it) } ?: Result.failure(e)
+                AppLogger.w(TAG, "⚠️ [QWeather API] 实况网络请求失败: ${e.message}")
+                Result.failure(e)
             }
         }
 
     /**
      * 获取未来 2 小时多普勒雷达 1km 分钟降水外推
+     * 核心规范：断网/超时严格返回 Result.failure，绝不伪装缓存为成功导致毒化 8 分钟冷却锁。
      */
     suspend fun getMinutelyPrecipitation(lat: Double, lon: Double): Result<QWeatherMinutelyResponse> =
         withContext(Dispatchers.IO) {
             if (!configManager.isConfigured() || isCircuitBroken) {
-                lastCachedMinutely?.let { return@withContext Result.success(it) }
                 return@withContext Result.failure(IllegalStateException("QWeather not configured or circuit broken"))
             }
 
             val loc = String.format(Locale.US, "%.2f,%.2f", lon, lat)
-            Log.d(TAG, "📡 [QWeather API] 实际请求分钟降水数据: BaseUrl=${configManager.getBaseUrl()}, Location=${PrivacyUtil.maskCoordinate(lon)},${PrivacyUtil.maskCoordinate(lat)}")
+            AppLogger.d(TAG, "📡 [QWeather API] 请求分钟降水数据: Location=${PrivacyUtil.maskCoordinate(lon)},${PrivacyUtil.maskCoordinate(lat)}")
             try {
                 val api = createApi()
                 val response = api.getMinutely5m(location = loc, key = configManager.apiKey)
@@ -201,15 +204,16 @@ class QWeatherRepository(private val context: Context) {
                     Result.success(response)
                 } else {
                     checkErrorCode(response.code)
-                    lastCachedMinutely?.let { Result.success(it) }
-                        ?: Result.failure(Exception("QWeather minutely error: ${response.code}"))
+                    AppLogger.w(TAG, "❌ [QWeather API] 分钟降水异常返回: code=${response.code}")
+                    Result.failure(Exception("QWeather minutely error: ${response.code}"))
                 }
             } catch (e: HttpException) {
                 checkHttpException(e)
-                lastCachedMinutely?.let { Result.success(it) } ?: Result.failure(e)
+                AppLogger.w(TAG, "❌ [QWeather API] 分钟降水 HTTP 异常: ${e.code()} ${e.message()}")
+                Result.failure(e)
             } catch (e: Exception) {
-                Log.w(TAG, "QWeather minutely failed: ${e.message}")
-                lastCachedMinutely?.let { Result.success(it) } ?: Result.failure(e)
+                AppLogger.w(TAG, "⚠️ [QWeather API] 分钟降水请求失败: ${e.message}")
+                Result.failure(e)
             }
         }
 

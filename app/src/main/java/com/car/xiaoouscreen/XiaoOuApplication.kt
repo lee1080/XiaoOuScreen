@@ -38,12 +38,31 @@ class XiaoOuApplication : Application() {
         super.onCreate()
         instance = this
 
-        // 0. 初始化车规级全局未捕获异常处理器
+        // 0. 初始化基础轻量配置与异步日志（同步触发和风天气旧版 CE->DE 无损迁移与本地备份自愈）
+        PrefsManager.init(this)
+        try {
+            com.car.xiaoouscreen.data.QWeatherConfigManager(this)
+        } catch (_: Exception) {}
+        AppLogger.init(this)
+
+        // 0.1 初始化车规级全局未捕获异常处理器
         com.carlyrics.util.CrashHandler.init(this)
 
-        // 1. 初始化基础轻量配置与异步日志
-        PrefsManager.init(this)
-        AppLogger.init(this)
+        // 0.2 配置 Glide 全局显存池上限 (车规级节流：限制 12MB BitmapPool 与 12MB LruCache，优先 RGB_565 解码)
+        try {
+            if (!com.bumptech.glide.Glide.isInitialized()) {
+                val glideBuilder = com.bumptech.glide.GlideBuilder()
+                    .setMemoryCache(com.bumptech.glide.load.engine.cache.LruResourceCache(12L * 1024 * 1024))
+                    .setBitmapPool(com.bumptech.glide.load.engine.bitmap_recycle.LruBitmapPool(12L * 1024 * 1024))
+                    .setDefaultRequestOptions(
+                        com.bumptech.glide.request.RequestOptions().format(com.bumptech.glide.load.DecodeFormat.PREFER_RGB_565)
+                    )
+                com.bumptech.glide.Glide.init(this, glideBuilder)
+                AppLogger.i("XiaoOuApp", "已定制注入 Glide 车规级低内存策略 (RGB_565 + 12MB Pool)")
+            }
+        } catch (e: Exception) {
+            AppLogger.w("XiaoOuApp", "配置 Glide 内存上限异常: ${e.message}")
+        }
 
         // 2. 初始化全局音乐识别引擎并注入单例
         val engine = MusicRecognitionEngine(this)

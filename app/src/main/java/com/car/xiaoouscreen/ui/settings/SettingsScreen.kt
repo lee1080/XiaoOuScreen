@@ -33,6 +33,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CloudQueue
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.MusicNote
@@ -67,11 +68,13 @@ import com.car.xiaoouscreen.ui.settings.dialogs.ContactAuthorDialog
 import com.car.xiaoouscreen.ui.settings.dialogs.DebugLogDialog
 import com.car.xiaoouscreen.ui.settings.dialogs.ImportSourceDialog
 import com.car.xiaoouscreen.ui.settings.dialogs.SourceManagerDialog
+import com.car.xiaoouscreen.ui.settings.dialogs.UpdateDialog
 import com.car.xiaoouscreen.ui.settings.model.MenuItemId
 import com.car.xiaoouscreen.ui.settings.model.SettingsState
 import com.car.xiaoouscreen.ui.settings.pages.FullscreenLyricsPage
 import com.car.xiaoouscreen.ui.settings.pages.LyricsSettingsPage
 import com.car.xiaoouscreen.ui.settings.pages.ServicePage
+import com.car.xiaoouscreen.ui.settings.pages.SmartScenePage
 import com.car.xiaoouscreen.ui.settings.pages.WeatherPage
 import com.car.xiaoouscreen.ui.settings.pages.WelcomePage
 import com.car.xiaoouscreen.ui.settings.pages.XiaoOuPage
@@ -237,13 +240,17 @@ private fun StatusBar(
     currentMusicTitle: String?,
     modifier: Modifier = Modifier
 ) {
-    // 实时车机时钟 (局限在 StatusBar 内部重组，不触发全局重组)
+    // 实时车机时钟 (仅每分钟触发一次对齐刷新，零每秒 Date/SimpleDateFormat 分配)
     var currentTime by remember { mutableStateOf("11:28") }
     LaunchedEffect(Unit) {
         val sdf = SimpleDateFormat("HH:mm", Locale.getDefault())
+        val reusableDate = Date()
         while (true) {
-            currentTime = sdf.format(Date())
-            delay(1000)
+            val nowMs = System.currentTimeMillis()
+            reusableDate.time = nowMs
+            currentTime = sdf.format(reusableDate)
+            val delayToNextMinute = (60_000L - (nowMs % 60_000L)).coerceIn(200L, 60_000L)
+            delay(delayToNextMinute)
         }
     }
 
@@ -520,7 +527,7 @@ private fun Sidebar(
 }
 
 /**
- * 菜单项组件 (第 5 项全屏歌词挂载独立拟物开关)
+ * 菜单项组件 (全屏歌词项挂载独立拟物开关)
  */
 @Composable
 private fun SidebarMenuItem(
@@ -536,6 +543,7 @@ private fun SidebarMenuItem(
         MenuItemId.WEATHER_SERVICE -> Icons.Default.CloudQueue
         MenuItemId.LYRICS_SETTINGS -> Icons.AutoMirrored.Filled.QueueMusic
         MenuItemId.FULLSCREEN_LYRICS -> Icons.Default.MusicNote
+        MenuItemId.SMART_SCENE -> Icons.Default.AutoAwesome
         MenuItemId.SERVICE_SETTINGS -> Icons.Default.Settings
     }
 
@@ -597,17 +605,19 @@ private fun SidebarMenuItem(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    Text(
-                        text = item.subtitle,
-                        fontSize = 9.sp,
-                        color = NeuColors.TextMuted,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    if (item.subtitle.isNotBlank()) {
+                        Text(
+                            text = item.subtitle,
+                            fontSize = 9.sp,
+                            color = NeuColors.TextMuted,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
             }
 
-            // 第 5 项全屏歌词直接挂载快捷拟物开关 (紧凑模式，高度完美统一)
+            // 挂载快捷拟物开关 (仅全屏歌词项)
             if (item.hasQuickSwitch) {
                 NeuSwitch(
                     checked = masterLyricsEnabled,
@@ -654,11 +664,13 @@ private fun DetailPanel(
                         color = NeuColors.TextPrimary
                     )
 
-                    Text(
-                        text = "—  ${selectedCategory.subtitle}",
-                        fontSize = 12.sp,
-                        color = NeuColors.TextSecondary
-                    )
+                    if (selectedCategory.subtitle.isNotBlank()) {
+                        Text(
+                            text = "—  ${selectedCategory.subtitle}",
+                            fontSize = 12.sp,
+                            color = NeuColors.TextSecondary
+                        )
+                    }
                 }
 
                 Box(
@@ -719,6 +731,10 @@ private fun DetailPanel(
                                 onToggleShowAvatar = { viewModel.toggleShowAvatar(it) },
                                 onToggleLiquidGlass = { viewModel.toggleLiquidGlassClock(it) },
                                 onToggleMiniGear = { viewModel.toggleMiniGearFloat(it) },
+                                onSelectMiniGearPosition = { viewModel.setMiniGearPosition(it) },
+                                onToggleMiniGearRealtimeColorCalc = { viewModel.toggleMiniGearRealtimeColorCalc(it) },
+                                onCommitSlotA = { viewModel.updateSlotA(it) },
+                                onCommitSlotC = { viewModel.updateSlotC(it) },
                                 onShowInfo = { viewModel.showAnnotation(it) }
                             )
                             MenuItemId.WEATHER_SERVICE -> WeatherPage(
@@ -757,6 +773,16 @@ private fun DetailPanel(
                                 onResetSlidersToCenter = { viewModel.resetSlidersToCenter() },
                                 onShowInfo = { viewModel.showAnnotation(it) }
                             )
+                            MenuItemId.SMART_SCENE -> SmartScenePage(
+                                state = state.smartScene,
+                                onToggleAmbientSync = { viewModel.toggleAmbientSync(it) },
+                                onSelectColorMode = { viewModel.selectAmbientColorMode(it) },
+                                onToggleFollowCarBrightness = { viewModel.setAmbientFollowCarBrightness(it) },
+                                onCustomBrightnessChange = { viewModel.setAmbientCustomBrightness(it) },
+                                onToggleTurnSignalSync = { viewModel.toggleTurnSignalSync(it) },
+                                onToggleLaneChangeAssist = { viewModel.toggleLaneChangeAssist(it) },
+                                onShowInfo = { viewModel.showAnnotation(it) }
+                            )
                             MenuItemId.SERVICE_SETTINGS -> ServicePage(
                                 state = state.service,
                                 onToggleBootAutoStart = { viewModel.toggleBootAutoStart(it) },
@@ -764,6 +790,7 @@ private fun DetailPanel(
                                 onOpenDebugLogDialog = { viewModel.showDebugLogDialog(true) },
                                 onCleanCache = { viewModel.cleanCache() },
                                 onCacheLimitChange = { viewModel.setCacheLimitMB(it) },
+                                onCheckUpdate = { viewModel.checkUpdate(manual = true) },
                                 onShowInfo = { viewModel.showAnnotation(it) }
                             )
                         }
@@ -806,6 +833,15 @@ private fun DetailPanel(
             // 联系作者弹窗
             if (showContactAuthorDialog) {
                 ContactAuthorDialog(onDismiss = { showContactAuthorDialog = false })
+            }
+
+            // 软件自动更新弹窗
+            if (state.update.showUpdateDialog) {
+                UpdateDialog(
+                    state = state.update,
+                    onStartDownload = { viewModel.startDownloadUpdate() },
+                    onDismiss = { viewModel.dismissUpdateDialog() }
+                )
             }
         }
     }

@@ -46,6 +46,14 @@
         android:layout_gravity="center"
         android:visibility="visible" />
 
+    <!-- 页面 6 (绝对置顶智能场景最高层级)：转向灯动态流光箭头 + 变道辅助盲区光幕 (全时覆盖于歌词/3D档位/HUD之上) -->
+    <com.car.xiaoouscreen.ui.CarSmartSceneOverlayView
+        android:id="@+id/smartSceneOverlayView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_gravity="center"
+        android:visibility="visible" />
+
     <!-- 自动消失的退出关闭按钮 -->
     <FrameLayout
         android:id="@+id/closeButtonContainer"

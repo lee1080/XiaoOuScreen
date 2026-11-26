@@ -130,7 +130,7 @@ fun WeatherPage(
                     }
 
                     Text(
-                        text = "点击立即重新请求天气接口，即时同步当前车辆位置与当前时间点的实况气象与降水预警",
+                        text = "同步当前车辆位置的实况气象与降水预警",
                         fontSize = 11.sp,
                         color = NeuColors.TextSecondary
                     )
@@ -271,7 +271,7 @@ fun WeatherPage(
                                 .padding(horizontal = 8.dp, vertical = 2.dp)
                         ) {
                             Text(
-                                text = if (state.enableQWeather) "已开启 · 使用和风专属配置" else "已关闭 · 自动回落到 Open-Meteo",
+                                text = if (state.enableQWeather) "已开启" else "已关闭",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = if (state.enableQWeather) NeuColors.AccentBlue else NeuColors.TextSecondary
@@ -280,16 +280,16 @@ fun WeatherPage(
 
                         NeuInfoButton(
                             info = AnnotationInfo(
-                                title = "和风高精度天气与回落机制说明",
-                                content = "开启后使用下方填写的专属 API Host 与 API Key 请求和风天气分钟级降水与空气质量数据；关闭此开关时，系统将自动无缝回落到免费的 Open-Meteo 国际天气接口，无需任何密钥。",
-                                recommend = "说明：关闭时自动回落到 Open-Meteo"
+                                title = "和风高精度天气说明",
+                                content = "开启后使用填写的专属 API 凭据获取分钟级降水与空气质量；关闭时自动使用免费 Open-Meteo 气象源。",
+                                recommend = "关闭时自动使用 Open-Meteo"
                             ),
                             onShowInfo = onShowInfo
                         )
                     }
 
                     Text(
-                        text = "开启后展开并可编辑下方「和风天气配置」；关闭时自动回落到 Open-Meteo 气象源。",
+                        text = "开启使用和风高精度气象数据，关闭使用 Open-Meteo",
                         fontSize = 11.sp,
                         color = NeuColors.TextSecondary
                     )
@@ -324,7 +324,7 @@ fun WeatherPage(
                         )
                 )
                 Text(
-                    text = "└─ 和风天气配置（仅开启后展开 / 可编辑）",
+                    text = "和风天气配置",
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Bold,
                     color = NeuColors.TextPrimary
@@ -332,7 +332,7 @@ fun WeatherPage(
             }
 
             Text(
-                text = if (state.enableQWeather) "已展开 · 可编辑凭据" else "未开启 · 当前已回落至 Open-Meteo",
+                text = if (state.enableQWeather) "已开启" else "未开启 · 使用 Open-Meteo",
                 fontSize = 11.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = if (state.enableQWeather) NeuColors.AccentGreen else NeuColors.AccentAmber
@@ -377,13 +377,13 @@ fun WeatherPage(
                         }
                         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             Text(
-                                text = "当前处于 Open-Meteo 自动回落模式",
+                                text = "当前处于 Open-Meteo 气象源模式",
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = NeuColors.TextPrimary
                             )
                             Text(
-                                text = "和风天气配置已收起锁定。如需配置专属 API Host 与 API Key，请先开启上方「开启和风高精度天气」开关。",
+                                text = "开启上方开关可配置和风天气专属 API 凭据",
                                 fontSize = 11.sp,
                                 color = NeuColors.TextSecondary
                             )
@@ -391,7 +391,7 @@ fun WeatherPage(
                     }
 
                     NeuButton(
-                        text = "开启并展开配置",
+                        text = "开启和风配置",
                         onClick = { onToggleEnableQWeather(true) },
                         isPrimary = true
                     )

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 允许通过 FileProvider 暴露应用缓存目录中的安装包 -->
+    <external-cache-path name="external_apk_cache" path="apk_updates/" />
+    <cache-path name="internal_apk_cache" path="apk_updates/" />
+</paths>

@@ -448,7 +448,15 @@ class SkinMinimalNeon(context: Context) : LyricsSkin(context) {
         refreshInfoFontSize()
     }
 
-    override fun onDestroy() { spinAnimator?.cancel() }
+    override fun onPauseAnimations() { spinAnimator?.pause() }
+
+    override fun onResumeAnimations() { spinAnimator?.resume() }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        spinAnimator?.cancel()
+        spinAnimator = null
+    }
 
     private fun scrollToCenter(index: Int) {
         val view = lyLineViews.getOrNull(index) ?: return

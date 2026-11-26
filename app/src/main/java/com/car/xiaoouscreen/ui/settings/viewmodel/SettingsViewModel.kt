@@ -17,10 +17,14 @@ import com.car.xiaoouscreen.data.QWeatherConfigManager
 import com.car.xiaoouscreen.data.QWeatherRepository
 import com.car.xiaoouscreen.location.CarGpsManager
 import com.car.xiaoouscreen.service.WeatherOverlayService
+import com.car.xiaoouscreen.updater.AppUpdateManager
+import com.car.xiaoouscreen.updater.CheckResult
+import com.car.xiaoouscreen.updater.UpdateInfo
 import com.car.xiaoouscreen.ui.settings.model.AnnotationInfo
 import com.car.xiaoouscreen.ui.settings.model.LyricSourceItemState
 import com.car.xiaoouscreen.ui.settings.model.MenuItemId
 import com.car.xiaoouscreen.ui.settings.model.SettingsState
+import com.car.xiaoouscreen.ui.slot.XiaoOuSlotType
 import com.car.xiaoouscreen.util.NotificationPermissionHelper
 import com.carlyrics.CarLyricsApplication
 import com.carlyrics.lyrics.LyricsApiManager
@@ -58,6 +62,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val context: Context get() = getApplication()
     private val qWeatherConfig = QWeatherConfigManager(context)
     private val qWeatherRepo = QWeatherRepository(context)
+    private val updateManager by lazy { AppUpdateManager(context) }
 
     private val _uiState = MutableStateFlow(SettingsState())
     val uiState: StateFlow<SettingsState> = _uiState.asStateFlow()
@@ -96,11 +101,67 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                     } else {
                         null
                     }
-                    _uiState.update { it.copy(currentMusicTitle = displayTitle) }
+                    if (_uiState.value.currentMusicTitle != displayTitle) {
+                        _uiState.update { it.copy(currentMusicTitle = displayTitle) }
+                    }
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "collect currentTrack failed: ${e.message}")
             }
+        }
+
+        // 观察座舱氛围灯硬件连接状态与实时律动信息 (注：高频 25Hz currentLuminance 改由 SmartScenePage 局部直采，杜绝整屏重绘)
+        viewModelScope.launch {
+            try {
+                com.car.xiaoouscreen.car.AmbientLightManager.isConnected.collectLatest { connected ->
+                    _uiState.update { it.copy(smartScene = it.smartScene.copy(isServiceConnected = connected)) }
+                }
+            } catch (_: Exception) {}
+        }
+        viewModelScope.launch {
+            try {
+                com.car.xiaoouscreen.car.AmbientLightManager.currentColorIndex.collectLatest { color ->
+                    _uiState.update { it.copy(smartScene = it.smartScene.copy(currentColorIndex = color)) }
+                }
+            } catch (_: Exception) {}
+        }
+        viewModelScope.launch {
+            try {
+                com.car.xiaoouscreen.car.AmbientLightManager.nativeCarBrightness.collectLatest { nb ->
+                    _uiState.update {
+                        it.copy(
+                            smartScene = it.smartScene.copy(
+                                nativeCarBrightnessLevel = nb,
+                                effectiveBaseBrightnessPercent = com.car.xiaoouscreen.car.AmbientLightManager.effectiveBaseBrightnessPercent.value,
+                                effectiveScale = com.car.xiaoouscreen.car.AmbientLightManager.effectiveScale.value
+                            )
+                        )
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+        viewModelScope.launch {
+            try {
+                com.car.xiaoouscreen.car.AmbientLightManager.effectiveScale.collectLatest { scale ->
+                    _uiState.update {
+                        it.copy(
+                            smartScene = it.smartScene.copy(
+                                effectiveScale = scale,
+                                isNightMode = com.car.xiaoouscreen.car.AmbientLightManager.effectiveNightMode,
+                                effectiveBaseBrightnessPercent = com.car.xiaoouscreen.car.AmbientLightManager.effectiveBaseBrightnessPercent.value
+                            )
+                        )
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+
+        // 启动后后台静默检查一次更新 (延迟 3 秒，避免阻塞启动渲染)
+        viewModelScope.launch {
+            try {
+                delay(3000)
+                checkUpdate(manual = false)
+            } catch (_: Exception) {}
         }
     }
 
@@ -112,6 +173,14 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         val showAvatar = try { PrefsManager.isXiaoOuAvoidanceEnabled() } catch (_: Exception) { true }
         val liquidGlassClock = try { PrefsManager.isLiquidGlassClockEnabled() } catch (_: Exception) { true }
         val miniGearFloat = try { PrefsManager.isBottomLeftGearHudEnabled() } catch (_: Exception) { true }
+        val miniGearPosition = try { PrefsManager.getMiniGearPosition() } catch (_: Exception) { 0 }
+        val miniGearRealtimeColorCalc = try { PrefsManager.isMiniGearRealtimeColorEnabled() } catch (_: Exception) { false }
+        val slotA = try {
+            XiaoOuSlotType.fromId(PrefsManager.getXiaoOuSlotA(), XiaoOuSlotType.WEATHER)
+        } catch (_: Exception) { XiaoOuSlotType.WEATHER }
+        val slotC = try {
+            XiaoOuSlotType.fromId(PrefsManager.getXiaoOuSlotC(), XiaoOuSlotType.ALBUM_COVER)
+        } catch (_: Exception) { XiaoOuSlotType.ALBUM_COVER }
 
         val splitRatio = try { (PrefsManager.getSplitRatio() * 100f).roundToInt().coerceIn(15, 80) } catch (_: Exception) { 25 }
         val rawDpi = try { PrefsManager.getDpiScale() } catch (_: Exception) { 0.85f }
@@ -174,13 +243,25 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         val useCarOutsideTemp = PrefsManager.isUseCarOutsideTempEnabled()
         val currentCarOutsideTemp = com.car.xiaoouscreen.car.CarGearManager.getInstance(context).getCurrentOutsideTempC()
 
+        // 智能场景联动 · 氛围灯、转向灯与变道辅助
+        val ambientSyncMasterEnabled = try { PrefsManager.isAmbientLightSyncEnabled() } catch (_: Exception) { false }
+        val ambientColorFollowsCover = try { PrefsManager.isAmbientLightColorSyncEnabled() } catch (_: Exception) { true }
+        val ambientRandomColor = try { PrefsManager.isAmbientLightRandomColorEnabled() } catch (_: Exception) { false }
+        val ambientSensitivity = try { PrefsManager.getAmbientLightSensitivity().coerceIn(50, 150) } catch (_: Exception) { 100 }
+        val turnSignalSyncEnabled = try { PrefsManager.isTurnSignalSyncEnabled() } catch (_: Exception) { true }
+        val laneChangeAssistEnabled = try { PrefsManager.isLaneChangeAssistEnabled() } catch (_: Exception) { true }
+
         _uiState.update { current ->
             current.copy(
                 xiaoou = current.xiaoou.copy(
                     isProjecting = isProjecting,
                     showAvatar = showAvatar,
                     liquidGlassClock = liquidGlassClock,
-                    miniGearFloat = miniGearFloat
+                    miniGearFloat = miniGearFloat,
+                    miniGearPosition = miniGearPosition,
+                    miniGearRealtimeColorCalc = miniGearRealtimeColorCalc,
+                    slotA = slotA,
+                    slotC = slotC
                 ),
                 weather = current.weather.copy(
                     useCarOutsideTemp = useCarOutsideTemp,
@@ -205,6 +286,23 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                     customLyricUrl = customLyricUrl,
                     customCoverUrl = customCoverUrl,
                     customApiKey = customApiKey
+                ),
+                smartScene = current.smartScene.copy(
+                    ambientSyncMasterEnabled = ambientSyncMasterEnabled,
+                    colorFollowsCover = ambientColorFollowsCover,
+                    randomColorMode = ambientRandomColor,
+                    sensitivityPercent = ambientSensitivity,
+                    isServiceConnected = com.car.xiaoouscreen.car.AmbientLightManager.isConnected.value,
+                    currentLuminanceLevel = com.car.xiaoouscreen.car.AmbientLightManager.currentLuminance.value,
+                    currentColorIndex = com.car.xiaoouscreen.car.AmbientLightManager.currentColorIndex.value,
+                    followCarBrightness = com.car.xiaoouscreen.car.AmbientLightManager.followCarBrightness.value,
+                    nativeCarBrightnessLevel = com.car.xiaoouscreen.car.AmbientLightManager.nativeCarBrightness.value,
+                    customBrightnessPercent = com.car.xiaoouscreen.car.AmbientLightManager.customBrightnessPercent.value,
+                    effectiveBaseBrightnessPercent = com.car.xiaoouscreen.car.AmbientLightManager.effectiveBaseBrightnessPercent.value,
+                    isNightMode = com.car.xiaoouscreen.car.AmbientLightManager.effectiveNightMode,
+                    effectiveScale = com.car.xiaoouscreen.car.AmbientLightManager.effectiveScale.value,
+                    turnSignalSyncEnabled = turnSignalSyncEnabled,
+                    laneChangeAssistEnabled = laneChangeAssistEnabled
                 ),
                 sources = sourcesList,
                 service = current.service.copy(
@@ -445,8 +543,48 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         try {
             PrefsManager.setXiaoOuAvatarEnabled(enabled)
             WeatherOverlayService.updateXiaoOuAvatarState(context, enabled)
+
+            // 开关是否显示小欧形象开关后自动重新投屏(如果投屏状态是开启状态，如果投屏状态是关闭则保持关闭)
+            val isProjecting = _uiState.value.xiaoou.isProjecting || PrefsManager.getOverlayVisible() || WeatherOverlayService.instance?.isShowing() == true
+            if (isProjecting) {
+                val action = if (enabled) WeatherOverlayService.ACTION_SHOW_FITNESS else WeatherOverlayService.ACTION_SHOW_TOP
+                WeatherOverlayService.send(context, action)
+                _uiState.update { it.copy(xiaoou = it.xiaoou.copy(isProjecting = true)) }
+            }
         } catch (_: Exception) {}
-        showToast("小欧形象已${if (enabled) "开启" else "关闭"}，需要重新投屏才能生效")
+        showToast(
+            if (enabled) "小欧形象已开启 · C 区域已锁定留给小欧形象"
+            else "小欧形象已关闭 · C 区域已解锁可自由滑动配置"
+        )
+    }
+
+    fun updateSlotA(slotType: XiaoOuSlotType) {
+        val current = _uiState.value.xiaoou
+        if (current.slotA == slotType) return
+        _uiState.update { it.copy(xiaoou = it.xiaoou.copy(slotA = slotType)) }
+        try {
+            PrefsManager.setXiaoOuSlotA(slotType.id)
+            WeatherOverlayService.updateSlotLayout(context, slotType.id, current.slotC.id)
+        } catch (e: Exception) {
+            Log.w(TAG, "updateSlotA failed: ${e.message}")
+        }
+        val isProj = current.isProjecting || WeatherOverlayService.instance?.isShowing() == true
+        showToast("A 区域已切换为「${slotType.title}」${if (isProj) " · 已同步小欧屏" else " · 开启投屏时生效"}")
+    }
+
+    fun updateSlotC(slotType: XiaoOuSlotType) {
+        val current = _uiState.value.xiaoou
+        if (current.showAvatar) return
+        if (current.slotC == slotType) return
+        _uiState.update { it.copy(xiaoou = it.xiaoou.copy(slotC = slotType)) }
+        try {
+            PrefsManager.setXiaoOuSlotC(slotType.id)
+            WeatherOverlayService.updateSlotLayout(context, current.slotA.id, slotType.id)
+        } catch (e: Exception) {
+            Log.w(TAG, "updateSlotC failed: ${e.message}")
+        }
+        val isProj = current.isProjecting || WeatherOverlayService.instance?.isShowing() == true
+        showToast("C 区域已切换为「${slotType.title}」${if (isProj) " · 已同步小欧屏" else " · 开启投屏时生效"}")
     }
 
     fun toggleLiquidGlassClock(enabled: Boolean) {
@@ -467,6 +605,27 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         } catch (_: Exception) {}
         val isProj = _uiState.value.xiaoou.isProjecting || WeatherOverlayService.instance?.isShowing() == true
         showToast("「微型档位悬浮」已${if (enabled) "开启" else "关闭"}${if (isProj) " · 已实时生效" else " · 开启投屏时生效"}")
+    }
+
+    fun setMiniGearPosition(position: Int) {
+        _uiState.update { it.copy(xiaoou = it.xiaoou.copy(miniGearPosition = position)) }
+        try {
+            PrefsManager.setMiniGearPosition(position)
+            WeatherOverlayService.updateMiniGearPosition(context, position)
+        } catch (_: Exception) {}
+        val pos = com.car.xiaoouscreen.ui.MiniGearPosition.fromId(position)
+        val isProj = _uiState.value.xiaoou.isProjecting || WeatherOverlayService.instance?.isShowing() == true
+        showToast("微型档位位置已切换至「${pos.title}」${if (isProj) " · 已实时生效" else ""}")
+    }
+
+    fun toggleMiniGearRealtimeColorCalc(enabled: Boolean) {
+        _uiState.update { it.copy(xiaoou = it.xiaoou.copy(miniGearRealtimeColorCalc = enabled)) }
+        try {
+            PrefsManager.setMiniGearRealtimeColorEnabled(enabled)
+            WeatherOverlayService.updateMiniGearRealtimeColor(context, enabled)
+        } catch (_: Exception) {}
+        val isProj = _uiState.value.xiaoou.isProjecting || WeatherOverlayService.instance?.isShowing() == true
+        showToast("「微型档位实时背景自适应」已${if (enabled) "开启" else "关闭"}${if (isProj) " · 已实时生效" else ""}")
     }
 
     // ==================== 模块 3：天气服务设置 ====================
@@ -662,7 +821,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                 WeatherOverlayService.send(context, WeatherOverlayService.ACTION_RESET_LIVE)
             } catch (_: Exception) {}
 
-            val gps = CarGpsManager(context)
+            val gps = CarGpsManager.getInstance(context)
             val lat = gps.currentLatitude
             val lon = gps.currentLongitude
 
@@ -967,6 +1126,113 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    // ----------------------------------------------------
+    // 智能场景联动 · 座舱氛围灯音乐律动
+    // ----------------------------------------------------
+
+    fun toggleAmbientSync(enabled: Boolean) {
+        PrefsManager.setAmbientLightSyncEnabled(enabled)
+        try {
+            com.car.xiaoouscreen.XiaoOuApplication.rhythmEngine.masterEnabled = enabled
+        } catch (e: Exception) {
+            AppLogger.w("SettingsViewModel", "rhythmEngine masterEnabled update failed: ${e.message}")
+        }
+        _uiState.update { it.copy(smartScene = it.smartScene.copy(ambientSyncMasterEnabled = enabled)) }
+        showToast(if (enabled) "已开启座舱氛围灯音乐同步" else "已关闭氛围灯同步")
+    }
+
+    fun selectAmbientColorMode(isCoverMode: Boolean) {
+        val coverEnabled = isCoverMode
+        PrefsManager.setAmbientLightColorSyncEnabled(coverEnabled)
+        PrefsManager.setAmbientLightRandomColorEnabled(false)
+        try {
+            com.car.xiaoouscreen.XiaoOuApplication.rhythmEngine.colorSyncEnabled = coverEnabled
+            com.car.xiaoouscreen.XiaoOuApplication.rhythmEngine.randomColorMode = false
+            if (coverEnabled) {
+                com.car.xiaoouscreen.XiaoOuApplication.rhythmEngine.reapplyLastCoverColor()
+            }
+        } catch (_: Exception) {}
+        _uiState.update {
+            it.copy(
+                smartScene = it.smartScene.copy(
+                    colorFollowsCover = coverEnabled,
+                    randomColorMode = false
+                )
+            )
+        }
+        showToast(if (coverEnabled) "已选择：根据封面颜色变换" else "已选择：使用系统设置颜色")
+    }
+
+    fun toggleAmbientColorFollowsCover(enabled: Boolean) {
+        selectAmbientColorMode(isCoverMode = true)
+    }
+
+    fun toggleAmbientRandomColor(enabled: Boolean) {
+        selectAmbientColorMode(isCoverMode = false)
+    }
+
+    fun setAmbientSensitivity(percent: Int = 100) {
+        PrefsManager.setAmbientLightSensitivity(100)
+        try {
+            com.car.xiaoouscreen.XiaoOuApplication.rhythmEngine.sensitivityPercent = 100
+        } catch (_: Exception) {}
+        _uiState.update { it.copy(smartScene = it.smartScene.copy(sensitivityPercent = 100)) }
+    }
+
+    fun setAmbientFollowCarBrightness(follow: Boolean) {
+        com.car.xiaoouscreen.car.AmbientLightManager.setFollowCarBrightness(follow)
+        _uiState.update {
+            it.copy(
+                smartScene = it.smartScene.copy(
+                    followCarBrightness = follow,
+                    effectiveBaseBrightnessPercent = com.car.xiaoouscreen.car.AmbientLightManager.effectiveBaseBrightnessPercent.value,
+                    effectiveScale = com.car.xiaoouscreen.car.AmbientLightManager.effectiveScale.value
+                )
+            )
+        }
+        showToast(if (follow) "已开启跟随原车车机亮度" else "已切换为自定义基准亮度")
+    }
+
+    fun setAmbientCustomBrightness(percent: Int) {
+        val safe = percent.coerceIn(10, 100)
+        com.car.xiaoouscreen.car.AmbientLightManager.setCustomBrightnessPercent(safe)
+        _uiState.update {
+            it.copy(
+                smartScene = it.smartScene.copy(
+                    customBrightnessPercent = safe,
+                    effectiveBaseBrightnessPercent = com.car.xiaoouscreen.car.AmbientLightManager.effectiveBaseBrightnessPercent.value,
+                    effectiveScale = com.car.xiaoouscreen.car.AmbientLightManager.effectiveScale.value
+                )
+            )
+        }
+    }
+
+    // ----------------------------------------------------
+    // 智能场景联动 · 转向灯三边律动光效与变道辅助盲区光幕
+    // ----------------------------------------------------
+
+    fun toggleTurnSignalSync(enabled: Boolean) {
+        PrefsManager.setTurnSignalSyncEnabled(enabled)
+        _uiState.update { it.copy(smartScene = it.smartScene.copy(turnSignalSyncEnabled = enabled)) }
+        try {
+            WeatherOverlayService.updateTurnSignalSyncState(context, enabled)
+        } catch (e: Exception) {
+            AppLogger.w("SettingsViewModel", "updateTurnSignalSyncState failed: ${e.message}")
+        }
+        showToast(if (enabled) "已开启转向灯联动" else "已关闭转向灯联动")
+    }
+
+    fun toggleLaneChangeAssist(enabled: Boolean) {
+        PrefsManager.setLaneChangeAssistEnabled(enabled)
+        _uiState.update { it.copy(smartScene = it.smartScene.copy(laneChangeAssistEnabled = enabled)) }
+        try {
+            WeatherOverlayService.updateLaneChangeAssistState(context, enabled)
+        } catch (e: Exception) {
+            AppLogger.w("SettingsViewModel", "updateLaneChangeAssistState failed: ${e.message}")
+        }
+        showToast(if (enabled) "已开启变道辅助联动" else "已关闭变道辅助联动")
+    }
+
     fun setCacheLimitMB(limitMB: Int) {
         val clamped = limitMB.coerceIn(8, 128)
         _uiState.update { it.copy(service = it.service.copy(cacheLimitMB = clamped)) }
@@ -976,6 +1242,122 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                 LyricsCacheManager.setMaxSize(clamped)
             } catch (_: Exception) {}
             refreshCacheSize()
+        }
+    }
+
+    /**
+     * 检查版本更新
+     * @param manual true 为用户手动在界面点击（提示详细反馈），false 为后台静默检查
+     */
+    fun checkUpdate(manual: Boolean = true) {
+        _uiState.update {
+            it.copy(
+                service = it.service.copy(isCheckingUpdate = true),
+                update = it.update.copy(isChecking = true, downloadError = null)
+            )
+        }
+
+        viewModelScope.launch {
+            val result = updateManager.checkUpdate()
+            _uiState.update {
+                it.copy(
+                    service = it.service.copy(isCheckingUpdate = false),
+                    update = it.update.copy(isChecking = false)
+                )
+            }
+
+            when (result) {
+                is CheckResult.HasUpdate -> {
+                    _uiState.update {
+                        it.copy(
+                            update = it.update.copy(
+                                showUpdateDialog = true,
+                                updateInfo = result.info,
+                                downloadError = null
+                            )
+                        )
+                    }
+                }
+                is CheckResult.AlreadyLatest -> {
+                    if (manual) {
+                        showToast("当前已是最新版本 (${result.currentVersion})")
+                    }
+                }
+                is CheckResult.Error -> {
+                    if (manual) {
+                        showToast("检查更新失败: ${result.message}")
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 开始下载并安装更新
+     */
+    fun startDownloadUpdate() {
+        val info = _uiState.value.update.updateInfo ?: return
+        if (_uiState.value.update.isDownloading) return
+
+        _uiState.update {
+            it.copy(
+                update = it.update.copy(
+                    isDownloading = true,
+                    downloadProgress = 0,
+                    downloadError = null
+                )
+            )
+        }
+
+        viewModelScope.launch {
+            val downloadResult = updateManager.downloadApk(info) { progress ->
+                _uiState.update {
+                    it.copy(update = it.update.copy(downloadProgress = progress))
+                }
+            }
+
+            downloadResult.fold(
+                onSuccess = { apkFile ->
+                    _uiState.update {
+                        it.copy(
+                            update = it.update.copy(
+                                isDownloading = false,
+                                downloadProgress = 100
+                            )
+                        )
+                    }
+                    val installSuccess = updateManager.installApk(apkFile)
+                    if (!installSuccess) {
+                        _uiState.update {
+                            it.copy(update = it.update.copy(downloadError = "无法唤起安装器，请在车机设置中允许安装应用"))
+                        }
+                    }
+                },
+                onFailure = { error ->
+                    _uiState.update {
+                        it.copy(
+                            update = it.update.copy(
+                                isDownloading = false,
+                                downloadError = error.message ?: "下载安装包失败"
+                            )
+                        )
+                    }
+                }
+            )
+        }
+    }
+
+    /**
+     * 关闭更新弹窗
+     */
+    fun dismissUpdateDialog() {
+        _uiState.update {
+            it.copy(
+                update = it.update.copy(
+                    showUpdateDialog = false,
+                    downloadError = null
+                )
+            )
         }
     }
 

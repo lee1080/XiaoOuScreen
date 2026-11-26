@@ -27,6 +27,12 @@ class BouncingTitleView @JvmOverloads constructor(
 
     private var bounceAnimator: ValueAnimator? = null
     private var isBouncing = false
+
+    private val resumeRunnable = Runnable {
+        if (isBouncing && isAttachedToWindow && bounceAnimator?.isPaused == true) {
+            bounceAnimator?.resume()
+        }
+    }
     private var lastText: String = ""
 
     init {
@@ -123,11 +129,8 @@ class BouncingTitleView @JvmOverloads constructor(
                 if (!isBouncing || !isAttachedToWindow) return
                 // 每次到了端点 (无论是右侧展示完整还是回到左侧展示完整)，暂停动画 1.5 秒
                 anim.pause()
-                postDelayed({
-                    if (isBouncing && isAttachedToWindow && anim.isPaused) {
-                        anim.resume()
-                    }
-                }, 1500L)
+                removeCallbacks(resumeRunnable)
+                postDelayed(resumeRunnable, 1500L)
             }
         })
 
@@ -137,6 +140,7 @@ class BouncingTitleView @JvmOverloads constructor(
 
     fun stopBounce() {
         isBouncing = false
+        removeCallbacks(resumeRunnable)
         bounceAnimator?.cancel()
         bounceAnimator = null
         translationX = 0f

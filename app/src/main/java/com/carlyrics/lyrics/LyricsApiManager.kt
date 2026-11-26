@@ -1,5 +1,8 @@
 package com.carlyrics.lyrics
 
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.util.Base64
 import com.carlyrics.model.LyricData
 import com.carlyrics.model.LyricLine
@@ -44,6 +47,19 @@ class LyricsApiManager {
         }
         private val cacheLock = Any()
 
+        private val OFFSET_REGEX = Regex("""\[offset:\s*([+-]?\d+)\s*\]""", RegexOption.IGNORE_CASE)
+        private val TIME_REGEX = Regex("""\[(\d{1,3}):(\d{2})(?:[.:](\d{2,3}))?\]""")
+        private val YRC_LINE_REGEX = Regex("""^\[(\d+),(\d+)\]""")
+        private val WORD_TAG_REGEX = Regex("""(?:<|\()(\d+),(\d+)(?:,\d+)?(?:>|\))([^<>()\[\]\n\r]+)""")
+        private val PAREN_EN_REGEX = Regex("""\(.*?\)""")
+        private val BRACKET_EN_REGEX = Regex("""\[.*?\]""")
+        private val PAREN_CN_REGEX = Regex("""（.*?）""")
+        private val BRACKET_CN_REGEX = Regex("""【.*?】""")
+        private val NON_ALNUM_REGEX = Regex("""[^\p{L}\p{N}]""")
+        private val TITLE_SUFFIX_SPLIT_REGEX = Regex("""\s*[-_—].*$""")
+        private val TITLE_VERSION_REGEX = Regex("""(?i)\s*(?:[0-9.]+[xX])?\s*(?:降调|升调|变调|加速|减速|慢速|DJ|dj|微醺|热播|完整|女声|男声|烟嗓|弹唱|经典|现场|翻唱|伴奏|重置|试听)*(?:版|片段)""")
+        private val ARTIST_DELIMITER_REGEX = Regex("""(?i)\s*(?:feat\.?|ft\.?|with|vs\.?|[&、/,\+，;；])\s*""")
+
         fun clearPreloadCache() {
             synchronized(cacheLock) {
                 preloadCache.clear()
@@ -55,25 +71,20 @@ class LyricsApiManager {
          */
         fun parseLrcText(lrc: String): List<LyricLine> {
             val result = mutableListOf<LyricLine>()
-            val offsetRegex = Regex("""\[offset:\s*([+-]?\d+)\s*\]""", RegexOption.IGNORE_CASE)
             var globalOffset = 0L
 
             // 1. 提取头部 [offset:xxx] 标签 (解决时间线整体偏慢/偏快问题)
             for (line in lrc.lines()) {
-                val offsetMatch = offsetRegex.find(line)
+                val offsetMatch = OFFSET_REGEX.find(line)
                 if (offsetMatch != null) {
                     globalOffset = offsetMatch.groupValues[1].toLongOrNull() ?: 0L
                     break
                 }
             }
 
-            val timeRegex = Regex("""\[(\d{1,3}):(\d{2})(?:[.:](\d{2,3}))?\]""")
-            val yrcLineRegex = Regex("""^\[(\d+),(\d+)\]""")
-
-            // 字级/词级时间戳正则支持：
-            // 1. Kugou/QRC/增强 LRC 格式：<start,dur(,flags)?>text
-            // 2. NetEase YRC/括号格式：(start,dur(,flags)?>)text
-            val wordTagRegex = Regex("""(?:<|\()(\d+),(\d+)(?:,\d+)?(?:>|\))([^<>()\[\]\n\r]+)""")
+            val timeRegex = TIME_REGEX
+            val yrcLineRegex = YRC_LINE_REGEX
+            val wordTagRegex = WORD_TAG_REGEX
 
             for (line in lrc.lines()) {
                 val trimmedLine = line.trim()
@@ -157,9 +168,77 @@ class LyricsApiManager {
 
             return result.sortedBy { it.timestamp }
         }
+
+        /**
+         * 校验歌词是否具备实质性展示内容 (彻底杜绝 "暂无歌词"、"纯音乐请欣赏"、纯演职员版权行等假歌词拦截正文搜索)
+         */
+        fun isSubstantiveLyrics(lines: List<LyricLine>?): Boolean {
+            if (lines.isNullOrEmpty()) return false
+
+            val placeholderKeywords = arrayOf(
+                "暂无歌词", "没有歌词", "未找到歌词", "无歌词", "暂无",
+                "纯音乐", "请欣赏", "没有填词", "此歌曲为没有填词的纯音乐", "此歌曲为纯音乐", "伴奏",
+                "instrumental", "no lyrics", "lyrics not available"
+            )
+
+            val creditsPrefixes = arrayOf(
+                "作词", "作曲", "编曲", "制作人", "监制", "混音", "母带", "录音",
+                "吉他", "贝斯", "鼓", "键盘", "钢琴", "和声", "弦乐", "出品", "发行",
+                "op:", "sp:", "词:", "曲:", "词/曲", "written by", "composed by", "produced by"
+            )
+
+            var substantiveCount = 0
+            for (line in lines) {
+                val text = line.text.trim().lowercase()
+                if (text.isEmpty()) continue
+
+                val isPlaceholder = placeholderKeywords.any { text.contains(it) }
+                if (isPlaceholder) continue
+
+                val isCredit = creditsPrefixes.any { text.startsWith(it) }
+                if (isCredit) continue
+
+                substantiveCount++
+            }
+
+            return substantiveCount >= 2
+        }
+
+        /**
+         * 判定异常是否属于网络层/传输层暂时性弱网异常 (超时、DNS无法解析、连接被重置等)
+         */
+        fun isNetworkError(e: Throwable?): Boolean {
+            var cause: Throwable? = e
+            while (cause != null) {
+                if (cause is java.net.SocketTimeoutException ||
+                    cause is java.net.UnknownHostException ||
+                    cause is java.net.ConnectException ||
+                    cause is java.net.SocketException ||
+                    cause is javax.net.ssl.SSLException
+                ) {
+                    return true
+                }
+                cause = cause.cause
+            }
+            return false
+        }
+
+        /**
+         * 检查当前系统网络是否具备互联网连接能力
+         */
+        fun isNetworkAvailable(context: Context): Boolean {
+            return try {
+                val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return true
+                val activeNetwork = cm.activeNetwork ?: return false
+                val caps = cm.getNetworkCapabilities(activeNetwork) ?: return false
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            } catch (_: Exception) {
+                true
+            }
+        }
     }
 
-    private val gson = Gson()
+    private val gson = com.carlyrics.util.SharedNetwork.gson
 
     fun cancelAllRequests() {
         LyricsSourceRunner.cancelAll()
@@ -293,16 +372,16 @@ class LyricsApiManager {
                         continue
                     }
 
-                    var durationScore = 0
                     val sDur = (sMap["interval"] as? Number)?.toLong() ?: 0L
-                    if (durationSec > 0 && sDur > 0) {
-                        val diff = abs(sDur - durationSec)
-                        if (diff <= 3) durationScore = 30
-                        else if (diff <= 8) durationScore = 20
-                        else if (diff <= 15) durationScore = 5
-                        else if (tScore == 100 && (aScore >= 0 || isFallback) && diff <= 25) durationScore = -15
-                        else continue
-                    }
+                    val durationScore = evaluateDurationScore(
+                        durationSec = durationSec,
+                        candidateDurationSec = sDur,
+                        titleScore = tScore,
+                        artistScore = aScore,
+                        isFallback = isFallback,
+                        title = title,
+                        candidateTitle = sTitle
+                    ) ?: continue
 
                     val totalScore = tScore + (if (aScore < 0) -10 else aScore) + durationScore
                     if (totalScore > bestScore && totalScore >= 65) {
@@ -323,7 +402,7 @@ class LyricsApiManager {
 
                     val decodedLrc = decodeQqEntities(rawLrc)
                     val lines = parseLrcText(decodedLrc)
-                    if (lines.isNotEmpty()) {
+                    if (lines.isNotEmpty() && isSubstantiveLyrics(lines)) {
                         val coverUrl = if (!bestAlbumMid.isNullOrBlank() && bestAlbumMid != "00000000000000") {
                             "https://y.gtimg.cn/music/photo_new/T002R300x300M000${bestAlbumMid}.jpg"
                         } else null
@@ -346,113 +425,142 @@ class LyricsApiManager {
         }
     }
 
+    private data class KugouCandidate(
+        val hash: String,
+        val albumId: String?,
+        val title: String,
+        val artist: String,
+        val score: Int
+    )
+
+    private fun searchBestKugouCandidate(title: String, artist: String, durationSec: Long = 0L): KugouCandidate? {
+        val cleanTitle = cleanSongTitle(title)
+        val queries = mutableListOf<Triple<String, String, Boolean>>()
+        queries.add(Triple(title, artist, false))
+        if (cleanTitle.isNotEmpty() && cleanTitle != title) {
+            queries.add(Triple(cleanTitle, artist, false))
+        }
+        if (artist.isNotBlank()) {
+            queries.add(Triple(cleanTitle.ifEmpty { title }, "", true))
+        }
+
+        val headers = mapOf(
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+
+        for ((qTitle, qArtist, isFallback) in queries) {
+            val kw = if (qArtist.isNotBlank()) "$qTitle $qArtist".trim() else qTitle.trim()
+            val searchUrl = "http://mobilecdn.kugou.com/api/v3/search/song?format=json&showtype=1&page=1&pagesize=5&keyword=" + URLEncoder.encode(kw, "UTF-8")
+            val resp = httpGet(searchUrl, headers) ?: continue
+            val map = gson.fromJson(resp, Map::class.java) ?: continue
+            val dataObj = map["data"] as? Map<*, *> ?: continue
+            val infoList = dataObj["info"] as? List<*> ?: continue
+            if (infoList.isEmpty()) continue
+
+            var best: KugouCandidate? = null
+            for (sObj in infoList) {
+                val sMap = sObj as? Map<*, *> ?: continue
+                val sTitle = sMap["songname"]?.toString() ?: ""
+                val sArtist = sMap["singername"]?.toString() ?: ""
+                val hash = sMap["hash"]?.toString() ?: continue
+                if (hash.isBlank()) continue
+
+                val tScore = evaluateTitleMatch(title, sTitle).let {
+                    if (it >= 70) it else evaluateTitleMatch(cleanTitle, sTitle)
+                }
+                if (tScore <= 0) continue
+
+                val aScore = evaluateArtistMatch(artist, sArtist)
+                if (!isFallback && artist.isNotBlank() && aScore < 0) {
+                    continue
+                }
+
+                val sDur = (sMap["duration"] as? Number)?.toLong() ?: 0L
+                val durationScore = evaluateDurationScore(
+                    durationSec = durationSec,
+                    candidateDurationSec = sDur,
+                    titleScore = tScore,
+                    artistScore = aScore,
+                    isFallback = isFallback,
+                    title = title,
+                    candidateTitle = sTitle
+                ) ?: continue
+
+                val totalScore = tScore + (if (aScore < 0) -10 else aScore) + durationScore
+                if (totalScore >= 65 && (best == null || totalScore > best.score)) {
+                    val rawAlbumId = sMap["album_id"]
+                    val parsedAlbumId = (rawAlbumId as? Number)?.toLong()?.toString()
+                        ?: rawAlbumId?.toString()?.trim()?.removeSuffix(".0")
+                    best = KugouCandidate(
+                        hash = hash,
+                        albumId = parsedAlbumId,
+                        title = sTitle,
+                        artist = sArtist,
+                        score = totalScore
+                    )
+                }
+            }
+            if (best != null) return best
+        }
+        return null
+    }
+
+    fun fetchCoverOnlyFromKugouOfficial(title: String, artist: String): String? {
+        if (title.isBlank() || com.carlyrics.recognition.MusicRecognitionEngine.isInvalidPlaceholderTrack(title, artist)) {
+            return null
+        }
+        return try {
+            val cand = searchBestKugouCandidate(title, artist) ?: return null
+            val albumId = cand.albumId
+            if (!albumId.isNullOrBlank() && albumId != "0") {
+                fetchCoverFromKugouAlbumId(albumId)
+            } else null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     fun fetchFromKugouOfficial(title: String, artist: String, durationSec: Long = 0L): LyricData? {
         if (title.isBlank() || com.carlyrics.recognition.MusicRecognitionEngine.isInvalidPlaceholderTrack(title, artist)) {
             return null
         }
         return try {
-            val cleanTitle = cleanSongTitle(title)
-            val queries = mutableListOf<Triple<String, String, Boolean>>()
-            queries.add(Triple(title, artist, false))
-            if (cleanTitle.isNotEmpty() && cleanTitle != title) {
-                queries.add(Triple(cleanTitle, artist, false))
-            }
-            if (artist.isNotBlank()) {
-                queries.add(Triple(cleanTitle.ifEmpty { title }, "", true))
-            }
-
+            val cand = searchBestKugouCandidate(title, artist, durationSec) ?: return null
             val headers = mapOf(
                 "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             )
+            val lyricSearchUrl = "http://lyrics.kugou.com/search?ver=1&man=yes&client=pc&keyword=&hash=${cand.hash}"
+            val lsResp = httpGet(lyricSearchUrl, headers) ?: return null
+            val lsMap = gson.fromJson(lsResp, Map::class.java) ?: return null
+            val candidates = lsMap["candidates"] as? List<*> ?: return null
+            val firstCand = candidates.firstOrNull() as? Map<*, *> ?: return null
+            val id = firstCand["id"]?.toString() ?: return null
+            val accesskey = firstCand["accesskey"]?.toString() ?: return null
+            if (id.isBlank() || accesskey.isBlank()) return null
 
-            for ((qTitle, qArtist, isFallback) in queries) {
-                val kw = if (qArtist.isNotBlank()) "$qTitle $qArtist".trim() else qTitle.trim()
-                val searchUrl = "http://mobilecdn.kugou.com/api/v3/search/song?format=json&showtype=1&page=1&pagesize=5&keyword=" + URLEncoder.encode(kw, "UTF-8")
-                val resp = httpGet(searchUrl, headers) ?: continue
-                val map = gson.fromJson(resp, Map::class.java) ?: continue
-                val dataObj = map["data"] as? Map<*, *> ?: continue
-                val infoList = dataObj["info"] as? List<*> ?: continue
-                if (infoList.isEmpty()) continue
+            val dlUrl = "http://lyrics.kugou.com/download?ver=1&client=pc&id=$id&accesskey=" +
+                    URLEncoder.encode(accesskey, "UTF-8") + "&fmt=lrc&charset=utf8"
+            val dlResp = httpGet(dlUrl, headers) ?: return null
+            val dlMap = gson.fromJson(dlResp, Map::class.java) ?: return null
+            val b64Content = dlMap["content"]?.toString() ?: return null
+            if (b64Content.isBlank()) return null
 
-                var bestHash: String? = null
-                var bestAlbumId: String? = null
-                var bestTitle: String? = null
-                var bestArtist: String? = null
-                var bestScore = -1
-
-                for (sObj in infoList) {
-                    val sMap = sObj as? Map<*, *> ?: continue
-                    val sTitle = sMap["songname"]?.toString() ?: ""
-                    val sArtist = sMap["singername"]?.toString() ?: ""
-                    val hash = sMap["hash"]?.toString() ?: continue
-                    if (hash.isBlank()) continue
-
-                    val tScore = evaluateTitleMatch(title, sTitle).let {
-                        if (it >= 70) it else evaluateTitleMatch(cleanTitle, sTitle)
-                    }
-                    if (tScore <= 0) continue
-
-                    val aScore = evaluateArtistMatch(artist, sArtist)
-                    if (!isFallback && artist.isNotBlank() && aScore < 0) {
-                        continue
-                    }
-
-                    var durationScore = 0
-                    val sDur = (sMap["duration"] as? Number)?.toLong() ?: 0L
-                    if (durationSec > 0 && sDur > 0) {
-                        val diff = abs(sDur - durationSec)
-                        if (diff <= 3) durationScore = 30
-                        else if (diff <= 8) durationScore = 20
-                        else if (diff <= 15) durationScore = 5
-                        else if (tScore == 100 && (aScore >= 0 || isFallback) && diff <= 25) durationScore = -15
-                        else continue
-                    }
-
-                    val totalScore = tScore + (if (aScore < 0) -10 else aScore) + durationScore
-                    if (totalScore > bestScore && totalScore >= 65) {
-                        bestScore = totalScore
-                        bestHash = hash
-                        bestAlbumId = sMap["album_id"]?.toString()
-                        bestTitle = sTitle
-                        bestArtist = sArtist
-                    }
+            val decodedLrc = String(Base64.decode(b64Content, Base64.DEFAULT), Charsets.UTF_8)
+            val lines = parseLrcText(decodedLrc)
+            if (lines.isNotEmpty() && isSubstantiveLyrics(lines)) {
+                var coverUrl: String? = null
+                if (!cand.albumId.isNullOrBlank() && cand.albumId != "0") {
+                    coverUrl = fetchCoverFromKugouAlbumId(cand.albumId)
                 }
-
-                if (bestHash != null) {
-                    val lyricSearchUrl = "http://lyrics.kugou.com/search?ver=1&man=yes&client=pc&keyword=&hash=$bestHash"
-                    val lsResp = httpGet(lyricSearchUrl, headers) ?: continue
-                    val lsMap = gson.fromJson(lsResp, Map::class.java) ?: continue
-                    val candidates = lsMap["candidates"] as? List<*> ?: continue
-                    val firstCand = candidates.firstOrNull() as? Map<*, *> ?: continue
-                    val id = firstCand["id"]?.toString() ?: continue
-                    val accesskey = firstCand["accesskey"]?.toString() ?: continue
-                    if (id.isBlank() || accesskey.isBlank()) continue
-
-                    val dlUrl = "http://lyrics.kugou.com/download?ver=1&client=pc&id=$id&accesskey=" +
-                            URLEncoder.encode(accesskey, "UTF-8") + "&fmt=lrc&charset=utf8"
-                    val dlResp = httpGet(dlUrl, headers) ?: continue
-                    val dlMap = gson.fromJson(dlResp, Map::class.java) ?: continue
-                    val b64Content = dlMap["content"]?.toString() ?: continue
-                    if (b64Content.isBlank()) continue
-
-                    val decodedLrc = String(Base64.decode(b64Content, Base64.DEFAULT), Charsets.UTF_8)
-                    val lines = parseLrcText(decodedLrc)
-                    if (lines.isNotEmpty()) {
-                        var coverUrl: String? = null
-                        if (!bestAlbumId.isNullOrBlank() && bestAlbumId != "0") {
-                            coverUrl = fetchCoverFromKugouAlbumId(bestAlbumId)
-                        }
-                        AppLogger.d(TAG, "酷狗音乐官方直连命中: $bestTitle - $bestArtist (${lines.size}行, 评分: $bestScore)")
-                        val data = LyricData(
-                            lines = lines,
-                            coverUrl = coverUrl,
-                            sourceName = "酷狗音乐(官方直连)",
-                            rawLrc = decodedLrc
-                        )
-                        storeLyricsCache(title, artist, data)
-                        return data
-                    }
-                }
+                AppLogger.d(TAG, "酷狗音乐官方直连命中: ${cand.title} - ${cand.artist} (${lines.size}行, 评分: ${cand.score})")
+                val data = LyricData(
+                    lines = lines,
+                    coverUrl = coverUrl,
+                    sourceName = "酷狗音乐(官方直连)",
+                    rawLrc = decodedLrc
+                )
+                storeLyricsCache(title, artist, data)
+                return data
             }
             null
         } catch (e: Exception) {
@@ -530,16 +638,16 @@ class LyricsApiManager {
                         continue
                     }
 
-                    var durationScore = 0
                     val sDur = ((song["duration"] as? Number)?.toLong() ?: 0L) / 1000L
-                    if (durationSec > 0 && sDur > 0) {
-                        val diff = abs(sDur - durationSec)
-                        if (diff <= 3) durationScore = 30
-                        else if (diff <= 8) durationScore = 20
-                        else if (diff <= 15) durationScore = 5
-                        else if (tScore == 100 && (aScore >= 0 || isFallback) && diff <= 25) durationScore = -15
-                        else continue
-                    }
+                    val durationScore = evaluateDurationScore(
+                        durationSec = durationSec,
+                        candidateDurationSec = sDur,
+                        titleScore = tScore,
+                        artistScore = aScore,
+                        isFallback = isFallback,
+                        title = title,
+                        candidateTitle = sTitle
+                    ) ?: continue
 
                     val totalScore = tScore + (if (aScore < 0) -10 else aScore) + durationScore
                     if (totalScore > bestScore && totalScore >= 65) {
@@ -560,7 +668,7 @@ class LyricsApiManager {
                 val lrcObj = lyricMap["lrc"] as? Map<*, *> ?: continue
                 val rawLrc = lrcObj["lyric"]?.toString() ?: continue
                 val lines = parseLrcText(rawLrc)
-                if (lines.isEmpty()) continue
+                if (lines.isEmpty() || !isSubstantiveLyrics(lines)) continue
 
                 if (matchedCoverUrl.isNullOrEmpty()) {
                     matchedCoverUrl = fetchCoverFromNeteaseOfficialById(songId)
@@ -603,24 +711,24 @@ class LyricsApiManager {
 
     private fun normalizeText(text: String): String {
         return text.trim()
-            .replace(Regex("""\(.*?\)"""), "")
-            .replace(Regex("""\[.*?\]"""), "")
-            .replace(Regex("""（.*?）"""), "")
-            .replace(Regex("""【.*?】"""), "")
-            .replace(Regex("""[^\p{L}\p{N}]"""), "")
+            .replace(PAREN_EN_REGEX, "")
+            .replace(BRACKET_EN_REGEX, "")
+            .replace(PAREN_CN_REGEX, "")
+            .replace(BRACKET_CN_REGEX, "")
+            .replace(NON_ALNUM_REGEX, "")
             .lowercase()
     }
 
     /** 去除曲名中的修饰性括号、后缀标签等（如“（你我怎么两清）”、“（DJ版）”、“ - 热播片段”、“0.8x降调版”） */
     private fun cleanSongTitle(raw: String): String {
         val s = raw.trim()
-            .replace(Regex("""（.*?）"""), "")
-            .replace(Regex("""\(.*?\)"""), "")
-            .replace(Regex("""【.*?】"""), "")
-            .replace(Regex("""\[.*?\]"""), "")
-            .replace(Regex("""\s*[-_—].*$"""), "")
+            .replace(PAREN_CN_REGEX, "")
+            .replace(PAREN_EN_REGEX, "")
+            .replace(BRACKET_CN_REGEX, "")
+            .replace(BRACKET_EN_REGEX, "")
+            .replace(TITLE_SUFFIX_SPLIT_REGEX, "")
             .trim()
-        return s.replace(Regex("""(?i)\s*(?:[0-9.]+[xX])?\s*(?:降调|升调|变调|加速|减速|慢速|DJ|dj|微醺|热播|完整|女声|男声|烟嗓|弹唱|经典|现场|翻唱|伴奏|重置|试听)*(?:版|片段)"""), "").trim()
+        return s.replace(TITLE_VERSION_REGEX, "").trim()
     }
 
     /** 英文曲名弱化 your/my/the 差异（此时 text 已无空格） */
@@ -739,9 +847,8 @@ class LyricsApiManager {
 
         // 3. 多歌手拆分匹配 (支持 "YOON MIRAE, Tiger JK & Bizzy", "周杰伦 & 蔡依林", "A / B", "A feat. B")
         // 注意：必须在进行 normalizeText 去除非字母数字前，按分隔符完成多歌手拆分！
-        val delimiter = Regex("""(?i)\s*(?:feat\.?|ft\.?|with|vs\.?|[&、/,\+，;；])\s*""")
-        val reqArtists = reqArtist.split(delimiter).map { T2SUtil.convert(normalizeText(it)) }.filter { it.isNotEmpty() }
-        val resArtists = resArtist.split(delimiter).map { T2SUtil.convert(normalizeText(it)) }.filter { it.isNotEmpty() }
+        val reqArtists = reqArtist.split(ARTIST_DELIMITER_REGEX).map { T2SUtil.convert(normalizeText(it)) }.filter { it.isNotEmpty() }
+        val resArtists = resArtist.split(ARTIST_DELIMITER_REGEX).map { T2SUtil.convert(normalizeText(it)) }.filter { it.isNotEmpty() }
 
         val anyMatch = reqArtists.any { r ->
             resArtists.any { a ->
@@ -756,6 +863,49 @@ class LyricsApiManager {
 
     fun isArtistMatch(reqArtist: String, resArtist: String): Boolean {
         return evaluateArtistMatch(reqArtist, resArtist) >= 0
+    }
+
+    /**
+     * 评估歌曲时长匹配度（放宽翻唱/短视频片段/Live版容差，坚决杜绝同歌手一票否决）
+     * @return 评分加减值（正数加分，负数扣分），若返回 null 表示时差过大且无翻唱/片段特征，严格拒绝匹配
+     */
+    fun evaluateDurationScore(
+        durationSec: Long,
+        candidateDurationSec: Long,
+        titleScore: Int,
+        artistScore: Int,
+        isFallback: Boolean,
+        title: String = "",
+        candidateTitle: String = ""
+    ): Int? {
+        if (durationSec <= 0 || candidateDurationSec <= 0) return 0
+        val diff = abs(candidateDurationSec - durationSec)
+        if (diff <= 3) return 30
+        if (diff <= 8) return 20
+        if (diff <= 15) return 10
+        if (diff <= 30) return -10
+
+        // 时差 30~60 秒：允许同歌手、强标题匹配或翻唱/剪辑版通过
+        val hasVersionKeyword = VERSION_SUFFIXES.any {
+            title.contains(it, ignoreCase = true) || candidateTitle.contains(it, ignoreCase = true)
+        }
+        if (diff <= 60) {
+            if (artistScore >= 20 || (titleScore == 100 && hasVersionKeyword) || isFallback) {
+                return -25
+            }
+            return null
+        }
+
+        // 时差 > 60 秒（常见于短视频 60~90s 片段 vs 完整版 180~240s）
+        // 若歌手完全一致且标题基本一致，歌词内容一致，允许大幅降权通过，绝不一票否决
+        if (artistScore >= 30 && titleScore >= 75) {
+            return -35
+        }
+        if (titleScore == 100 && hasVersionKeyword) {
+            return -35
+        }
+
+        return null
     }
 
     /**
@@ -793,13 +943,15 @@ class LyricsApiManager {
 
     /**
      * 获取歌词核心调度
+     * @param primaryOnly 是否仅请求第一顺位源 (播放器专属源 / Top 1 置顶源)，用于防截胡和精准重试
      */
     suspend fun fetchLyrics(
         title: String,
         artist: String,
         duration: Long = 0L,
         mediaId: String? = null,
-        packageName: String? = null
+        packageName: String? = null,
+        primaryOnly: Boolean = false
     ): Result<LyricData> = withContext(Dispatchers.IO) {
         coroutineContext.ensureActive()
         if (title.isBlank() || com.carlyrics.recognition.MusicRecognitionEngine.isInvalidPlaceholderTrack(title, artist)) {
@@ -815,183 +967,338 @@ class LyricsApiManager {
         val actualPkg = packageName ?: try { com.carlyrics.CarLyricsApplication.recognitionEngine.currentTrack.value?.packageName } catch (_: Exception) { null }
         val durationSec = duration / 1000L
 
-        // 1. 若当前播放器为网易云或偏好源为 netease，优先尝试网易云官方直连
-        if (actualPkg?.contains("netease") == true || PrefsManager.getPreferredLyricsSource().contains("netease")) {
-            coroutineContext.ensureActive()
-            val neteaseDirect = fetchFromNeteaseOfficial(title, artist, durationSec)
-            if (neteaseDirect != null && neteaseDirect.lines.isNotEmpty()) {
-                storeLyricsCache(title, artist, neteaseDirect)
-                return@withContext Result.success(neteaseDirect)
-            }
-        }
-
-        // 2. 若当前播放器为 QQ 音乐或偏好源为 qq，优先尝试 QQ 音乐官方直连
-        if (actualPkg?.contains("qqmusic") == true || actualPkg?.contains("tencent") == true || PrefsManager.getPreferredLyricsSource().contains("qq")) {
-            coroutineContext.ensureActive()
-            val qqDirect = fetchFromQQOfficial(title, artist, durationSec)
-            if (qqDirect != null && qqDirect.lines.isNotEmpty()) {
-                storeLyricsCache(title, artist, qqDirect)
-                return@withContext Result.success(qqDirect)
-            }
-        }
-
-        // 3. 若当前播放器为酷狗音乐或偏好源为 kugou，优先尝试酷狗官方直连
-        if (actualPkg?.contains("kugou") == true || PrefsManager.getPreferredLyricsSource().contains("kugou")) {
-            coroutineContext.ensureActive()
-            val kugouDirect = fetchFromKugouOfficial(title, artist, durationSec)
-            if (kugouDirect != null && kugouDirect.lines.isNotEmpty()) {
-                storeLyricsCache(title, artist, kugouDirect)
-                return@withContext Result.success(kugouDirect)
-            }
-        }
-
-        // 4. 执行已安装并启用的外部 JavaScript 歌词源插件匹配
         val enabledSources = LyricsSourceManager.getEnabledSources().toMutableList()
+        val channelMatched = LyricsSourceManager.findChannelMatchedSource(actualPkg, enabledSources)
+
+        // =========================================================================
+        // 阶段 1:【播放器渠道专属源优先调度 (Channel First)】
+        // 若当前播放器（如汽水音乐、咪咕音乐、酷我音乐等）存在专属插件：
+        // 绝不允许被网易云/QQ等偏好源硬编码截胡！第一顺位执行专属源 match 秒查 / search 匹配
+        // =========================================================================
+        if (channelMatched != null) {
+            coroutineContext.ensureActive()
+            AppLogger.d(TAG, "【渠道优先】检测到当前播放器 [$actualPkg] 专属源: ${channelMatched.name}")
+            try {
+                val matchedData = searchAndMatchFromSource(channelMatched, title, artist, durationSec, mediaId)
+                if (matchedData != null) {
+                    storeLyricsCache(title, artist, matchedData)
+                    return@withContext Result.success(matchedData)
+                }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                AppLogger.d(TAG, "[${channelMatched.name}] 专属源调度异常: ${e.message}")
+                if (isNetworkError(e)) {
+                    return@withContext Result.failure(e)
+                }
+            }
+            if (primaryOnly) {
+                return@withContext Result.failure(NoSuchElementException("[${channelMatched.name}] 专属源未匹配到有效歌词"))
+            }
+        }
+
+        // =========================================================================
+        // 阶段 2:【官方直连直查 (网易云/QQ/酷狗)】
+        // 仅当未命中第三方专属源时，才允许偏好源或播放器包名直连
+        // 彻底杜绝播放汽水音乐等第三方生态时被网易云原唱“截胡”
+        // =========================================================================
+        val isExplicitThirdParty = actualPkg != null && (
+            actualPkg.contains("luna.music") || actualPkg.contains("qishui") ||
+            actualPkg.contains("migu") || actualPkg.contains("cmcc") ||
+            actualPkg.contains("spotify") || actualPkg.contains("apple.android.music") ||
+            actualPkg.contains("youtube")
+        )
+
+        if (channelMatched == null && !isExplicitThirdParty) {
+            // 1. 若当前播放器为网易云或偏好源为 netease，优先尝试网易云官方直连
+            if (actualPkg?.contains("netease") == true || PrefsManager.getPreferredLyricsSource().contains("netease")) {
+                coroutineContext.ensureActive()
+                val neteaseDirect = fetchFromNeteaseOfficial(title, artist, durationSec)
+                if (neteaseDirect != null && isSubstantiveLyrics(neteaseDirect.lines)) {
+                    storeLyricsCache(title, artist, neteaseDirect)
+                    return@withContext Result.success(neteaseDirect)
+                }
+                if (primaryOnly) {
+                    return@withContext Result.failure(NoSuchElementException("网易云官方直连未匹配到歌词"))
+                }
+            }
+
+            // 2. 若当前播放器为 QQ 音乐或偏好源为 qq，优先尝试 QQ 音乐官方直连
+            if (actualPkg?.contains("qqmusic") == true || actualPkg?.contains("tencent") == true || PrefsManager.getPreferredLyricsSource().contains("qq")) {
+                coroutineContext.ensureActive()
+                val qqDirect = fetchFromQQOfficial(title, artist, durationSec)
+                if (qqDirect != null && isSubstantiveLyrics(qqDirect.lines)) {
+                    storeLyricsCache(title, artist, qqDirect)
+                    return@withContext Result.success(qqDirect)
+                }
+                if (primaryOnly) {
+                    return@withContext Result.failure(NoSuchElementException("QQ音乐官方直连未匹配到歌词"))
+                }
+            }
+
+            // 3. 若当前播放器为酷狗音乐 (含原车酷狗 com.chinatsp.music) 或偏好源为 kugou，优先尝试酷狗官方直连
+            if (actualPkg?.contains("kugou") == true || actualPkg == "com.chinatsp.music" || PrefsManager.getPreferredLyricsSource().contains("kugou")) {
+                coroutineContext.ensureActive()
+                val kugouDirect = fetchFromKugouOfficial(title, artist, durationSec)
+                if (kugouDirect != null && isSubstantiveLyrics(kugouDirect.lines)) {
+                    storeLyricsCache(title, artist, kugouDirect)
+                    return@withContext Result.success(kugouDirect)
+                }
+                if (primaryOnly) {
+                    return@withContext Result.failure(NoSuchElementException("酷狗官方直连未匹配到歌词"))
+                }
+            }
+        }
+
+        // =========================================================================
+        // 阶段 3:【若 primaryOnly 为 true，且无渠道专属源和官方直连专属，执行 Top 1 外部源】
+        // =========================================================================
         if (enabledSources.isNotEmpty()) {
             sortSourcesByPreferenceAndChannel(enabledSources, packageName)
+            val topSource = enabledSources.firstOrNull()
+
+            if (primaryOnly) {
+                if (topSource != null && (channelMatched == null || topSource.id != channelMatched.id)) {
+                    coroutineContext.ensureActive()
+                    try {
+                        val matchedData = searchAndMatchFromSource(topSource, title, artist, durationSec, mediaId)
+                        if (matchedData != null) {
+                            storeLyricsCache(title, artist, matchedData)
+                            return@withContext Result.success(matchedData)
+                        }
+                    } catch (e: Exception) {
+                        if (e is CancellationException) throw e
+                        AppLogger.d(TAG, "[${topSource.name}] 检索失败: ${e.message}")
+                        if (isNetworkError(e)) {
+                            return@withContext Result.failure(e)
+                        }
+                    }
+                }
+                return@withContext Result.failure(NoSuchElementException("第一顺位源未检索到匹配歌词"))
+            }
 
             for (source in enabledSources) {
+                if (channelMatched != null && source.id == channelMatched.id) {
+                    continue // 专属源已在阶段 1 尝试过
+                }
                 coroutineContext.ensureActive()
                 try {
-                    // 1) 若支持 match 且 mediaId 存在，优先尝试直连
-                    if (!mediaId.isNullOrBlank()) {
-                        coroutineContext.ensureActive()
-                        val directMatch = LyricsSourceRunner.match(source, title, artist, durationSec, mediaId)
-                        coroutineContext.ensureActive()
-                        if (directMatch != null && !directMatch.lrc.isNullOrBlank()) {
-                            val parsedLines = parseLrcText(directMatch.lrc)
-                            if (parsedLines.isNotEmpty()) {
-                                AppLogger.d(TAG, "[${source.name}] mediaId 直查命中歌词 (${parsedLines.size}行)")
-                                val data = LyricData(
-                                    lines = parsedLines,
-                                    coverUrl = directMatch.cover,
-                                    sourceName = source.name,
-                                    rawLrc = directMatch.lrc
-                                )
-                                storeLyricsCache(title, artist, data)
-                                return@withContext Result.success(data)
-                            }
-                        }
-                    }
-
-                    // 2) 多级智能降级搜索匹配
-                    val cleanTitle = cleanSongTitle(title)
-                    val queries = mutableListOf<Triple<String, String, Boolean>>()
-                    queries.add(Triple(title, artist, false))
-                    if (cleanTitle.isNotEmpty() && cleanTitle != title) {
-                        queries.add(Triple(cleanTitle, artist, false))
-                    }
-                    if (artist.isNotBlank()) {
-                        queries.add(Triple(cleanTitle.ifEmpty { title }, "", true))
-                    }
-
-                    var matchedCandidate: SourceSearchItem? = null
-                    var matchedScore = -1
-
-                    for ((qTitle, qArtist, isFallback) in queries) {
-                        coroutineContext.ensureActive()
-                        val searchItems = LyricsSourceRunner.search(source, qTitle, qArtist, durationSec)
-                        coroutineContext.ensureActive()
-                        if (searchItems.isEmpty()) continue
-
-                        var bestCandidate: SourceSearchItem? = null
-                        var bestScore = -1
-
-                        for (item in searchItems) {
-                            val titleScore = evaluateTitleMatch(title, item.title).let {
-                                if (it >= 70) it else evaluateTitleMatch(cleanTitle, item.title)
-                            }
-                            if (titleScore <= 0) continue
-
-                            val artistScore = evaluateArtistMatch(artist, item.artist)
-                            if (!isFallback && artist.isNotBlank() && artistScore < 0) {
-                                continue
-                            }
-
-                            var durationScore = 0
-                            if (durationSec > 0 && item.duration > 0) {
-                                val diff = abs(item.duration - durationSec)
-                                if (diff <= 3) {
-                                    durationScore = 30
-                                } else if (diff <= 8) {
-                                    durationScore = 20
-                                } else if (diff <= 15) {
-                                    durationScore = 5
-                                } else {
-                                    if (titleScore == 100 && (artistScore >= 0 || isFallback) && diff <= 25) {
-                                        durationScore = -15
-                                    } else {
-                                        continue
-                                    }
-                                }
-                            }
-
-                            val totalScore = titleScore + (if (artistScore < 0) -10 else artistScore) + durationScore
-                            if (totalScore > bestScore && totalScore >= 65) {
-                                bestScore = totalScore
-                                bestCandidate = item
-                            }
-                        }
-
-                        if (bestCandidate != null) {
-                            matchedCandidate = bestCandidate
-                            matchedScore = bestScore
-                            break
-                        }
-                    }
-
-                    val candidate = matchedCandidate
-                    if (candidate == null) {
-                        AppLogger.d(TAG, "[${source.name}] 搜索结果中无符合严谨匹配阈值的歌曲 (title=$title, artist=$artist)")
-                        continue
-                    }
-
-                    coroutineContext.ensureActive()
-                    val lyricResult = LyricsSourceRunner.getLyrics(source, candidate.id) ?: continue
-                    coroutineContext.ensureActive()
-                    if (lyricResult.lrc.isNullOrBlank()) continue
-
-                    val lines = parseLrcText(lyricResult.lrc)
-                    if (lines.isNotEmpty()) {
-                        AppLogger.d(TAG, "[${source.name}] 成功匹配并获取歌词: ${candidate.title} - ${candidate.artist} (${lines.size}行, 匹配评分: $matchedScore)")
-                        var coverUrl = lyricResult.cover
-                        if (coverUrl.isNullOrBlank() || coverUrl.contains("artistpicserver.kuwo.cn") || coverUrl.contains("NO_PIC")) {
-                            coroutineContext.ensureActive()
-                            coverUrl = fetchCover(candidate.title, candidate.artist)
-                        }
-                        val data = LyricData(
-                            lines = lines,
-                            coverUrl = coverUrl,
-                            sourceName = source.name,
-                            rawLrc = lyricResult.lrc
-                        )
-                        storeLyricsCache(title, artist, data)
-                        return@withContext Result.success(data)
+                    val matchedData = searchAndMatchFromSource(source, title, artist, durationSec, mediaId)
+                    if (matchedData != null) {
+                        storeLyricsCache(title, artist, matchedData)
+                        return@withContext Result.success(matchedData)
                     }
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
                     AppLogger.d(TAG, "[${source.name}] 检索失败: ${e.message}")
                 }
             }
+        } else if (primaryOnly) {
+            return@withContext Result.failure(NoSuchElementException("无可用的第一顺位源"))
         }
 
-        // 5. 官方原生多平台级联兜底 (QQ音乐 -> 酷狗音乐 -> 网易云音乐)
+        // 阶段 4: 官方原生多平台级联兜底 (QQ音乐 -> 酷狗音乐 -> 网易云音乐)
         coroutineContext.ensureActive()
-        fetchFromQQOfficial(title, artist, durationSec)?.let { data ->
+        fetchFromQQOfficial(title, artist, durationSec)?.takeIf { isSubstantiveLyrics(it.lines) }?.let { data ->
             return@withContext Result.success(data)
         }
 
         coroutineContext.ensureActive()
-        fetchFromKugouOfficial(title, artist, durationSec)?.let { data ->
+        fetchFromKugouOfficial(title, artist, durationSec)?.takeIf { isSubstantiveLyrics(it.lines) }?.let { data ->
             return@withContext Result.success(data)
         }
 
         coroutineContext.ensureActive()
-        fetchFromNeteaseOfficial(title, artist, durationSec)?.let { data ->
+        fetchFromNeteaseOfficial(title, artist, durationSec)?.takeIf { isSubstantiveLyrics(it.lines) }?.let { data ->
             return@withContext Result.success(data)
         }
 
         Result.failure(Exception("所有歌词源均未检索到匹配歌词"))
+    }
+
+    /**
+     * 次选瀑布流兜底检索 (仅在第一顺位源完成初试+退避重试确认无词后放行，避免截胡)
+     */
+    suspend fun fetchLyricsFallback(
+        title: String,
+        artist: String,
+        duration: Long = 0L,
+        mediaId: String? = null,
+        packageName: String? = null
+    ): Result<LyricData> = withContext(Dispatchers.IO) {
+        coroutineContext.ensureActive()
+        if (title.isBlank() || com.carlyrics.recognition.MusicRecognitionEngine.isInvalidPlaceholderTrack(title, artist)) {
+            return@withContext Result.failure(IllegalArgumentException("无效的曲目标题"))
+        }
+
+        val actualPkg = packageName ?: try { com.carlyrics.CarLyricsApplication.recognitionEngine.currentTrack.value?.packageName } catch (_: Exception) { null }
+        val durationSec = duration / 1000L
+
+        val enabledSources = LyricsSourceManager.getEnabledSources().toMutableList()
+        val channelMatched = LyricsSourceManager.findChannelMatchedSource(actualPkg, enabledSources)
+        val primaryId = channelMatched?.id ?: enabledSources.firstOrNull()?.id
+
+        if (enabledSources.isNotEmpty()) {
+            sortSourcesByPreferenceAndChannel(enabledSources, packageName)
+            for (source in enabledSources) {
+                if (source.id == primaryId) continue // 排除已多次重试过的主源
+                coroutineContext.ensureActive()
+                try {
+                    val matchedData = searchAndMatchFromSource(source, title, artist, durationSec, mediaId)
+                    if (matchedData != null) {
+                        storeLyricsCache(title, artist, matchedData)
+                        return@withContext Result.success(matchedData)
+                    }
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    AppLogger.d(TAG, "[次选兜底-${source.name}] 检索失败: ${e.message}")
+                }
+            }
+        }
+
+        // 官方原生多平台级联兜底
+        coroutineContext.ensureActive()
+        fetchFromQQOfficial(title, artist, durationSec)?.takeIf { isSubstantiveLyrics(it.lines) }?.let { data ->
+            return@withContext Result.success(data)
+        }
+        coroutineContext.ensureActive()
+        fetchFromKugouOfficial(title, artist, durationSec)?.takeIf { isSubstantiveLyrics(it.lines) }?.let { data ->
+            return@withContext Result.success(data)
+        }
+        coroutineContext.ensureActive()
+        fetchFromNeteaseOfficial(title, artist, durationSec)?.takeIf { isSubstantiveLyrics(it.lines) }?.let { data ->
+            return@withContext Result.success(data)
+        }
+
+        Result.failure(Exception("次选瀑布流与官方兜底均未检索到匹配歌词"))
+    }
+
+    /**
+     * 从指定歌词源执行【mediaId 直查 -> 多级智能搜索 -> 时长自适应评分比对 -> 歌词封面提取】
+     */
+    private suspend fun searchAndMatchFromSource(
+        source: LyricsSource,
+        title: String,
+        artist: String,
+        durationSec: Long,
+        mediaId: String?
+    ): LyricData? = withContext(Dispatchers.IO) {
+        coroutineContext.ensureActive()
+
+        // 1) 若支持 match 且 mediaId 存在，优先尝试直连秒查
+        if (!mediaId.isNullOrBlank()) {
+            try {
+                coroutineContext.ensureActive()
+                val directMatch = LyricsSourceRunner.match(source, title, artist, durationSec, mediaId)
+                coroutineContext.ensureActive()
+                if (directMatch != null && !directMatch.lrc.isNullOrBlank()) {
+                    val parsedLines = parseLrcText(directMatch.lrc)
+                    if (isSubstantiveLyrics(parsedLines)) {
+                        AppLogger.d(TAG, "[${source.name}] mediaId 直查命中有效歌词 (${parsedLines.size}行)")
+                        return@withContext LyricData(
+                            lines = parsedLines,
+                            coverUrl = directMatch.cover,
+                            sourceName = source.name,
+                            rawLrc = directMatch.lrc
+                        )
+                    } else {
+                        val sample = parsedLines.firstOrNull()?.text ?: "空白"
+                        AppLogger.w(TAG, "[${source.name}] mediaId ($mediaId) 直查为占位/假歌词 (${parsedLines.size}行: \"$sample\"), 自动降级执行智能搜索")
+                    }
+                }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                AppLogger.d(TAG, "[${source.name}] mediaId 直查异常: ${e.message}")
+            }
+        }
+
+        // 2) 多级智能降级搜索匹配 (解决副标题过长、短视频UGC创作者名与官方原唱差异等问题)
+        val cleanTitle = cleanSongTitle(title)
+        val queries = mutableListOf<Triple<String, String, Boolean>>()
+        queries.add(Triple(title, artist, false))
+        if (cleanTitle.isNotEmpty() && cleanTitle != title) {
+            queries.add(Triple(cleanTitle, artist, false))
+        }
+        if (artist.isNotBlank()) {
+            queries.add(Triple(cleanTitle.ifEmpty { title }, "", true))
+        }
+
+        var matchedCandidate: SourceSearchItem? = null
+        var matchedScore = -1
+
+        for ((qTitle, qArtist, isFallback) in queries) {
+            coroutineContext.ensureActive()
+            val searchItems = LyricsSourceRunner.search(source, qTitle, qArtist, durationSec)
+            coroutineContext.ensureActive()
+            if (searchItems.isEmpty()) continue
+
+            var bestCandidate: SourceSearchItem? = null
+            var bestScore = -1
+
+            for (item in searchItems) {
+                val titleScore = evaluateTitleMatch(title, item.title).let {
+                    if (it >= 70) it else evaluateTitleMatch(cleanTitle, item.title)
+                }
+                if (titleScore <= 0) continue
+
+                val artistScore = evaluateArtistMatch(artist, item.artist)
+                if (!isFallback && artist.isNotBlank() && artistScore < 0) {
+                    continue
+                }
+
+                val durationScore = evaluateDurationScore(
+                    durationSec = durationSec,
+                    candidateDurationSec = item.duration,
+                    titleScore = titleScore,
+                    artistScore = artistScore,
+                    isFallback = isFallback,
+                    title = title,
+                    candidateTitle = item.title
+                ) ?: continue
+
+                val totalScore = titleScore + (if (artistScore < 0) -10 else artistScore) + durationScore
+                if (totalScore > bestScore && totalScore >= 65) {
+                    bestScore = totalScore
+                    bestCandidate = item
+                }
+            }
+
+            if (bestCandidate != null) {
+                matchedCandidate = bestCandidate
+                matchedScore = bestScore
+                break
+            }
+        }
+
+        val candidate = matchedCandidate
+        if (candidate == null) {
+            AppLogger.d(TAG, "[${source.name}] 搜索结果中无符合严谨匹配阈值的歌曲 (title=$title, artist=$artist)")
+            return@withContext null
+        }
+
+        coroutineContext.ensureActive()
+        val lyricResult = LyricsSourceRunner.getLyrics(source, candidate.id) ?: return@withContext null
+        coroutineContext.ensureActive()
+        if (lyricResult.lrc.isNullOrBlank()) return@withContext null
+
+        val lines = parseLrcText(lyricResult.lrc)
+        if (lines.isNotEmpty() && isSubstantiveLyrics(lines)) {
+            AppLogger.d(TAG, "[${source.name}] 成功匹配并获取歌词: ${candidate.title} - ${candidate.artist} (${lines.size}行, 匹配评分: $matchedScore)")
+            var coverUrl = lyricResult.cover
+            if (coverUrl.isNullOrBlank() || coverUrl.contains("artistpicserver.kuwo.cn") || coverUrl.contains("NO_PIC")) {
+                coroutineContext.ensureActive()
+                coverUrl = fetchCover(candidate.title, candidate.artist)
+            }
+            return@withContext LyricData(
+                lines = lines,
+                coverUrl = coverUrl,
+                sourceName = source.name,
+                rawLrc = lyricResult.lrc
+            )
+        } else {
+            val sample = lines.firstOrNull()?.text ?: "空白"
+            AppLogger.w(TAG, "[${source.name}] 候选歌曲 (${candidate.title}) 歌词解析为占位/假歌词 (${lines.size}行: \"$sample\"), 放弃当前候选")
+        }
+        return@withContext null
     }
 
     /**
@@ -1021,11 +1328,11 @@ class LyricsApiManager {
                 return@withContext qqDirect?.coverUrl
             }
         }
-        if (actualPkg?.contains("kugou") == true || PrefsManager.getPreferredLyricsSource().contains("kugou")) {
+        if (actualPkg?.contains("kugou") == true || actualPkg == "com.chinatsp.music" || PrefsManager.getPreferredLyricsSource().contains("kugou")) {
             coroutineContext.ensureActive()
-            val kgDirect = fetchFromKugouOfficial(title, artist)
-            if (!kgDirect?.coverUrl.isNullOrBlank()) {
-                return@withContext kgDirect?.coverUrl
+            val kgCover = fetchCoverOnlyFromKugouOfficial(title, artist)
+            if (!kgCover.isNullOrBlank()) {
+                return@withContext kgCover
             }
         }
 
@@ -1061,7 +1368,7 @@ class LyricsApiManager {
 
         // 官方原生多平台级联兜底
         fetchFromQQOfficial(title, artist)?.coverUrl?.let { if (it.isNotBlank()) return@withContext it }
-        fetchFromKugouOfficial(title, artist)?.coverUrl?.let { if (it.isNotBlank()) return@withContext it }
+        fetchCoverOnlyFromKugouOfficial(title, artist)?.let { if (it.isNotBlank()) return@withContext it }
         fetchFromNeteaseOfficial(title, artist)?.coverUrl?.let { if (it.isNotBlank()) return@withContext it }
         null
     }
@@ -1070,4 +1377,9 @@ class LyricsApiManager {
      * 增强型 LRC 解析引擎 (支持毫秒级、[offset] 校准、逐字卡拉OK与 YRC 解析)
      */
     fun parseLrcText(lrc: String): List<LyricLine> = Companion.parseLrcText(lrc)
+
+    /**
+     * 实质性歌词校验
+     */
+    fun isSubstantiveLyrics(lines: List<LyricLine>?): Boolean = Companion.isSubstantiveLyrics(lines)
 }

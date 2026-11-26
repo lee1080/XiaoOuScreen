@@ -45,6 +45,7 @@ fun ServicePage(
     onOpenDebugLogDialog: () -> Unit,
     onCleanCache: () -> Unit,
     onCacheLimitChange: (Int) -> Unit,
+    onCheckUpdate: () -> Unit,
     onShowInfo: (AnnotationInfo) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -89,8 +90,8 @@ fun ServicePage(
                             NeuInfoButton(
                                 info = AnnotationInfo(
                                     title = "随车机点火开机启动",
-                                    content = "参照 CarLyricsApp 经过实车验证的启动架构，监听 BOOT_COMPLETED 与 ACC 上电广播，通电后秒级拉起小欧屏与投屏服务。",
-                                    recommend = "强烈建议保持开启以保障车机体验"
+                                    content = "监听系统开机与通电广播，通电后自动启动小欧屏服务。",
+                                    recommend = "推荐开启，车辆点火通电后自动启动服务"
                                 ),
                                 onShowInfo = onShowInfo
                             )
@@ -220,22 +221,22 @@ fun ServicePage(
                         NeuInfoButton(
                             info = AnnotationInfo(
                                 title = "歌词与专辑封面缓存说明",
-                                content = "自动缓存离线 LRC/逐字歌词文本与高精度专辑封面图片，避免重复联网流量消耗与闪存碎片。清理后不影响个人配置。",
-                                recommend = "当车机存储告警或想释放空间时可一键清空"
+                                content = "自动缓存离线歌词文本与专辑封面图片，避免重复网络消耗。清理后不影响个人配置。",
+                                recommend = "存储空间不足时可进行清理"
                             ),
                             onShowInfo = onShowInfo
                         )
                     }
 
                     NeuButton(
-                        text = "立即清理歌词与封面缓存",
+                        text = "清理缓存",
                         onClick = onCleanCache,
                         isPrimary = true
                     )
                 }
 
                 Text(
-                    text = "一键清空本地离线 LRC/KRC 歌词文本、专辑封面缩略图与内存图片缓存（保留个人设置与天气密钥）",
+                    text = "清理本地离线歌词与专辑封面缓存（保留个人设置与天气密钥）",
                     fontSize = 11.sp,
                     color = NeuColors.TextSecondary,
                     lineHeight = 16.sp,
@@ -257,7 +258,7 @@ fun ServicePage(
             desc = "超出配额后按 LRU 策略自动淘汰最旧的封面与歌词（中位 64 MB，范围 8~128 MB）"
         )
 
-        // 第四行：关于与版本信息 (统一 116.dp 高度卡片，无检查更新按钮)
+        // 第四行：关于与版本信息 (统一 116.dp 高度卡片，集成检查更新按钮)
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -298,7 +299,7 @@ fun ServicePage(
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.Bottom
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         Text(
@@ -313,6 +314,12 @@ fun ServicePage(
                             color = NeuColors.TextSecondary
                         )
                     }
+
+                    NeuButton(
+                        text = if (state.isCheckingUpdate) "检查中..." else "检查更新",
+                        onClick = onCheckUpdate,
+                        isPrimary = true
+                    )
                 }
             }
         }

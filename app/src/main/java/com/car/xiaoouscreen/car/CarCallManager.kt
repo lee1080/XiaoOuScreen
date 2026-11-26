@@ -500,17 +500,38 @@ class CarCallManager private constructor(private val context: Context) {
 
     fun addListener(listener: CallListener) {
         if (!listeners.contains(listener)) {
+            val wasEmpty = listeners.isEmpty()
             listeners.add(listener)
-            listener.onCallChanged(currentCallInfo)
+            if (wasEmpty) {
+                startListening()
+            }
+            mainHandler.post {
+                try {
+                    listener.onCallChanged(currentCallInfo)
+                } catch (t: Throwable) {
+                    AppLogger.e(TAG, "CallListener 执行异常", t)
+                }
+            }
         }
     }
 
     fun removeListener(listener: CallListener) {
         listeners.remove(listener)
+        if (listeners.isEmpty()) {
+            stopListening()
+        }
     }
 
     private fun notifyListeners(info: CallInfo) {
-        listeners.forEach { it.onCallChanged(info) }
+        mainHandler.post {
+            for (listener in listeners) {
+                try {
+                    listener.onCallChanged(info)
+                } catch (t: Throwable) {
+                    AppLogger.e(TAG, "CallListener 执行异常", t)
+                }
+            }
+        }
     }
 
     private data class RawContact(

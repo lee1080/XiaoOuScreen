@@ -47,28 +47,45 @@ data class LyricLine(
     private var cachedGeneratedWords: List<LyricWord>? = null
 
     /**
-     * 获取原生字级时间戳；若当前歌词为普通LRC，则根据该行持续时间平滑估算各字符节奏
+     * 获取原生字级时间戳；若当前歌词为普通LRC，则根据该行自然人声演唱声学时序估算各字符节奏
      */
     fun getOrGenerateWords(nextLineTimestamp: Long? = null): List<LyricWord> {
         if (words.isNotEmpty()) return words
         if (text.isBlank()) return emptyList()
         cachedGeneratedWords?.let { return it }
 
-        val lineDuration = if (nextLineTimestamp != null && nextLineTimestamp > timestamp) {
-            (nextLineTimestamp - timestamp).coerceIn(1200L, 10000L)
-        } else {
-            (text.length * 350L).coerceIn(1500L, 5000L)
-        }
-
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return emptyList()
-        val wordDuration = (lineDuration / trimmed.length.coerceAtLeast(1)).coerceAtLeast(50L)
+
+        // 真实人类演唱声学模型估算：
+        // 中文/英文正常演唱平均单字耗时在 320ms ~ 450ms 之间，尾字常有长音拖腔 (Sustain)
+        val charCount = trimmed.length
+        val rawCharDuration = 360L
+        val minLineDuration = 1200L
+        val naturalSingingDuration = (charCount * rawCharDuration).coerceAtLeast(minLineDuration)
+
+        val actualSingingDuration = if (nextLineTimestamp != null && nextLineTimestamp > timestamp) {
+            val gap = nextLineTimestamp - timestamp
+            // 若距离下一句很近，留出至少 200ms 的换气间隔；若下一句隔得很远（长间奏），则只唱自然演唱时长，绝不把字生拉硬拽到整整 10 秒！
+            val maxAllowed = (gap - 200L).coerceAtLeast(minLineDuration)
+            minOf(naturalSingingDuration, maxAllowed)
+        } else {
+            naturalSingingDuration.coerceAtMost(5000L)
+        }
+
+        val baseWordDuration = (actualSingingDuration / charCount.coerceAtLeast(1)).coerceIn(120L, 800L)
 
         val result = trimmed.mapIndexed { i, char ->
+            // 最后一个字若处于句尾，通常有长音拖腔 (Sustain)
+            val dur = if (i == charCount - 1) {
+                (actualSingingDuration - i * baseWordDuration).coerceIn(baseWordDuration, baseWordDuration * 2)
+            } else {
+                baseWordDuration
+            }
             LyricWord(
                 text = char.toString(),
-                startTime = timestamp + i * wordDuration,
-                duration = wordDuration
+                startTime = timestamp + i * baseWordDuration,
+                duration = dur
             )
         }
         cachedGeneratedWords = result

@@ -1,35 +1,92 @@
 /**
  * @name GD Studio (聚合源)
  * @id gdstudio_proxy
- * @version 1.0.5
+ * @version 1.0.6
  * @author Community
- * @description 第三方聚合 API 备用源，覆盖网易聚合检索，优先反代加速，失败自动回落原站。
+ * @description 第三方聚合 API 备用源，覆盖网易云等全平台聚合检索；支持常见中英文曲名/艺人别名补搜与纯音乐过滤。
  */
 
-// 优先走 Cloudflare 反代；失败/超时（http.get 返回空或报错）再回落原站
-var GD_ORIGIN = "https://music-api.gdstudio.xyz/api.php";
-var GD_PROXY = "https://gd.av8d.eu.org/https://music-api.gdstudio.xyz/api.php";
-var GD_UA = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+var GD_API = "https://music-api.gdstudio.xyz/api.php";
+
+var GD_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Referer": "https://music.gdstudio.xyz/",
+    "Origin": "https://music.gdstudio.xyz",
+    "X-Requested-With": "XMLHttpRequest"
 };
 
-function gdGet(query) {
-    var q = String(query || "").replace(/^\?/, "");
-    var resp = http.get(GD_PROXY + "?" + q, GD_UA);
-    if (resp && resp.indexOf("error code:") < 0 && resp.indexOf("bad_path") < 0) {
-        return resp;
+// 车机常上报英文元数据，导致只搜英文时命中翻唱/纯音乐
+var TITLE_ALIASES = {
+    "the name engraved in your heart": "刻在我心底的名字",
+    "the name engraved in my heart": "刻在我心底的名字",
+    "your name engraved in my heart": "刻在我心底的名字"
+};
+
+var ARTIST_ALIASES = {
+    "crowd lu": "卢广仲",
+    "jay chou": "周杰伦",
+    "jj lin": "林俊杰",
+    "jada": "温岚"
+};
+
+function normalizeKey(s) {
+    return String(s || "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function buildQueries(title, artist) {
+    var t = String(title || "").trim();
+    var a = String(artist || "").trim();
+    var tAlias = TITLE_ALIASES[normalizeKey(t)] || "";
+    var aAlias = ARTIST_ALIASES[normalizeKey(a)] || "";
+    var list = [];
+    function add(q) {
+        q = String(q || "").trim();
+        if (!q) return;
+        for (var i = 0; i < list.length; i++) {
+            if (list[i] === q) return;
+        }
+        list.push(q);
     }
-    return http.get(GD_ORIGIN + "?" + q, GD_UA);
+
+    // 中文别名优先，避免英文元数据先命中翻唱/纯音乐
+    if (tAlias && aAlias) add(tAlias + " " + aAlias);
+    if (tAlias) add((tAlias + " " + (aAlias || a)).trim());
+    if (tAlias) add(tAlias);
+    if (aAlias) add((t + " " + aAlias).trim());
+    add((t + " " + a).trim());
+    add(t);
+    return list;
+}
+
+function rankScore(item, title, artist) {
+    var score = 0;
+    var t = String(item.title || "");
+    var a = String(item.artist || "");
+    var tAlias = TITLE_ALIASES[normalizeKey(title)] || String(title || "");
+    var aAlias = ARTIST_ALIASES[normalizeKey(artist)] || String(artist || "");
+    if (t === tAlias || t.indexOf("刻在我心底的名字") === 0) score += 50;
+    if (/[\u4e00-\u9fff]/.test(t)) score += 20;
+    if (aAlias && a.indexOf(aAlias) >= 0) score += 30;
+    if (/卢广仲/.test(a)) score += 20;
+    if (/\(.*live.*\)/i.test(t) || /（.*live.*）/i.test(t)) score -= 10;
+    return score;
+}
+
+function gdFetch(params) {
+    var url = GD_API + "?" + String(params || "").replace(/^\?/, "");
+    var resp = http.get(url, GD_HEADERS);
+    if (!resp || resp.indexOf("<html") !== -1) return null;
+    return resp;
 }
 
 function doSearch(keyword) {
     if (!keyword) return [];
     var encName = encodeURIComponent(keyword);
-    // 优先加 source=netease 直指网易镜像，毫秒级快速响应，避免海外全源并发检索超时
-    var resp = gdGet("types=search&count=5&source=netease&name=" + encName);
+    // 优先加 source=netease 直指网易镜像，毫秒级快速响应
+    var resp = gdFetch("types=search&count=8&source=netease&name=" + encName);
     if (!resp) {
         // 兜底尝试全源聚合
-        resp = gdGet("types=search&count=5&name=" + encName);
+        resp = gdFetch("types=search&count=8&name=" + encName);
     }
     if (!resp) return [];
 
@@ -58,25 +115,36 @@ function doSearch(keyword) {
 }
 
 function search(title, artist, duration) {
-    var t = String(title || "").trim();
-    var a = String(artist || "").trim();
+    var queries = buildQueries(title, artist);
+    var seen = {};
+    var results = [];
 
-    // 优先搜索 "歌名 歌手"，若无结果则回落单搜 "歌名"
-    var keyword = (t + " " + a).trim() || t;
-    var results = doSearch(keyword);
-
-    if (results.length === 0 && a && t) {
-        results = doSearch(t);
+    for (var q = 0; q < queries.length; q++) {
+        var batch = doSearch(queries[q]);
+        for (var i = 0; i < batch.length; i++) {
+            var item = batch[i];
+            if (seen[item.id]) continue;
+            seen[item.id] = true;
+            results.push(item);
+        }
+        // 中文别名查询已命中则不再打后续英文查询
+        if (results.length > 0 && q === 0 && TITLE_ALIASES[normalizeKey(title)]) break;
+        if (results.length >= 5 && /[\u4e00-\u9fff]/.test(results[0].title)) break;
     }
+
+    results.sort(function (x, y) {
+        return rankScore(y, title, artist) - rankScore(x, title, artist);
+    });
     return results.slice(0, 10);
 }
 
 function getLyrics(id) {
-    var parts = id.split("|");
+    if (!id) return null;
+    var parts = String(id).split("|");
     var lyricId = parts[0];
     var picId = parts.length > 1 ? parts[1] : "";
 
-    var resp = gdGet("types=lyric&id=" + encodeURIComponent(lyricId));
+    var resp = gdFetch("types=lyric&source=netease&id=" + encodeURIComponent(lyricId));
     if (!resp) return null;
 
     try {
@@ -84,16 +152,22 @@ function getLyrics(id) {
         var lrc = data.lyric || "";
         if (!lrc) return null;
 
+        if (lrc.indexOf("暂无歌词") !== -1 || lrc.indexOf("纯音乐，请欣赏") !== -1) {
+            lrc = "";
+        }
+
         var cover = null;
         if (picId) {
             try {
-                var picResp = gdGet("types=pic&id=" + encodeURIComponent(picId) + "&size=500");
+                var picResp = gdFetch("types=pic&source=netease&id=" + encodeURIComponent(picId) + "&size=500");
                 if (picResp) {
                     var picData = JSON.parse(picResp);
                     cover = picData.url || null;
                 }
             } catch (_) {}
         }
+
+        if (!lrc && !cover) return null;
 
         return {
             lrc: lrc,

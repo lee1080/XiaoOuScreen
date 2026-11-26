@@ -301,6 +301,97 @@ class GearCubeFlipView @JvmOverloads constructor(
     private var cachedCanvas: Canvas? = null
     private var hasValidSnapshot = false
 
+    // 徽章 3 层离屏纹理缓存 (消除 3D 透视变换下的 DashPathEffect 与 195px 字体软栅格 SW Path Mask / RenderTarget)
+    private val emblemHalfSize = 180f
+    private var cachedOuterRingBmp: Bitmap? = null
+    private var cachedSecRingBmp: Bitmap? = null
+    private var cachedSecRingKey: String = ""
+    private var cachedCenterEmblemBmp: Bitmap? = null
+    private var cachedCenterEmblemKey: String = ""
+
+    private fun ensureOuterRingBmp(): Bitmap {
+        cachedOuterRingBmp?.takeIf { !it.isRecycled }?.let { return it }
+        val size = (emblemHalfSize * 2f).toInt()
+        val cx = LOGICAL_WIDTH / 2f
+        val cy = LOGICAL_HEIGHT / 2f
+        val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val c = Canvas(bmp)
+        c.translate(emblemHalfSize - cx, emblemHalfSize - cy)
+
+        outerRingPaint.alpha = 56
+        c.drawCircle(cx, cy, 152f, outerRingPaint)
+
+        outerTicksPaint.alpha = 255
+        tickRect.set(cx - 3f, cy - 158f, cx + 3f, cy - 146f)
+        c.drawRoundRect(tickRect, 3f, 3f, outerTicksPaint)
+        tickRect.set(cx - 3f, cy + 146f, cx + 3f, cy + 158f)
+        c.drawRoundRect(tickRect, 3f, 3f, outerTicksPaint)
+        tickRect.set(cx - 158f, cy - 3f, cx - 146f, cy + 3f)
+        c.drawRoundRect(tickRect, 3f, 3f, outerTicksPaint)
+        tickRect.set(cx + 146f, cy - 3f, cx + 158f, cy + 3f)
+        c.drawRoundRect(tickRect, 3f, 3f, outerTicksPaint)
+
+        cachedOuterRingBmp = bmp
+        return bmp
+    }
+
+    private fun ensureSecRingBmp(theme: GearTheme): Bitmap {
+        if (cachedSecRingKey == theme.code) {
+            cachedSecRingBmp?.takeIf { !it.isRecycled }?.let { return it }
+        }
+        cachedSecRingBmp?.let { if (!it.isRecycled) it.recycle() }
+        val size = (emblemHalfSize * 2f).toInt()
+        val cx = LOGICAL_WIDTH / 2f
+        val cy = LOGICAL_HEIGHT / 2f
+        val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val c = Canvas(bmp)
+        c.translate(emblemHalfSize - cx, emblemHalfSize - cy)
+
+        secRingPaint.color = theme.accentSecColor
+        secRingPaint.alpha = 128
+        c.drawCircle(cx, cy, 130f, secRingPaint)
+
+        starDotsPaint.alpha = 230
+        val starDist = 106f
+        c.drawCircle(cx + starDist, cy - starDist, 3.5f, starDotsPaint)
+        c.drawCircle(cx - starDist, cy + starDist, 3.5f, starDotsPaint)
+        c.drawCircle(cx + starDist, cy + starDist, 3.5f, starDotsPaint)
+        c.drawCircle(cx - starDist, cy - starDist, 3.5f, starDotsPaint)
+
+        cachedSecRingKey = theme.code
+        cachedSecRingBmp = bmp
+        return bmp
+    }
+
+    private fun ensureCenterEmblemBmp(theme: GearTheme): Bitmap {
+        if (cachedCenterEmblemKey == theme.code) {
+            cachedCenterEmblemBmp?.takeIf { !it.isRecycled }?.let { return it }
+        }
+        cachedCenterEmblemBmp?.let { if (!it.isRecycled) it.recycle() }
+        val size = (emblemHalfSize * 2f).toInt()
+        val cx = LOGICAL_WIDTH / 2f
+        val cy = LOGICAL_HEIGHT / 2f
+        val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val c = Canvas(bmp)
+        c.translate(emblemHalfSize - cx, emblemHalfSize - cy)
+
+        val glassShader = innerGlassShaders[theme.code] ?: innerGlassShaders["P"]!!
+        innerGlassPaint.shader = glassShader
+        innerGlassPaint.alpha = 255
+        c.drawCircle(cx, cy, 142f, innerGlassPaint)
+
+        val coreRingShader = coreRingShaders[theme.code] ?: coreRingShaders["P"]!!
+        coreRingPaint.shader = coreRingShader
+        coreRingPaint.alpha = 255
+        c.drawCircle(cx, cy, 142f, coreRingPaint)
+
+        draw3DGearLetter(c, theme.code, cx, cy, theme, 1f, 1f)
+
+        cachedCenterEmblemKey = theme.code
+        cachedCenterEmblemBmp = bmp
+        return bmp
+    }
+
     private fun ensureCachedCanvas(): Canvas {
         if (cachedBitmap == null || cachedBitmap?.isRecycled == true) {
             cachedBitmap = Bitmap.createBitmap(LOGICAL_WIDTH.toInt(), LOGICAL_HEIGHT.toInt(), Bitmap.Config.ARGB_8888)
@@ -415,11 +506,14 @@ class GearCubeFlipView @JvmOverloads constructor(
         )
     }
 
+    private var lastAmbientDrawMs: Long = 0L
+
     /**
      * 徽章常驻微动效循环：外环旋转 + 呼吸微脉冲 (在常驻或展现态驱动)
      */
     private fun startAmbientLoop() {
         if (ambientLoopAnimator != null && ambientLoopAnimator!!.isRunning) return
+        lastAmbientDrawMs = 0L
         ambientLoopAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = 48000L // 48秒大循环周期
             repeatCount = ValueAnimator.INFINITE
@@ -436,7 +530,14 @@ class GearCubeFlipView @JvmOverloads constructor(
                     val sinVal = sin(pulseFrac * 2 * Math.PI).toFloat()
                     emblemPulseScale = 1.0f + 0.025f * ((sinVal + 1f) / 2f)
 
-                    invalidate()
+                    // 3D 翻转入/退场期间已有 flipAnimator 逐帧驱动，避免双倍重绘；驻留态按 ~30fps 节流
+                    if (currentState == AnimState.HOLDING) {
+                        val nowMs = anim.currentPlayTime
+                        if (lastAmbientDrawMs == 0L || kotlin.math.abs(nowMs - lastAmbientDrawMs) >= 32L) {
+                            lastAmbientDrawMs = nowMs
+                            invalidate()
+                        }
+                    }
                 }
             }
             start()
@@ -445,9 +546,6 @@ class GearCubeFlipView @JvmOverloads constructor(
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
-        if (cachedBitmap == null && w > 0 && h > 0 && visibility == VISIBLE) {
-            ensureCachedCanvas()
-        }
     }
 
     /**
@@ -521,6 +619,7 @@ class GearCubeFlipView @JvmOverloads constructor(
     fun dismiss() {
         val action = Runnable {
             cancelAllAnimators()
+            releaseSnapshotBuffer()
             pendingTargetGear = null
             gearQueue.clear()
             currentState = AnimState.IDLE
@@ -641,16 +740,24 @@ class GearCubeFlipView @JvmOverloads constructor(
     /**
      * 阶段 2：档位高亮停留 2.0 秒 (底面在 90° 稳稳正对用户，微型进度条平滑缩短)
      */
+    private var lastHoldInvalidateMs: Long = 0L
+
     private fun startHoldCountdown(durationMs: Long = DURATION_HOLD_MS) {
         holdAnimator?.cancel()
         holdProgress = 1f
+        lastHoldInvalidateMs = 0L
 
         holdAnimator = ValueAnimator.ofFloat(1f, 0f).apply {
             duration = durationMs
             interpolator = null // 线性平滑缩短
             addUpdateListener { anim ->
                 holdProgress = anim.animatedValue as Float
-                invalidate()
+                // ambientLoopAnimator 在 HOLDING 态按 ~30fps 触发全屏重绘，避免双 60fps 动画叠加重绘
+                val nowMs = anim.currentPlayTime
+                if (ambientLoopAnimator?.isRunning != true && (lastHoldInvalidateMs == 0L || nowMs - lastHoldInvalidateMs >= 32L)) {
+                    lastHoldInvalidateMs = nowMs
+                    invalidate()
+                }
             }
             addListener(object : AnimatorListenerAdapter() {
                 override fun onAnimationEnd(animation: Animator) {
@@ -691,6 +798,7 @@ class GearCubeFlipView @JvmOverloads constructor(
                 override fun onAnimationEnd(animation: Animator) {
                     currentState = AnimState.IDLE
                     cancelAllAnimators()
+                    releaseSnapshotBuffer()
                     flipProgress = 0f
                     visibility = GONE
                     onFlipCompleteListener?.invoke()
@@ -698,6 +806,23 @@ class GearCubeFlipView @JvmOverloads constructor(
             })
             start()
         }
+    }
+
+    private fun releaseSnapshotBuffer() {
+        hasValidSnapshot = false
+        cachedCanvas = null
+        cachedBitmap?.let { bmp ->
+            if (!bmp.isRecycled) bmp.recycle()
+        }
+        cachedBitmap = null
+        cachedOuterRingBmp?.let { if (!it.isRecycled) it.recycle() }
+        cachedOuterRingBmp = null
+        cachedSecRingBmp?.let { if (!it.isRecycled) it.recycle() }
+        cachedSecRingBmp = null
+        cachedSecRingKey = ""
+        cachedCenterEmblemBmp?.let { if (!it.isRecycled) it.recycle() }
+        cachedCenterEmblemBmp = null
+        cachedCenterEmblemKey = ""
     }
 
     private fun cancelAllAnimators() {
@@ -725,9 +850,7 @@ class GearCubeFlipView @JvmOverloads constructor(
     override fun onDetachedFromWindow() {
         dismiss()
         cancelAllAnimators()
-        cachedBitmap?.recycle()
-        cachedBitmap = null
-        cachedCanvas = null
+        releaseSnapshotBuffer()
         super.onDetachedFromWindow()
     }
 
@@ -925,63 +1048,31 @@ class GearCubeFlipView @JvmOverloads constructor(
             canvas.drawRect(rectTmp, bgPaint)
         }
 
-        // 2. 中央 320px 科技徽章 (带呼吸脉冲与连环切档微缩放)
+        // 2. 中央 320px 科技徽章 (采用 3 层离屏纹理缓存绘制，在 3D 透视旋转与缩放下零 DashPathEffect / 零 SW Path Mask / 零 RenderTarget)
         val emblemScale = emblemPulseScale * wayBScale
         canvas.save()
         canvas.scale(emblemScale, emblemScale, cx, cy)
 
-        // 2.1 内嵌暗色微光磨砂玻璃衬底 (r = 142px)
-        val glassShader = innerGlassShaders[theme.code] ?: innerGlassShaders["P"]!!
-        innerGlassPaint.shader = glassShader
-        innerGlassPaint.alpha = (alphaMod * 255).toInt()
-        canvas.drawCircle(cx, cy, 142f, innerGlassPaint)
+        // 2.1 内嵌磨砂底 + 核心高光圆环 + 5 层 CNC 3D 档位字母 (一次性预烘焙纹理)
+        val centerBmp = ensureCenterEmblemBmp(theme)
+        bitmapPaint.alpha = (alphaMod * 255 * wayBBrightness).coerceIn(0f, 255f).toInt()
+        canvas.drawBitmap(centerBmp, cx - emblemHalfSize, cy - emblemHalfSize, bitmapPaint)
 
-        // 2.2 最外层精密科技刻度规 (顺时针旋转，r = 152px)
+        // 2.2 最外层精密科技刻度规与 4 向高光刻度 (顺时针旋转)
+        val outerBmp = ensureOuterRingBmp()
+        bitmapPaint.alpha = (alphaMod * 255 * wayBBrightness).coerceIn(0f, 255f).toInt()
         canvas.save()
         canvas.rotate(ringCwAngle, cx, cy)
-        outerRingPaint.alpha = (alphaMod * 56).toInt()
-        canvas.drawCircle(cx, cy, 152f, outerRingPaint)
-
-        // 4 向高光刻度 (上、下、左、右，6×12px，rx 3px)
-        outerTicksPaint.alpha = (alphaMod * 255 * wayBBrightness).coerceAtMost(255f).toInt()
-        // Top tick
-        tickRect.set(cx - 3f, cy - 158f, cx + 3f, cy - 146f)
-        canvas.drawRoundRect(tickRect, 3f, 3f, outerTicksPaint)
-        // Bottom tick
-        tickRect.set(cx - 3f, cy + 146f, cx + 3f, cy + 158f)
-        canvas.drawRoundRect(tickRect, 3f, 3f, outerTicksPaint)
-        // Left tick
-        tickRect.set(cx - 158f, cy - 3f, cx - 146f, cy + 3f)
-        canvas.drawRoundRect(tickRect, 3f, 3f, outerTicksPaint)
-        // Right tick
-        tickRect.set(cx + 146f, cy - 3f, cx + 158f, cy + 3f)
-        canvas.drawRoundRect(tickRect, 3f, 3f, outerTicksPaint)
+        canvas.drawBitmap(outerBmp, cx - emblemHalfSize, cy - emblemHalfSize, bitmapPaint)
         canvas.restore()
 
-        // 2.3 核心高光雕刻圆环 (r = 142px, stroke 5.5px, 210px 双段弧)
-        val coreRingShader = coreRingShaders[theme.code] ?: coreRingShaders["P"]!!
-        coreRingPaint.shader = coreRingShader
-        coreRingPaint.alpha = (alphaMod * 255 * wayBBrightness).coerceAtMost(255f).toInt()
-        canvas.drawCircle(cx, cy, 142f, coreRingPaint)
-
-        // 2.4 次级纤细辅助环与浮动星光点 (逆时针旋转，r = 130px)
+        // 2.3 次级纤细辅助环与 4 颗浮动星光点 (逆时针旋转)
+        val secBmp = ensureSecRingBmp(theme)
+        bitmapPaint.alpha = (alphaMod * 255).coerceIn(0f, 255f).toInt()
         canvas.save()
         canvas.rotate(ringCcwAngle, cx, cy)
-        secRingPaint.color = theme.accentSecColor
-        secRingPaint.alpha = (alphaMod * 128).toInt()
-        canvas.drawCircle(cx, cy, 130f, secRingPaint)
-
-        // 4 颗浮动白星 (在 45°、135°、225°、315° 方位，r = 3.5px)
-        starDotsPaint.alpha = (alphaMod * 230).toInt()
-        val starDist = 106f // sqrt(106^2 + 106^2) ≈ 150px
-        canvas.drawCircle(cx + starDist, cy - starDist, 3.5f, starDotsPaint)
-        canvas.drawCircle(cx - starDist, cy + starDist, 3.5f, starDotsPaint)
-        canvas.drawCircle(cx + starDist, cy + starDist, 3.5f, starDotsPaint)
-        canvas.drawCircle(cx - starDist, cy - starDist, 3.5f, starDotsPaint)
+        canvas.drawBitmap(secBmp, cx - emblemHalfSize, cy - emblemHalfSize, bitmapPaint)
         canvas.restore()
-
-        // 2.5 巨幅 195px 档位字母 (5层立体雕刻质感 3D 档位字母)
-        draw3DGearLetter(canvas, theme.code, cx, cy, theme, alphaMod, wayBBrightness)
 
         canvas.restore() // 退出徽章 scale
 

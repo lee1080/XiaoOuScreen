@@ -39,7 +39,11 @@ object KaraokeHelper {
         val lineTimestamp: Long,
         var wipeSpan: KaraokeLineWipeSpan?,
         var lastWipeX: Float = -1f,
-        var activeWordIndex: Int = 0
+        var activeWordIndex: Int = 0,
+        var rawOverflow: Float = 0f,
+        var isOverflow: Boolean = false,
+        var textStartX: Float = 0f,
+        var textEndX: Float = 0f
     )
 
     private data class WordSpanInfo(
@@ -58,14 +62,14 @@ object KaraokeHelper {
         return Color.argb(a, red, g, b)
     }
 
-    // 默认皮肤样式 (DEFAULT / 浅色流光)
+    // 默认皮肤样式 (DEFAULT / 氛围联动画卷 —— 背景自带 50~70% 暗调叠层，关闭 GPU BlurMaskFilter 消除离屏 RenderTarget)
     val DEFAULT_STYLE = KaraokeStyle(
-        sungColor = Color.parseColor("#FFFF4081"),      // 桃粉玫红
-        activeColor = Color.parseColor("#FFFF1744"),    // 活力高亮红
-        upcomingColor = Color.parseColor("#44111111"),  // 通透半透明灰
+        sungColor = Color.WHITE,                        // 纯白高亮 (100% 纯白)
+        activeColor = Color.WHITE,                      // 纯白跟唱高亮光束
+        upcomingColor = Color.parseColor("#66FFFFFF"),  // 40% 优雅半透明白
         activeScale = 1.0f,
-        activeShadowColor = Color.parseColor("#80FF799D"),
-        activeShadowRadius = 6f
+        activeShadowColor = 0,
+        activeShadowRadius = 0f
     )
 
     // 毛玻璃皮肤样式 (GLASSMORPHISM)
@@ -266,71 +270,93 @@ object KaraokeHelper {
         val lastWordStart = wordSpans.last().word.startTime
         val lastEnd = wordSpans.last().let { it.word.startTime + it.word.duration }
 
-        // 1. 视口与排版边界精确测算 (基于小欧 3D 形象避让与 splitRatio)
-        var lyricsSkin: LyricsSkin? = null
-        var pRunner: android.view.ViewParent? = textView.parent
-        while (pRunner != null) {
-            if (pRunner is LyricsSkin) {
-                lyricsSkin = pRunner
-                break
-            }
-            pRunner = pRunner.parent
-        }
-        val density = textView.context.resources.displayMetrics.density
-        val areaView = lyricsSkin?.getLyricsArea()
-        val viewportW = lyricsSkin?.getAccurateLyricsViewportWidth()
-            ?: (areaView?.width?.toFloat() ?: (textView.parent as? android.view.View)?.width?.toFloat() ?: 1000f)
-        val itemPadding = (textView.totalPaddingLeft + textView.totalPaddingRight).toFloat()
-        val safeContentW = (viewportW - itemPadding).coerceAtLeast(50f)
+        val existingTag = textView.tag as? KaraokeTag
+        val isSameLine = existingTag != null && existingTag.lineTimestamp == line.timestamp
 
-        // 以 Paint 全量精确测算真实文字物理渲染宽度 (包含字距 letterSpacing 与字号)
-        val measuredTextWidth = textView.paint.measureText(text)
-        val rawOverflow = measuredTextWidth - safeContentW
+        val rawOverflow: Float
+        val isOverflow: Boolean
+        val textStartX: Float
+        val textEndX: Float
 
-        // 临界保护安全阈值 (约 8dp / 12px)：
-        // 当句子长度与边界差距小于 8dp（只差一个字或半个字）时，排版舍入与子像素抗锯齿极易导致 StaticLayout 截断末字！
-        // 因此只要 rawOverflow > -density * 8f，就必须进入超长保护机制！
-        val thresholdPx = density * 8f
-        val isOverflow = rawOverflow > -thresholdPx
-
-        // 锁定歌词视口裁切层级：
-        // 歌词区容器 (lyricsArea) 必须 clipChildren = true 严格锁定歌词左右物理边界，
-        // 防止超长文字往左平移时侵入左侧面板 (封面/歌名)，或往右侵入小欧 3D 形象区 (500px)！
-        // 而 lyricsArea 内部的滚动容器、LinearLayout 与 Wrapper 需 clipChildren = false 允许文字全量排版渲染。
-        if (areaView is android.view.ViewGroup && !areaView.clipChildren) {
-            areaView.clipChildren = true
-            areaView.clipToPadding = true
-        }
-        var cRunner: android.view.ViewParent? = textView.parent
-        while (cRunner != null && cRunner !== areaView && cRunner is android.view.ViewGroup) {
-            if (cRunner.clipChildren) cRunner.clipChildren = false
-            if (cRunner.clipToPadding) cRunner.clipToPadding = false
-            cRunner = cRunner.parent
-        }
-
-        // 2. 排版模式与控件宽度自适应调整 (彻底根除末字吞字截断)
-        if (marqueeEnabled) {
-            textView.setHorizontallyScrolling(true)
-            if (textView.maxLines != 1) textView.maxLines = 1
-            textView.ellipsize = null
-            if (isOverflow) {
-                // 强制展开 TextView 宽度，彻底解除父级 MeasureSpec.AT_MOST 约束，
-                // 确保 Android 内部 StaticLayout/BoringLayout 第一行 100% 容纳所有字符，末字绝不丢失！
-                val requiredWidth = (measuredTextWidth + itemPadding + density * 120f).toInt()
-                val lp = textView.layoutParams
-                if (lp != null && lp.width < requiredWidth) {
-                    lp.width = requiredWidth
-                    textView.requestLayout()
+        if (isSameLine && existingTag != null && existingTag.textEndX > 0f) {
+            rawOverflow = existingTag.rawOverflow
+            isOverflow = existingTag.isOverflow
+            textStartX = existingTag.textStartX
+            textEndX = existingTag.textEndX
+        } else {
+            // 1. 换行/首次进入时，执行一次视口与排版边界精确测算 (基于小欧 3D 形象避让与 splitRatio)
+            var lyricsSkin: LyricsSkin? = null
+            var pRunner: android.view.ViewParent? = textView.parent
+            while (pRunner != null) {
+                if (pRunner is LyricsSkin) {
+                    lyricsSkin = pRunner
+                    break
                 }
-                if (textView.gravity != (android.view.Gravity.START or android.view.Gravity.CENTER_VERTICAL)) {
-                    textView.gravity = android.view.Gravity.START or android.view.Gravity.CENTER_VERTICAL
+                pRunner = pRunner.parent
+            }
+            val density = textView.context.resources.displayMetrics.density
+            val areaView = lyricsSkin?.getLyricsArea()
+            val viewportW = lyricsSkin?.getAccurateLyricsViewportWidth()
+                ?: (areaView?.width?.toFloat() ?: (textView.parent as? android.view.View)?.width?.toFloat() ?: 1000f)
+            val itemPadding = (textView.totalPaddingLeft + textView.totalPaddingRight).toFloat()
+            val safeContentW = (viewportW - itemPadding).coerceAtLeast(50f)
+
+            // 以 Paint 全量精确测算真实文字物理渲染宽度 (包含字距 letterSpacing 与字号)
+            val measuredTextWidth = textView.paint.measureText(text)
+            rawOverflow = measuredTextWidth - safeContentW
+
+            // 临界保护安全阈值 (约 8dp / 12px)：
+            val thresholdPx = density * 8f
+            isOverflow = rawOverflow > -thresholdPx
+
+            // 锁定歌词视口裁切层级
+            if (areaView is android.view.ViewGroup && !areaView.clipChildren) {
+                areaView.clipChildren = true
+                areaView.clipToPadding = true
+            }
+            var cRunner: android.view.ViewParent? = textView.parent
+            while (cRunner != null && cRunner !== areaView && cRunner is android.view.ViewGroup) {
+                if (cRunner.clipChildren) cRunner.clipChildren = false
+                if (cRunner.clipToPadding) cRunner.clipToPadding = false
+                cRunner = cRunner.parent
+            }
+
+            // 2. 排版模式与控件宽度自适应调整 (彻底根除末字吞字截断)
+            if (marqueeEnabled) {
+                textView.setHorizontallyScrolling(true)
+                if (textView.maxLines != 1) textView.maxLines = 1
+                textView.ellipsize = null
+                if (isOverflow) {
+                    val requiredWidth = (measuredTextWidth + itemPadding + density * 120f).toInt()
+                    val lp = textView.layoutParams
+                    if (lp != null && lp.width < requiredWidth) {
+                        lp.width = requiredWidth
+                        textView.requestLayout()
+                    }
+                    if (textView.gravity != (android.view.Gravity.START or android.view.Gravity.CENTER_VERTICAL)) {
+                        textView.gravity = android.view.Gravity.START or android.view.Gravity.CENTER_VERTICAL
+                    }
+                } else {
+                    if (textView.translationX != 0f) textView.translationX = 0f
+                    val lp = textView.layoutParams
+                    val defaultW = android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+                    if (lp != null && lp.width != defaultW) {
+                        lp.width = defaultW
+                        textView.requestLayout()
+                    }
+                    val align = lyricsSkin?.lyricsTextAlignment ?: android.view.Gravity.START
+                    val targetGrav = align or android.view.Gravity.CENTER_VERTICAL
+                    if (textView.gravity != targetGrav) {
+                        textView.gravity = targetGrav
+                    }
                 }
             } else {
+                textView.setHorizontallyScrolling(false)
+                if (textView.maxLines != Integer.MAX_VALUE) textView.maxLines = Integer.MAX_VALUE
                 if (textView.translationX != 0f) textView.translationX = 0f
                 val lp = textView.layoutParams
-                val defaultW = android.view.ViewGroup.LayoutParams.WRAP_CONTENT
-                if (lp != null && lp.width != defaultW) {
-                    lp.width = defaultW
+                if (lp != null && lp.width != android.view.ViewGroup.LayoutParams.MATCH_PARENT) {
+                    lp.width = android.view.ViewGroup.LayoutParams.MATCH_PARENT
                     textView.requestLayout()
                 }
                 val align = lyricsSkin?.lyricsTextAlignment ?: android.view.Gravity.START
@@ -339,34 +365,22 @@ object KaraokeHelper {
                     textView.gravity = targetGrav
                 }
             }
-        } else {
-            // 跑马灯关闭时，超长文字必须干净折行换行
-            textView.setHorizontallyScrolling(false)
-            if (textView.maxLines != Integer.MAX_VALUE) textView.maxLines = Integer.MAX_VALUE
-            if (textView.translationX != 0f) textView.translationX = 0f
-            val lp = textView.layoutParams
-            if (lp != null && lp.width != android.view.ViewGroup.LayoutParams.MATCH_PARENT) {
-                lp.width = android.view.ViewGroup.LayoutParams.MATCH_PARENT
-                textView.requestLayout()
-            }
-            val align = lyricsSkin?.lyricsTextAlignment ?: android.view.Gravity.START
-            val targetGrav = align or android.view.Gravity.CENTER_VERTICAL
-            if (textView.gravity != targetGrav) {
-                textView.gravity = targetGrav
-            }
+
+            // 获取排版精确坐标
+            val initialLayout = textView.layout
+            val layoutW = if (initialLayout != null && initialLayout.lineCount > 0) {
+                initialLayout.getLineRight(0) - initialLayout.getLineLeft(0)
+            } else 0f
+            val totalTextWidth = maxOf(measuredTextWidth, layoutW).coerceAtLeast(1f)
+
+            textStartX = if (initialLayout != null && initialLayout.lineCount > 0) {
+                initialLayout.getPrimaryHorizontal(0)
+            } else 0f
+            textEndX = textStartX + totalTextWidth
         }
 
-        // 获取排版精确坐标
+        // 当前 TextView 的排版布局对象 (供多行判定与逐字坐标提取复用)
         val layout = textView.layout
-        val layoutW = if (layout != null && layout.lineCount > 0) {
-            layout.getLineRight(0) - layout.getLineLeft(0)
-        } else 0f
-        val totalTextWidth = maxOf(measuredTextWidth, layoutW).coerceAtLeast(1f)
-
-        val textStartX = if (layout != null && layout.lineCount > 0) {
-            layout.getPrimaryHorizontal(0)
-        } else 0f
-        val textEndX = textStartX + totalTextWidth
 
         // 状态 1：整行尚未唱到，全行展示优雅半透明底色
         if (currentPositionMs < firstStart) {
@@ -390,7 +404,7 @@ object KaraokeHelper {
             ssb.setSpan(ForegroundColorSpan(style.upcomingColor), 0, text.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
             textView.text = ssb
             textView.setShadowLayer(0f, 0f, 0f, 0)
-            textView.tag = KaraokeTag(line.timestamp, null, textStartX, -1)
+            textView.tag = KaraokeTag(line.timestamp, null, textStartX, -1, rawOverflow, isOverflow, textStartX, textEndX)
             return
         }
 
@@ -421,7 +435,7 @@ object KaraokeHelper {
             } else {
                 textView.setShadowLayer(0f, 0f, 0f, 0)
             }
-            textView.tag = KaraokeTag(line.timestamp, null, textEndX, 9999)
+            textView.tag = KaraokeTag(line.timestamp, null, textEndX, 9999, rawOverflow, isOverflow, textStartX, textEndX)
             return
         }
 
@@ -527,11 +541,13 @@ object KaraokeHelper {
             }
             textView.text = ssb
             if (style.activeShadowRadius > 0f) {
-                textView.setShadowLayer(style.activeShadowRadius, 0f, 0f, style.activeShadowColor)
-            } else {
+                if (textView.shadowRadius != style.activeShadowRadius || textView.shadowColor != style.activeShadowColor) {
+                    textView.setShadowLayer(style.activeShadowRadius, 0f, 0f, style.activeShadowColor)
+                }
+            } else if (textView.shadowRadius > 0f) {
                 textView.setShadowLayer(0f, 0f, 0f, 0)
             }
-            textView.tag = KaraokeTag(line.timestamp, null, 0f, activeWordIndex)
+            textView.tag = KaraokeTag(line.timestamp, null, 0f, activeWordIndex, rawOverflow, isOverflow, textStartX, textEndX)
             return
         }
 
@@ -570,11 +586,13 @@ object KaraokeHelper {
 
         textView.text = ssb
         if (style.activeShadowRadius > 0f) {
-            textView.setShadowLayer(style.activeShadowRadius, 0f, 0f, style.activeShadowColor)
-        } else {
+            if (textView.shadowRadius != style.activeShadowRadius || textView.shadowColor != style.activeShadowColor) {
+                textView.setShadowLayer(style.activeShadowRadius, 0f, 0f, style.activeShadowColor)
+            }
+        } else if (textView.shadowRadius > 0f) {
             textView.setShadowLayer(0f, 0f, 0f, 0)
         }
-        textView.tag = KaraokeTag(line.timestamp, span, currentWipeX, activeWordIndex)
+        textView.tag = KaraokeTag(line.timestamp, span, currentWipeX, activeWordIndex, rawOverflow, isOverflow, textStartX, textEndX)
     }
 
     /**

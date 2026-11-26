@@ -50,6 +50,16 @@ object NotificationLyricsSniffer {
     /** 歌词时间戳格式正则 (如 [01:23.45] 或 <0,500>) */
     private val LYRIC_TIMESTAMP_REGEX = Pattern.compile("(\\[\\d{1,3}:\\d{1,2}|<\\d+,\\d+>)")
 
+    /** 车规级节流与 PackageContext 缓存：消除每秒重复 createPackageContext 与高频 View 树动态展开引起的 GC 掉帧 */
+    private val packageContextCache = java.util.concurrent.ConcurrentHashMap<String, Context>()
+    private val lastRemoteViewParseTime = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private const val REMOTE_VIEW_PARSE_INTERVAL_MS = 350L
+
+    fun clearPackageContextCache() {
+        packageContextCache.clear()
+        lastRemoteViewParseTime.clear()
+    }
+
     /** 候选歌词临时评分数据 */
     private data class Candidate(
         val text: String,
@@ -94,18 +104,29 @@ object NotificationLyricsSniffer {
             val excludedTexts = collectExcludedTexts(context, extras, pkg)
             val candidates = mutableListOf<Candidate>()
 
-            // 1. 从 Notification.extras 收集候选
+            // 1. 从 Notification.extras 收集候选 (极低开销，纯内存键值匹配)
             collectExtrasCandidates(candidates, extras, excludedTexts)
 
-            // 2. 从 RemoteViews 收集候选 (内存中动态反射 View 树)
-            notification.contentView?.let { rv ->
-                collectRemoteViewCandidates(context, candidates, rv, pkg, excludedTexts)
-            }
-            notification.bigContentView?.let { rv ->
-                collectRemoteViewCandidates(context, candidates, rv, pkg, excludedTexts)
-            }
-            notification.headsUpContentView?.let { rv ->
-                collectRemoteViewCandidates(context, candidates, rv, pkg, excludedTexts)
+            // 核心性能优化：若 extras 已提取到高置信度歌词候选 (score >= 35)，直接短路跳过耗时的 RemoteViews 反射与布局展开！
+            val topExtraCandidate = candidates.maxByOrNull { it.score }
+            val needRemoteViews = topExtraCandidate == null || topExtraCandidate.score < 35
+
+            if (needRemoteViews) {
+                val now = android.os.SystemClock.uptimeMillis()
+                val lastParse = lastRemoteViewParseTime[pkg] ?: 0L
+                if (now - lastParse >= REMOTE_VIEW_PARSE_INTERVAL_MS) {
+                    lastRemoteViewParseTime[pkg] = now
+                    // 2. 从 RemoteViews 收集候选 (内存中动态反射 View 树，受 350ms 节流保护)
+                    notification.contentView?.let { rv ->
+                        collectRemoteViewCandidates(context, candidates, rv, pkg, excludedTexts)
+                    }
+                    notification.bigContentView?.let { rv ->
+                        collectRemoteViewCandidates(context, candidates, rv, pkg, excludedTexts)
+                    }
+                    notification.headsUpContentView?.let { rv ->
+                        collectRemoteViewCandidates(context, candidates, rv, pkg, excludedTexts)
+                    }
+                }
             }
 
             // 3. 选取加权得分最高且符合歌词特征的最佳候选
@@ -133,13 +154,8 @@ object NotificationLyricsSniffer {
         val set = mutableSetOf<String>()
         addExcluded(set, pkg)
 
-        // 尝试获取应用名称
-        try {
-            val pm = context.packageManager
-            val appInfo = pm.getApplicationInfo(pkg, 0)
-            val appName = pm.getApplicationLabel(appInfo).toString()
-            addExcluded(set, appName)
-        } catch (_: Exception) {}
+        // 尝试获取应用名称 (复用 MusicRecognitionEngine 缓存，避免重复 PackageManager Binder IPC)
+        addExcluded(set, MusicRecognitionEngine.getCachedAppDisplayName(context, pkg))
 
         if (extras == null) return set
 
@@ -207,13 +223,20 @@ object NotificationLyricsSniffer {
         pkg: String,
         excluded: Set<String>
     ) {
+        var container: FrameLayout? = null
         try {
-            // 加载目标应用 PackageContext
-            val targetContext = context.createPackageContext(
-                pkg,
-                Context.CONTEXT_RESTRICTED or Context.CONTEXT_IGNORE_SECURITY
-            )
-            val container = FrameLayout(targetContext)
+            // 复用目标应用 PackageContext 缓存，杜绝每次通知到达重复 createPackageContext
+            val appContext = context.applicationContext ?: context
+            if (packageContextCache.size >= 3 && !packageContextCache.containsKey(pkg)) {
+                packageContextCache.clear()
+            }
+            val targetContext = packageContextCache.getOrPut(pkg) {
+                appContext.createPackageContext(
+                    pkg,
+                    Context.CONTEXT_RESTRICTED or Context.CONTEXT_IGNORE_SECURITY
+                )
+            }
+            container = FrameLayout(targetContext)
             // 内存中实例化 RemoteViews 结构树
             val renderedView = remoteViews.apply(targetContext, container)
 
@@ -224,7 +247,12 @@ object NotificationLyricsSniffer {
                 addCandidate(candidates, text, "remote_view", excluded, baseScore = 24)
             }
         } catch (_: Exception) {
-            // 安全捕获：目标应用资源未就绪或主题不支持时平滑降级，不中断主流程
+            // 安全捕获：目标应用资源未就绪或主题不支持时平滑降级，移除失效 Context 缓存
+            packageContextCache.remove(pkg)
+        } finally {
+            try {
+                container?.removeAllViews()
+            } catch (_: Throwable) {}
         }
     }
 

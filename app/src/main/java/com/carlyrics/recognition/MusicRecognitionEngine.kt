@@ -32,6 +32,42 @@ class MusicRecognitionEngine(private val context: Context) {
         private const val TAG = "MusicRecognition"
         private const val POLL_INTERVAL_MS = 2000L
 
+        private val appLabelCache = ConcurrentHashMap<String, String>()
+
+        /** 解析并缓存播放器应用名，避免每次通知/歌单变更触发 PackageManager Binder IPC */
+        fun getCachedAppDisplayName(context: Context, packageName: String): String {
+            if (packageName.isBlank() || packageName == "unknown") return "未知播放器"
+            appLabelCache[packageName]?.let { return it }
+            val resolved = try {
+                val pm = context.packageManager
+                val appInfo = pm.getApplicationInfo(packageName, 0)
+                pm.getApplicationLabel(appInfo).toString()
+            } catch (_: Exception) {
+                val lower = packageName.lowercase()
+                when {
+                    lower.contains("zlink") -> "Zlink (CarPlay)"
+                    lower.contains("phonemirror") || lower.contains("autokit") -> "AutoKit (CarPlay)"
+                    lower.contains("speedplay") -> "SpeedPlay (CarPlay)"
+                    lower.contains("carlife") -> "CarLife"
+                    lower.contains("gearhead") -> "Android Auto"
+                    lower.contains("bluetooth") -> "蓝牙音乐"
+                    lower.contains("cloudmusic") || lower.contains("netease") -> "网易云音乐"
+                    lower.contains("qqmusic") || lower.contains("tencent") -> "QQ音乐"
+                    lower.contains("kugou") -> "酷狗音乐"
+                    lower.contains("kuwo") -> "酷我音乐"
+                    lower.contains("luna.music") || lower.contains("qishui") -> "汽水音乐"
+                    lower.contains("spotify") -> "Spotify"
+                    lower.contains("apple.android.music") -> "Apple Music"
+                    else -> packageName
+                }
+            }
+            if (appLabelCache.size > 64) {
+                appLabelCache.clear()
+            }
+            appLabelCache[packageName] = resolved
+            return resolved
+        }
+
         // Android 原生 / 车载 A2DP Sink 与 AVRCP Controller 广播 Action
         private const val ACTION_AVRCP_TRACK_EVENT = "android.bluetooth.avrcp-controller.profile.action.TRACK_EVENT"
         private const val ACTION_AVRCP_CONNECTION_STATE_CHANGED = "android.bluetooth.avrcp-controller.profile.action.CONNECTION_STATE_CHANGED"
@@ -59,11 +95,13 @@ class MusicRecognitionEngine(private val context: Context) {
             val a = artist?.trim() ?: ""
             if (t.isEmpty() || t == "0" || t.all { it.isDigit() }) return true
 
+            // 精准占位符与电台过滤词 (切勿使用泛化子串如 "am" / "fm"，否则会导致 "Yamy"、"Sam"、"Dream" 等正常歌手/曲名被误拦截)
             val invalidKeywords = listOf(
                 "正在运行", "点击进入", "点按即可", "点按了解", "了解详情",
                 "已打开", "后台运行", "运行中", "service 正在运行", "服务正在运行",
                 "mobilelog", "mtklogger", "手势识别", "未在播放", "暂无播放",
-                "无播放内容", "未知歌曲", "喜马拉雅", "收音机", "网络电台", "fm", "am", "车机电台"
+                "无播放内容", "未知歌曲", "喜马拉雅", "收音机", "网络电台", "车机电台",
+                "fm电台", "am电台", "fm广播", "am广播"
             )
             val tLower = t.lowercase()
             val aLower = a.lowercase()
@@ -72,6 +110,13 @@ class MusicRecognitionEngine(private val context: Context) {
                     return true
                 }
             }
+
+            // 独立词频段收音机判定 (仅当作为独立单词且紧跟频段数字时拦截，如 "FM 91.8" / "AM 1024")
+            val radioRegex = Regex("""(^|\s)(fm|am)\s*\d+""", RegexOption.IGNORE_CASE)
+            if (radioRegex.containsMatchIn(t) || radioRegex.containsMatchIn(a)) {
+                return true
+            }
+
             return false
         }
 
@@ -101,6 +146,25 @@ class MusicRecognitionEngine(private val context: Context) {
     private val _liveNotificationLyric = MutableStateFlow<NotificationLyric?>(null)
     val liveNotificationLyric: StateFlow<NotificationLyric?> = _liveNotificationLyric
 
+    /** 双向校准原车酷狗：切歌/起播切换或停播收敛时也能及时捕获，不会因状态暂落为 false 而失明 */
+    private fun verifyKuGouSyncIfNeeded(track: CurrentTrack?) {
+        if (track?.source == MusicSource.KUGOU_NATIVE) {
+            kuGouClient.verifyPlaybackAsync(
+                expectedPlaying = track.isPlaying,
+                expectedTitle = track.title,
+                needsLyrics = track.isPlaying && track.nativeLyrics.isNullOrEmpty()
+            )
+        } else if (track == null || !track.isPlaying) {
+            // 若当前无音源在播（如用户从网易云/蓝牙切去原车酷狗播放首首歌），顺便检查酷狗是否已静音/直出起播
+            val btMirroredTitle = track?.takeIf { it.source == MusicSource.BLUETOOTH }?.title ?: ""
+            kuGouClient.verifyPlaybackAsync(
+                expectedPlaying = false,
+                expectedTitle = btMirroredTitle,
+                needsLyrics = false
+            )
+        }
+    }
+
     /** 原车酷狗音乐专属 AIDL 客户端 (优先读取原车/U盘歌词与封面，无权限门槛) */
     val kuGouClient = KuGouNativeClient(context, object : KuGouNativeClient.KuGouListener {
         override fun onTrackChanged(track: CurrentTrack) {
@@ -109,11 +173,11 @@ class MusicRecognitionEngine(private val context: Context) {
 
         override fun onProgressChanged(positionMs: Long, durationMs: Long) {
             val current = _currentTrack.value
-            if (current != null && current.source == MusicSource.KUGOU_NATIVE) {
+            if (current != null && current.source == MusicSource.KUGOU_NATIVE && current.isPlaying) {
                 val dur = if (durationMs > 0) durationMs else current.duration
                 val pos = positionMs.coerceAtLeast(0L)
                 if (current.position != pos || current.duration != dur) {
-                    _currentTrack.value = current.copy(position = pos, duration = dur, isPlaying = true)
+                    _currentTrack.value = current.copy(position = pos, duration = dur, isPlaying = current.isPlaying)
                 }
             }
         }
@@ -131,6 +195,7 @@ class MusicRecognitionEngine(private val context: Context) {
     // 动态进度推导与切歌脏数据防护状态
     @Volatile private var trackedTitle: String = ""
     @Volatile private var trackedArtist: String = ""
+    @Volatile private var trackedPackageName: String = ""
     @Volatile private var lastSamplePos: Long = -1L
     @Volatile private var lastSampleTime: Long = 0L
     @Volatile private var lastPosAdvanceTime: Long = 0L
@@ -156,6 +221,34 @@ class MusicRecognitionEngine(private val context: Context) {
     /** 记录蓝牙 A2DP 音频流是否处于真实发声推流状态 (STATE_PLAYING = 10) */
     @Volatile
     private var isBtA2dpStreaming: Boolean = false
+
+    /** 蓝牙已显式暂停或被其它切入的播放器压制，禁止后台残留 PLAYING 抢回焦点 */
+    @Volatile
+    private var btPausedOrSuppressed: Boolean = false
+
+    @Volatile
+    private var lastBtPauseMs: Long = 0L
+
+    /** 第三方 MediaSession 音频静默连续监测起始时间 (用于捕获停播未刷新 PlaybackState 的异常播放器) */
+    @Volatile
+    private var lastAudioInactiveMs: Long = 0L
+
+    private fun isBluetoothExplicitPaused(state: PlaybackState?): Boolean {
+        val code = state?.state ?: PlaybackState.STATE_NONE
+        // 标准 MediaSession PlaybackState 中 STATE_PAUSED == 2、STATE_PLAYING == 3；绝不能把 3 当作暂停
+        return code == PlaybackState.STATE_PAUSED ||
+            code == PlaybackState.STATE_STOPPED || code == PlaybackState.STATE_NONE || code == PlaybackState.STATE_ERROR
+    }
+
+    private fun isBluetoothPlaying(state: PlaybackState?): Boolean {
+        if (btPausedOrSuppressed && !isBtA2dpStreaming) return false
+        val code = state?.state ?: PlaybackState.STATE_NONE
+        if (code == PlaybackState.STATE_STOPPED || code == PlaybackState.STATE_NONE || code == PlaybackState.STATE_ERROR) {
+            return false
+        }
+        if (isBtA2dpStreaming) return true
+        return isDynamicPlayingConfirmed == true && lastPosAdvanceTime > lastBtPauseMs
+    }
 
     /** 车载 Android 9 A2DP Sink 官方媒体浏览器连接对象 */
     private var a2dpMediaBrowser: MediaBrowser? = null
@@ -211,36 +304,57 @@ class MusicRecognitionEngine(private val context: Context) {
                 }
             }
 
-            // 3. 正在实际发声且进度的音源防抢占：如果当前已有音源在播放中，候选音源来自另一个未在播放的通道，则保持当前在播音源
-            if (current.isPlaying && !candidate.isPlaying && candidate.packageName != current.packageName) {
-                AppLogger.d(TAG, "[$reason] 候选音源未在播放，保持正在发声的音源: ${current.title} (${current.packageName})")
+            // 2.5 长安车机特性防护：原车酷狗通道 (com.chinatsp.music) 在蓝牙播放期间会镜像同歌名元数据（且无原生歌词/封面）。
+            // 严禁镜像帧把活跃音源从 BLUETOOTH 劫持为 KUGOU_NATIVE（否则后续蓝牙暂停会被当成“不同包名”拦截）；
+            // 若蓝牙仍在播放而车载镜像帧先行收到车机静音/暂停信号(isPlaying=false)，转交为当前 BLUETOOTH 音轨的暂停状态。
+            if (current.source == MusicSource.BLUETOOTH &&
+                candidate.source == MusicSource.KUGOU_NATIVE &&
+                current.title == candidate.title &&
+                candidate.nativeLyrics.isNullOrEmpty() &&
+                candidate.nativeCoverUrl.isNullOrBlank()
+            ) {
+                if (!candidate.isPlaying && current.isPlaying) {
+                    val nowMs = android.os.SystemClock.elapsedRealtime()
+                    if (nowMs - lastPosAdvanceTime >= 200L) {
+                        AppLogger.i(TAG, "[$reason] ⏸️ 检测到原车镜像同步蓝牙静音/暂停 (${current.title})，同步冻结当前蓝牙音轨并维持 BLUETOOTH 归属")
+                        isBtA2dpStreaming = false
+                        btPausedOrSuppressed = true
+                        lastBtPauseMs = nowMs
+                        isDynamicPlayingConfirmed = false
+                        _currentTrack.value = current.copy(isPlaying = false)
+                        lastDetectionSource = "$reason-BtMirrorPaused"
+                    }
+                } else {
+                    AppLogger.d(TAG, "[$reason] 拦截原车酷狗镜像帧抢占蓝牙焦点: ${candidate.title}")
+                }
                 return
             }
 
-            // 4. 同一音源通道的超短瞬态假暂停防抖过滤：
-            // 如果当前在播音源与候选音源属于同一曲目且来自蓝牙通道 (BLUETOOTH)，
-            // 且上一次物理递增推进发生在 2.0 秒内，若候选音源突然上报 isPlaying=false 且 position 未改变，
-            // 极大概率是双通道时序差造成的虚假震荡，忽略本次假暂停！
-            if (current.isPlaying && !candidate.isPlaying &&
+            // 2.6 若此前因某种时序让仅作蓝牙镜像且无原生词/封面的 KUGOU_NATIVE 暂居高位，蓝牙真实通道到达同名歌时允许夺回焦点
+            val isBtReclaimingMirror = (candidate.source == MusicSource.BLUETOOTH &&
+                current.source == MusicSource.KUGOU_NATIVE &&
                 current.title == candidate.title &&
-                current.artist == candidate.artist &&
-                current.source == MusicSource.BLUETOOTH &&
-                candidate.source == MusicSource.BLUETOOTH
-            ) {
-                val now = android.os.SystemClock.elapsedRealtime()
-                if (now - lastPosAdvanceTime < 2000L) {
-                    AppLogger.d(TAG, "[$reason] 蓝牙瞬态时序防抖: 距上次物理递增仅 ${now - lastPosAdvanceTime}ms，过滤虚假暂停状态")
-                    return
-                }
+                current.nativeLyrics.isNullOrEmpty() &&
+                current.nativeCoverUrl.isNullOrBlank())
+
+            // 3. 正在发声/最近在播的音源防抢占：
+            // 如果候选音源并未在播放 (candidate.isPlaying == false)，且来自另一个不同的应用包名 (如后台残留的暂停态蓝牙音源)，
+            // 绝不能在当前主播放器 (如汽水音乐) 切歌缓冲的数百毫秒假暂停间隙被虚假抢占！
+            // 仅当候选音源真实起播发声 (candidate.isPlaying == true) 时，才允许跨应用通道接管。
+            if (!candidate.isPlaying && candidate.packageName != current.packageName && !isBtReclaimingMirror) {
+                AppLogger.d(TAG, "[$reason] 候选音源未在播放，拒绝抢占当前音轨: ${current.title} (${current.packageName}) -> 候选: ${candidate.title} (${candidate.packageName})")
+                return
             }
 
-            // 5. 重复微小抖动过滤：同一音轨相同播放状态下，若进度微小抖动(<500ms)，避免高频轰炸 StateFlow 与日志
+            // 4. 重复微小抖动过滤：同一音轨相同播放状态下，若进度微小抖动(<500ms)且原生词/封面未新到，避免高频轰炸 StateFlow 与日志
             if (current.title == candidate.title &&
                 current.artist == candidate.artist &&
                 current.isPlaying == candidate.isPlaying &&
                 current.duration == candidate.duration &&
                 current.packageName == candidate.packageName &&
                 current.source == candidate.source &&
+                current.nativeCoverUrl == candidate.nativeCoverUrl &&
+                (current.nativeLyrics?.size ?: 0) == (candidate.nativeLyrics?.size ?: 0) &&
                 kotlin.math.abs(current.position - candidate.position) < 500L
             ) {
                 return
@@ -262,7 +376,20 @@ class MusicRecognitionEngine(private val context: Context) {
         _currentTrack.value = candidate
         if (candidate.source == MusicSource.BLUETOOTH) {
             lastBluetoothTrack = candidate
+            if (candidate.isPlaying) {
+                btPausedOrSuppressed = false
+            } else {
+                isBtA2dpStreaming = false
+                btPausedOrSuppressed = true
+                lastBtPauseMs = android.os.SystemClock.elapsedRealtime()
+            }
+        } else if (candidate.isPlaying) {
+            // 切换到其它本地/三方/酷狗播放器在播时，立即压制后台蓝牙残留状态，防止后续暂停时蓝牙反抢焦点
+            isBtA2dpStreaming = false
+            btPausedOrSuppressed = true
+            lastBtPauseMs = android.os.SystemClock.elapsedRealtime()
         }
+        lastAudioInactiveMs = 0L
         lastDetectionSource = if (candidate.isPlaying) "$reason-Active" else "$reason-Paused"
 
         if (isRealArbitration) {
@@ -284,28 +411,36 @@ class MusicRecognitionEngine(private val context: Context) {
         artist: String,
         rawPos: Long,
         rawIsPlaying: Boolean,
-        source: MusicSource
+        source: MusicSource,
+        packageName: String = ""
     ): Pair<Long, Boolean> {
         val now = android.os.SystemClock.elapsedRealtime()
         var pos = if (rawPos != PlaybackState.PLAYBACK_POSITION_UNKNOWN && rawPos >= 0L) rawPos else 0L
 
-        // 1. 切歌检测与脏进度瞬移过滤
-        val isNewTrack = (title != trackedTitle || artist != trackedArtist)
+        // 1. 切歌检测与脏进度瞬移过滤（严格限定在同一播放器包名内部，绝不把别的暂停App进度当成当前App切歌脏进度）
+        val isNewTrack = (title != trackedTitle || artist != trackedArtist ||
+            (packageName.isNotBlank() && trackedPackageName.isNotBlank() && packageName != trackedPackageName))
+        val isSamePackageSwitch = packageName.isBlank() || trackedPackageName.isBlank() || packageName == trackedPackageName
         if (isNewTrack) {
-            if (trackedTitle.isNotBlank()) {
+            if (trackedTitle.isNotBlank() && isSamePackageSwitch) {
                 lastTrackEndPos = lastSamplePos.coerceAtLeast(0L)
+                trackSwitchTime = now
+            } else if (!isSamePackageSwitch) {
+                // 跨播放器切换（如 汽水 -> 网易云 / 网易云 -> 蓝牙）不继承上一款App的进度历史，防止刚起播时被清零
+                lastTrackEndPos = 0L
+                trackSwitchTime = 0L
             }
-            trackSwitchTime = now
             trackedTitle = title
             trackedArtist = artist
+            if (packageName.isNotBlank()) trackedPackageName = packageName
             lastSamplePos = pos
             lastSampleTime = now
             lastPosAdvanceTime = now
             isDynamicPlayingConfirmed = null
         }
 
-        // 新歌开始的前 2500ms 内，如果收到接近上一首歌结尾的残留脏进度 (例如 > 5000ms 且偏差在 6000ms 范围内)，强制丢弃并置零
-        if (now - trackSwitchTime <= 2500L && lastTrackEndPos > 5000L) {
+        // 新歌开始的前 2500ms 内，如果收到接近同款播放器上一首歌结尾的残留脏进度，强制丢弃并置零
+        if (trackSwitchTime > 0L && now - trackSwitchTime <= 2500L && lastTrackEndPos > 5000L && isSamePackageSwitch) {
             if (kotlin.math.abs(pos - lastTrackEndPos) < 6000L || pos > lastTrackEndPos - 2000L) {
                 AppLogger.d(TAG, "切歌脏进度拦截: 丢弃残留进度 $pos (上一首结束于 $lastTrackEndPos)")
                 pos = 0L
@@ -315,10 +450,29 @@ class MusicRecognitionEngine(private val context: Context) {
         // 2. 基于同一首歌进度递增/停滞的动态状态判定
         val timeDelta = now - lastSampleTime
         val posDelta = pos - lastSamplePos
+        var isBtStalledConfirmed = false
 
         if (!isNewTrack && pos > 0L) {
-            // 采样间隔在 400ms ~ 3500ms 之间
-            if (timeDelta in 400..3500) {
+            if (timeDelta in 1..399) {
+                // 多通道毫秒级回声窗口 (<400ms)：
+                // 若进度明确向前推进 (>0)，记录最新进度并刷新推进时间戳；
+                // 若 posDelta == 0（典型如 AVRCP 刚推进后 16ms 内 PlaybackState 携带同进度回声），保持原采样基准不动，绝不误判停滞
+                if (posDelta > 0L) {
+                    if (posDelta >= 100L) {
+                        isDynamicPlayingConfirmed = true
+                    }
+                    lastPosAdvanceTime = now
+                    lastSamplePos = pos
+                    lastSampleTime = now
+                } else if (posDelta in -1500L..-1L && source == MusicSource.BLUETOOTH && isDynamicPlayingConfirmed == true && lastSamplePos > 0L) {
+                    // 另一蓝牙通道缓存进度略微滞后 (<1.5s) 时，对齐至当前最新已推进进度，防止歌词倒退回跳
+                    pos = lastSamplePos
+                } else if (posDelta == 0L && source == MusicSource.BLUETOOTH && lastSamplePos > 0L && now - lastPosAdvanceTime >= 2200L) {
+                    isDynamicPlayingConfirmed = false
+                    isBtA2dpStreaming = false
+                    isBtStalledConfirmed = true
+                }
+            } else if (timeDelta in 400..3500) {
                 if (posDelta in 250..4000) {
                     // 进度正在以真实物理速率稳定递增！确认正在播放
                     isDynamicPlayingConfirmed = true
@@ -330,12 +484,24 @@ class MusicRecognitionEngine(private val context: Context) {
                     if (now - lastPosAdvanceTime >= 2000L || !rawIsPlaying) {
                         // 停滞时间超过 2 秒，或者底层明确指示暂停，确认暂停
                         isDynamicPlayingConfirmed = false
+                        if (source == MusicSource.BLUETOOTH && lastSamplePos > 0L && now - lastPosAdvanceTime >= 2000L) {
+                            isBtA2dpStreaming = false
+                            isBtStalledConfirmed = true
+                        }
                     }
                 } else if (posDelta > 0) {
                     lastSamplePos = pos
                     lastSampleTime = now
+                    lastPosAdvanceTime = now
                 }
             } else if (timeDelta >= 3500) {
+                if (posDelta > 0L) {
+                    lastPosAdvanceTime = now
+                } else if (posDelta == 0L && source == MusicSource.BLUETOOTH && lastSamplePos > 0L && now - lastPosAdvanceTime >= 2200L) {
+                    isDynamicPlayingConfirmed = false
+                    isBtA2dpStreaming = false
+                    isBtStalledConfirmed = true
+                }
                 lastSamplePos = pos
                 lastSampleTime = now
             }
@@ -348,17 +514,27 @@ class MusicRecognitionEngine(private val context: Context) {
         // 3. 动态状态最终仲裁 (严格遵循真实物理状态)：
         val finalPlaying = if (!rawIsPlaying) {
             // 底层指示未播放 (PAUSED / NOT_PLAYING / rawIsPlaying == false)
-            if (isDynamicPlayingConfirmed == true && (posDelta in 250..4000 || now - lastPosAdvanceTime < 2000L)) {
-                // 若进度正在以物理速率狂飙递增，或距离上次物理递增还在 2 秒稳定窗口期内，保持播放
+            if (source != MusicSource.BLUETOOTH) {
+                // 非蓝牙源 (网易云音乐、汽水音乐、QQ音乐、酷狗等应用内 MediaSession)：
+                // 底层回调 STATE_PAUSED/STOPPED 时为绝对真实暂停，立即确认暂停，0 延迟冻结歌词！
+                isDynamicPlayingConfirmed = false
+                false
+            } else if (isDynamicPlayingConfirmed == true &&
+                ((timeDelta in 400..3500 && posDelta in 250..4000) ||
+                 (timeDelta < 400L && now - lastPosAdvanceTime < 1500L && posDelta >= -1500L))
+            ) {
+                // 兼容车载蓝牙 AVRCP 与多通道毫秒级回声：已确认持续播放且仍在推进窗内时保持播放，一旦停滞立即冻结
                 true
             } else {
-                // 停滞超过 2 秒且底层指示非播放，坚决确认暂停！
                 isDynamicPlayingConfirmed = false
                 false
             }
         } else {
             // 底层指示正在播放 (rawIsPlaying == true)
-            if (isDynamicPlayingConfirmed == false) {
+            if (isBtStalledConfirmed) {
+                // 蓝牙在已有递增进度前提下停滞超过 2s（典型如静音按钮只暂停手机但未发 AVRCP PAUSED），强制收敛为暂停
+                false
+            } else if (isDynamicPlayingConfirmed == false) {
                 // 虽报播放，但采样发现进度长期停滞不动
                 // 此时检测音频流是否真的在响
                 val isAudioReallyActive = isBtA2dpStreaming || try { audioManager.isMusicActive } catch (_: Exception) { false }
@@ -479,19 +655,29 @@ class MusicRecognitionEngine(private val context: Context) {
                 0L
             }
 
-            // 更新蓝牙 A2DP 音频流活跃状态
-            val isExplicitPaused = (stateCode == PlaybackState.STATE_PAUSED || stateCode == 3)
-            if (isExplicitPaused) {
-                isBtA2dpStreaming = false
-            } else if (stateCode == PlaybackState.STATE_PLAYING || stateCode == 2) {
+            // NforeBluetooth AVRCP TRACK_EVENT 底层实现中，mPlayStatus==2 为 PLAYING，3 为 PAUSED
+            // 注意不要与标准 PlaybackState.STATE_PAUSED(2) 混用；且暂停前需交由 resolveDynamicStateAndPos 仲裁
+            val isExplicitPaused = (stateCode == 3 ||
+                stateCode == PlaybackState.STATE_STOPPED ||
+                stateCode == PlaybackState.STATE_NONE ||
+                stateCode == PlaybackState.STATE_ERROR)
+            if (!isExplicitPaused && stateCode == 2) {
                 isBtA2dpStreaming = true
             }
 
-            // NforeBluetooth 底层实现中，mPlayStatus==2 为 PLAYING，3 为 PAUSED
             val rawIsPlaying = if (isExplicitPaused) {
                 false
             } else {
-                isBtA2dpStreaming || stateCode == PlaybackState.STATE_PLAYING || stateCode == 2
+                isBtA2dpStreaming || stateCode == 2
+            }
+
+            // 前置避让：若当前已有其它本地/三方播放器正在发声且 A2DP 未激活，后台残留蓝牙心跳直接让位，绝不污染当前音轨的动态进度机
+            val otherSongPlaying = current != null && current.isPlaying &&
+                current.source != MusicSource.BLUETOOTH &&
+                (current.title != title || current.artist != artist)
+            if (otherSongPlaying && !isBtA2dpStreaming && (!rawIsPlaying || stateCode != 2)) {
+                AppLogger.d(TAG, "AVRCP 后台曲目心跳让位: 当前正在播放 ${current?.title} (${current?.packageName})")
+                return
             }
 
             // 基于进度递增/停滞的动态状态判定与切歌脏进度拦截
@@ -500,11 +686,20 @@ class MusicRecognitionEngine(private val context: Context) {
                 artist = artist,
                 rawPos = initialPos,
                 rawIsPlaying = rawIsPlaying,
-                source = MusicSource.BLUETOOTH
+                source = MusicSource.BLUETOOTH,
+                packageName = "com.android.bluetooth"
             )
 
             if (!resolvedPlaying) {
                 isBtA2dpStreaming = false
+                btPausedOrSuppressed = true
+                lastBtPauseMs = android.os.SystemClock.elapsedRealtime()
+            } else {
+                if (otherSongPlaying && !isBtA2dpStreaming) {
+                    AppLogger.d(TAG, "AVRCP 后台曲目心跳让位: 当前正在播放 ${current?.title} (${current?.packageName})")
+                    return
+                }
+                btPausedOrSuppressed = false
             }
 
             val track = CurrentTrack(
@@ -532,15 +727,20 @@ class MusicRecognitionEngine(private val context: Context) {
             val state = intent.getIntExtra("android.bluetooth.profile.extra.STATE", -1)
             val isPlaying = (state == BT_STATE_PLAYING)
             isBtA2dpStreaming = isPlaying
+            if (isPlaying) {
+                btPausedOrSuppressed = false
+            } else {
+                btPausedOrSuppressed = true
+                lastBtPauseMs = android.os.SystemClock.elapsedRealtime()
+                isDynamicPlayingConfirmed = false
+            }
             AppLogger.d(TAG, "A2DP playing state changed: state=$state, isPlaying=$isPlaying")
 
             val current = _currentTrack.value
             if (current != null && (current.source == MusicSource.BLUETOOTH || current.packageName.contains("bluetooth"))) {
-                _currentTrack.value = current.copy(isPlaying = isPlaying)
-                lastDetectionSource = if (isPlaying) "Bluetooth-A2DP-Active" else "Bluetooth-A2DP-Paused"
+                updateCurrentTrack(current.copy(isPlaying = isPlaying), if (isPlaying) "Bluetooth-A2DP-Active" else "Bluetooth-A2DP-Paused")
             } else if (isPlaying && lastBluetoothTrack != null) {
-                _currentTrack.value = lastBluetoothTrack?.copy(isPlaying = true)
-                lastDetectionSource = "Bluetooth-A2DP-Resumed"
+                updateCurrentTrack(lastBluetoothTrack?.copy(isPlaying = true), "Bluetooth-A2DP-Resumed")
             }
 
             if (isPlaying) {
@@ -621,12 +821,19 @@ class MusicRecognitionEngine(private val context: Context) {
                 return
             }
 
+            // 前置避让：非当前活跃包名的暂停广播直接忽略，防止后台残留广播污染 resolveDynamicStateAndPos 状态机
+            val current = _currentTrack.value
+            if (!isPlaying && current != null && pkg != current.packageName) {
+                return
+            }
+
             val (resolvedPos, resolvedPlaying) = resolveDynamicStateAndPos(
                 title = title,
                 artist = artist,
                 rawPos = position.coerceAtLeast(0L),
                 rawIsPlaying = isPlaying,
-                source = MusicSource.BROADCAST
+                source = MusicSource.BROADCAST,
+                packageName = pkg
             )
 
             val track = CurrentTrack(
@@ -815,40 +1022,87 @@ class MusicRecognitionEngine(private val context: Context) {
         val bestState = best.playbackState
         val pkg = try { best.packageName } catch (_: Exception) { "unknown" }
         val isBt = pkg.contains("bluetooth")
-        val isBtExplicitPaused = isBt && (bestState?.state == PlaybackState.STATE_PAUSED || bestState?.state == 3)
+        val current = _currentTrack.value
+
+        if (isMusicActive || isBtA2dpStreaming) {
+            lastAudioInactiveMs = 0L
+        }
 
         val isBestPlaying = if (isBt) {
-            !isBtExplicitPaused && (isBtA2dpStreaming || bestState?.state == PlaybackState.STATE_PLAYING || bestState?.state == 2)
+            isBluetoothPlaying(bestState)
         } else {
             bestState != null && (bestState.state == PlaybackState.STATE_PLAYING || bestState.state == PlaybackState.STATE_BUFFERING)
         }
 
         val isBestPaused = if (isBt) {
-            isBtExplicitPaused || (!isBtA2dpStreaming && (bestState?.state == PlaybackState.STATE_PAUSED || bestState?.state == 3))
+            !isBestPlaying && (isBluetoothExplicitPaused(bestState) || (btPausedOrSuppressed && current?.source == MusicSource.BLUETOOTH))
         } else {
             bestState?.state == PlaybackState.STATE_PAUSED
         }
 
         if (isBestPlaying || isBestPaused) {
-            best.metadata?.let { metadata ->
-                val title = metadata.getString(MediaMetadata.METADATA_KEY_TITLE)
-                if (!title.isNullOrBlank()) {
-                    val appName = getAppDisplayName(pkg)
-                    val track = buildTrack(best, metadata, bestState)
-                    updateCurrentTrack(track, "MediaSession($appName)")
+            // 前置避让：如果选出的最佳会话并未在播且属于另一款播放器，绝不能调用 buildTrack 污染当前活跃音轨的状态机
+            if (!isBestPlaying && current != null && pkg != current.packageName) {
+                if (current.isPlaying) {
+                    // 当前正在播放的音源仍在播，直接交由下方的存活与静默检验处理
+                } else {
+                    // 双方都处于暂停态：维持当前主音轨，不被后台暂停 App 抢跑
                     return
+                }
+            } else {
+                best.metadata?.let { metadata ->
+                    val title = metadata.getString(MediaMetadata.METADATA_KEY_TITLE)
+                    if (!title.isNullOrBlank()) {
+                        val appName = getAppDisplayName(pkg)
+                        val track = buildTrack(best, metadata, bestState)
+                        updateCurrentTrack(track, "MediaSession($appName)")
+                        return
+                    }
                 }
             }
         }
 
-        // 若选出的控制器无 metadata 但当前音源仍在播放，保持当前状态避免抖动清空
-        val current = _currentTrack.value
+        // 若选出的控制器无 metadata 但当前音源仍在播放，保持当前状态避免抖动清空；
+        // 但若原在播媒体会话已退出/停播，或系统音频流持续静默停滞，必须收敛为暂停状态以免卡死在歌词页
         if (current != null && current.isPlaying) {
+            if (current.source == MusicSource.KUGOU_NATIVE) {
+                verifyKuGouSyncIfNeeded(current)
+                return
+            }
+            val currentSessionAlive = current.packageName.isNotBlank() && controllers.any {
+                try { it.packageName == current.packageName } catch (_: Exception) { false }
+            }
+            if (current.source == MusicSource.MEDIA_SESSION && !currentSessionAlive && !isMusicActive) {
+                AppLogger.i(TAG, "🎵 检测到原在播媒体会话已退出 (${current.packageName}) 且音频停播，自动收敛为暂停状态")
+                _currentTrack.value = current.copy(isPlaying = false)
+                lastDetectionSource = "MediaSession-Exited"
+                return
+            }
+            if (!isMusicActive && current.source != MusicSource.BLUETOOTH) {
+                val ctrl = controllers.firstOrNull {
+                    try { it.packageName == current.packageName } catch (_: Exception) { false }
+                }
+                val st = ctrl?.playbackState?.state
+                if (st == PlaybackState.STATE_STOPPED || st == PlaybackState.STATE_NONE || st == PlaybackState.STATE_ERROR) {
+                    _currentTrack.value = current.copy(isPlaying = false)
+                    lastDetectionSource = "MediaSession-Stopped"
+                    return
+                }
+                val now = android.os.SystemClock.elapsedRealtime()
+                if (lastAudioInactiveMs == 0L) {
+                    lastAudioInactiveMs = now
+                } else if (now - lastAudioInactiveMs >= 1200L && now - lastPosAdvanceTime >= 1200L) {
+                    AppLogger.i(TAG, "🎵 检测到三方播放器(${current.packageName})音频流静默且进度停滞，自动收敛为暂停状态")
+                    _currentTrack.value = current.copy(isPlaying = false)
+                    lastDetectionSource = "MediaSession-AudioInactive"
+                    return
+                }
+            }
             return
         }
 
-        // 蓝牙音轨兜底：仅当蓝牙音频流确实在推流发声时才兜底恢复
-        if (isBtA2dpStreaming && lastBluetoothTrack != null) {
+        // 蓝牙音轨兜底：仅当蓝牙音频流确实在推流发声且未被暂停压制时才兜底恢复
+        if (isBtA2dpStreaming && !btPausedOrSuppressed && lastBluetoothTrack != null) {
             updateCurrentTrack(lastBluetoothTrack?.copy(isPlaying = true), "Bluetooth-Broadcast")
             return
         }
@@ -865,7 +1119,12 @@ class MusicRecognitionEngine(private val context: Context) {
         val artist = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: ""
         val album = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM) ?: ""
         val duration = metadata.getLong(MediaMetadata.METADATA_KEY_DURATION)
-        val mediaId = metadata.getString(MediaMetadata.METADATA_KEY_MEDIA_ID) ?: ""
+        val mediaId = (metadata.getString(MediaMetadata.METADATA_KEY_MEDIA_ID)
+            ?: metadata.getString(MediaMetadata.METADATA_KEY_MEDIA_URI)
+            ?: metadata.description?.mediaId
+            ?: metadata.description?.mediaUri?.toString()
+            ?: try { controller.extras?.getString("media_id") ?: controller.extras?.getString("track_id") } catch (_: Exception) { null }
+            ?: "").trim()
         val pkg = try { controller.packageName } catch (_: Exception) { "" }
         val wholeLyrics = metadata.getString("android.honor.media.metadata.LYRICS_WHOLE")
             ?: metadata.getString("hicar.media.metadata.LYRICS")
@@ -889,9 +1148,8 @@ class MusicRecognitionEngine(private val context: Context) {
         }
 
         val isBt = pkg.contains("bluetooth")
-        val isBtExplicitPaused = isBt && (state?.state == PlaybackState.STATE_PAUSED || state?.state == 3)
         val isPlaying = if (isBt) {
-            !isBtExplicitPaused && (isBtA2dpStreaming || state?.state == PlaybackState.STATE_PLAYING || state?.state == 2)
+            isBluetoothPlaying(state)
         } else {
             state?.state == PlaybackState.STATE_PLAYING || state?.state == PlaybackState.STATE_BUFFERING
         }
@@ -902,8 +1160,25 @@ class MusicRecognitionEngine(private val context: Context) {
             artist = artist,
             rawPos = position,
             rawIsPlaying = isPlaying,
-            source = source
+            source = source,
+            packageName = pkg
         )
+
+        val artBmp = try {
+            metadata.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
+                ?: metadata.getBitmap(MediaMetadata.METADATA_KEY_ART)
+        } catch (_: Exception) { null }
+
+        if (artBmp != null) {
+            try {
+                com.car.xiaoouscreen.XiaoOuApplication.rhythmEngine.onCoverLoaded(artBmp)
+            } catch (_: Exception) {}
+        }
+
+        val artUri = try {
+            metadata.getString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI)
+                ?: metadata.getString(MediaMetadata.METADATA_KEY_ART_URI)
+        } catch (_: Exception) { null }
 
         val track = CurrentTrack(
             title = title,
@@ -915,7 +1190,8 @@ class MusicRecognitionEngine(private val context: Context) {
             packageName = pkg,
             isPlaying = resolvedPlaying,
             mediaId = mediaId,
-            nativeLyrics = nativeLyrics
+            nativeLyrics = nativeLyrics,
+            nativeCoverUrl = artUri ?: if (current != null && current.title == title && current.artist == artist) current.nativeCoverUrl else null
         )
         if (isBt) {
             lastBluetoothTrack = track
@@ -933,7 +1209,12 @@ class MusicRecognitionEngine(private val context: Context) {
             val artist = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: ""
             val album = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM) ?: ""
             val duration = metadata.getLong(MediaMetadata.METADATA_KEY_DURATION)
-            val mediaId = metadata.getString(MediaMetadata.METADATA_KEY_MEDIA_ID) ?: ""
+            val mediaId = (metadata.getString(MediaMetadata.METADATA_KEY_MEDIA_ID)
+                ?: metadata.getString(MediaMetadata.METADATA_KEY_MEDIA_URI)
+                ?: metadata.description?.mediaId
+                ?: metadata.description?.mediaUri?.toString()
+                ?: try { controller.extras?.getString("media_id") ?: controller.extras?.getString("track_id") } catch (_: Exception) { null }
+                ?: "").trim()
             val pkg = try { controller.packageName } catch (_: Exception) { "unknown" }
             val wholeLyrics = metadata.getString("android.honor.media.metadata.LYRICS_WHOLE")
                 ?: metadata.getString("hicar.media.metadata.LYRICS")
@@ -948,16 +1229,25 @@ class MusicRecognitionEngine(private val context: Context) {
             } else null
             val state = controller.playbackState
             val isBt = pkg.contains("bluetooth")
-            val isBtExplicitPaused = isBt && (state?.state == PlaybackState.STATE_PAUSED || state?.state == 3)
 
             val isPlaying = if (isBt) {
-                !isBtExplicitPaused && (isBtA2dpStreaming || state?.state == PlaybackState.STATE_PLAYING || state?.state == 2)
+                isBluetoothPlaying(state)
             } else {
                 (state?.state == PlaybackState.STATE_PLAYING || state?.state == PlaybackState.STATE_BUFFERING)
             }
 
             val rawPos = state?.position ?: PlaybackState.PLAYBACK_POSITION_UNKNOWN
             val current = _currentTrack.value
+            val isSameBtMirror = (isBt && current != null && current.source == MusicSource.KUGOU_NATIVE &&
+                current.title == title && current.nativeLyrics.isNullOrEmpty() && current.nativeCoverUrl.isNullOrBlank())
+            if (!isPlaying && current != null && pkg != current.packageName && !isBt && !isSameBtMirror) {
+                // 后台暂停音轨不得重置当前活跃音轨的动态进度跟踪状态
+                return
+            }
+            if (!isPlaying && isBt && current != null && current.isPlaying && current.source != MusicSource.BLUETOOTH && !isBtA2dpStreaming && !isSameBtMirror) {
+                return
+            }
+
             val pos = if (rawPos != PlaybackState.PLAYBACK_POSITION_UNKNOWN && rawPos > 0L) {
                 rawPos
             } else if (current != null && current.title == title && current.position > 0L) {
@@ -972,8 +1262,25 @@ class MusicRecognitionEngine(private val context: Context) {
                 artist = artist,
                 rawPos = pos,
                 rawIsPlaying = isPlaying,
-                source = source
+                source = source,
+                packageName = pkg
             )
+
+            val artBmp = try {
+                metadata.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
+                    ?: metadata.getBitmap(MediaMetadata.METADATA_KEY_ART)
+            } catch (_: Exception) { null }
+
+            if (artBmp != null) {
+                try {
+                    com.car.xiaoouscreen.XiaoOuApplication.rhythmEngine.onCoverLoaded(artBmp)
+                } catch (_: Exception) {}
+            }
+
+            val artUri = try {
+                metadata.getString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI)
+                    ?: metadata.getString(MediaMetadata.METADATA_KEY_ART_URI)
+            } catch (_: Exception) { null }
 
             val track = CurrentTrack(
                 title = title,
@@ -985,12 +1292,61 @@ class MusicRecognitionEngine(private val context: Context) {
                 packageName = pkg,
                 isPlaying = resolvedPlaying,
                 mediaId = mediaId,
-                nativeLyrics = nativeLyrics
+                nativeLyrics = nativeLyrics,
+                nativeCoverUrl = artUri ?: if (current != null && current.title == title && current.artist == artist) current.nativeCoverUrl else null
             )
             val appName = getAppDisplayName(pkg)
             updateCurrentTrack(track, "MediaSession($appName)")
         } catch (e: Exception) {
             Log.w(TAG, "onMetadataFrom error: ${e.message}", e)
+        }
+    }
+
+    /**
+     * 换播放器起播仲裁：判断新切入的 MediaController 是否有权抢占当前正在播放的音轨。
+     * 核心原则：当用户打开网易云/酷狗/汽水播放第一首歌 (pos 往往为 0) 时，旧播放器可能在等待音频焦点回调延迟暂停，
+     * 不能因为旧播放器 pos > 0 或带粘性加分而把新播放器的第一首歌直接丢弃！
+     */
+    private fun canPreemptCurrentPlaying(controller: MediaController, current: CurrentTrack): Boolean {
+        val pkg = try { controller.packageName } catch (_: Exception) { "" }
+        val isBt = pkg.contains("bluetooth")
+        val state = try { controller.playbackState } catch (_: Exception) { null }
+        val incomingPlaying = if (isBt) {
+            isBluetoothPlaying(state)
+        } else {
+            state != null && (state.state == PlaybackState.STATE_PLAYING || state.state == PlaybackState.STATE_BUFFERING)
+        }
+        if (!incomingPlaying) return false
+
+        // 若新来的是非蓝牙正规播放器且正在发声/缓冲：
+        if (!isBt) {
+            if (current.source == MusicSource.BLUETOOTH && btPausedOrSuppressed) return true
+            val currentCtrl = activeControllers[current.packageName] ?: return true
+            val currentState = try { currentCtrl.playbackState } catch (_: Exception) { null }
+            val currentPlaying = if (current.source == MusicSource.BLUETOOTH) {
+                isBluetoothPlaying(currentState)
+            } else {
+                currentState != null && (currentState.state == PlaybackState.STATE_PLAYING || currentState.state == PlaybackState.STATE_BUFFERING)
+            }
+            if (!currentPlaying) return true
+            val incomingTime = state?.lastPositionUpdateTime ?: 0L
+            val currentTime = currentState?.lastPositionUpdateTime ?: 0L
+            if (incomingTime > 0L && incomingTime >= currentTime) return true
+            return scoreController(controller) > scoreController(currentCtrl)
+        }
+
+        // 若新来的是蓝牙：只有蓝牙确实正在输出或积分严格反超时才允许接管
+        val currentCtrl = activeControllers[current.packageName] ?: return isBtA2dpStreaming || isDynamicPlayingConfirmed == true
+        return scoreController(controller) > scoreController(currentCtrl)
+    }
+
+    private fun findOtherActiveController(excludedPkg: String): MediaController? {
+        return activeControllers.values.firstOrNull { c ->
+            val cp = try { c.packageName } catch (_: Exception) { "" }
+            if (cp == excludedPkg) return@firstOrNull false
+            val cBt = cp.contains("bluetooth")
+            if (cBt) isBluetoothPlaying(c.playbackState)
+            else (c.playbackState?.state == PlaybackState.STATE_PLAYING || c.playbackState?.state == PlaybackState.STATE_BUFFERING)
         }
     }
 
@@ -1013,10 +1369,7 @@ class MusicRecognitionEngine(private val context: Context) {
 
                     // 多播放器防抢占锁：如果当前已有正在播放的音源，且来自于另一个包名
                     if (current != null && current.isPlaying && current.packageName != pkg) {
-                        val currentCtrl = activeControllers[current.packageName]
-                        val currentScore = if (currentCtrl != null) scoreController(currentCtrl) else 0L
-                        val incomingScore = scoreController(controller)
-                        if (incomingScore <= currentScore) {
+                        if (!canPreemptCurrentPlaying(controller, current)) {
                             return
                         }
                     }
@@ -1035,23 +1388,32 @@ class MusicRecognitionEngine(private val context: Context) {
                     val isBt = pkg.contains("bluetooth")
                     val current = _currentTrack.value
 
-                    val isBtExplicitPaused = isBt && (stateCode == PlaybackState.STATE_PAUSED || stateCode == 3)
-                    if (isBtExplicitPaused) {
-                        isBtA2dpStreaming = false
-                    } else if (isBt && (stateCode == PlaybackState.STATE_PLAYING || stateCode == 2)) {
-                        isBtA2dpStreaming = true
+                    val nowMs = android.os.SystemClock.elapsedRealtime()
+                    // 标准 MediaController PlaybackState 中：STATE_PLAYING == 3, STATE_PAUSED == 2
+                    val isBtExplicitPaused = isBt && (stateCode == PlaybackState.STATE_PAUSED)
+                    val statePos = state.position
+                    val isBtPosActuallyMovingOrFresh = (statePos != PlaybackState.PLAYBACK_POSITION_UNKNOWN &&
+                        (statePos > lastSamplePos || lastSamplePos <= 0L))
+                    if (isBt && stateCode == PlaybackState.STATE_PLAYING) {
+                        if (nowMs - lastBtPauseMs > 800L && isBtPosActuallyMovingOrFresh) {
+                            isBtA2dpStreaming = true
+                            btPausedOrSuppressed = false
+                        }
                     }
 
                     // 如果明确处于 STOPPED / NONE / ERROR 状态
                     if (stateCode == PlaybackState.STATE_STOPPED || stateCode == PlaybackState.STATE_NONE || stateCode == PlaybackState.STATE_ERROR) {
-                        // 蓝牙特性：切歌时可能短暂下发 NONE/STOPPED，但若底层蓝牙音频流仍在发声推流，暂不彻底清空
-                        if (isBt && isBtA2dpStreaming) {
+                        // 蓝牙特性：切歌时可能短暂下发 NONE/STOPPED，但若底层蓝牙音频流仍在真实推流发声，暂不彻底清空
+                        if (isBt && isBtA2dpStreaming && !btPausedOrSuppressed) {
                             return
                         }
+                        if (isBt) {
+                            isBtA2dpStreaming = false
+                            btPausedOrSuppressed = true
+                            lastBtPauseMs = nowMs
+                        }
                         if (current != null && current.packageName == pkg) {
-                            val otherPlaying = activeControllers.values.firstOrNull { c ->
-                                c.packageName != pkg && (c.playbackState?.state == PlaybackState.STATE_PLAYING || c.playbackState?.state == PlaybackState.STATE_BUFFERING)
-                            }
+                            val otherPlaying = findOtherActiveController(pkg)
                             if (otherPlaying != null) {
                                 extractBestTrack(activeControllers.values.toList())
                             } else {
@@ -1062,16 +1424,7 @@ class MusicRecognitionEngine(private val context: Context) {
                     }
 
                     val isNowPlaying = if (isBt) {
-                        if (isBtExplicitPaused) {
-                            false
-                        } else if (stateCode == PlaybackState.STATE_PLAYING || stateCode == 2 || isBtA2dpStreaming) {
-                            true
-                        } else if (current != null && current.source == MusicSource.BLUETOOTH && current.isPlaying) {
-                            val now = android.os.SystemClock.elapsedRealtime()
-                            (now - lastPosAdvanceTime < 2500L)
-                        } else {
-                            false
-                        }
+                        !isBtExplicitPaused && (isBtA2dpStreaming || (!btPausedOrSuppressed && stateCode == PlaybackState.STATE_PLAYING))
                     } else {
                         (stateCode == PlaybackState.STATE_PLAYING || stateCode == PlaybackState.STATE_BUFFERING)
                     }
@@ -1079,10 +1432,7 @@ class MusicRecognitionEngine(private val context: Context) {
                     // 多播放器防抢占锁：当已有音源正在播放且来自另一个包名
                     if (current != null && current.isPlaying && current.packageName != pkg) {
                         if (!isNowPlaying) return
-                        val currentCtrl = activeControllers[current.packageName]
-                        val currentScore = if (currentCtrl != null) scoreController(currentCtrl) else 0L
-                        val incomingScore = scoreController(controller)
-                        if (incomingScore <= currentScore) {
+                        if (!canPreemptCurrentPlaying(controller, current)) {
                             return
                         }
                     }
@@ -1103,16 +1453,28 @@ class MusicRecognitionEngine(private val context: Context) {
                             artist = current.artist,
                             rawPos = targetPos,
                             rawIsPlaying = isNowPlaying,
-                            source = current.source
+                            source = current.source,
+                            packageName = pkg
                         )
                         if (!resolvedPlaying && isBt) {
                             isBtA2dpStreaming = false
+                            btPausedOrSuppressed = true
+                            lastBtPauseMs = android.os.SystemClock.elapsedRealtime()
+                        } else if (resolvedPlaying && isBt) {
+                            btPausedOrSuppressed = false
                         }
                         val updated = current.copy(
                             position = resolvedPos,
                             isPlaying = resolvedPlaying
                         )
                         updateCurrentTrack(updated, "PlaybackState(${getAppDisplayName(pkg)})")
+                        // 若旧播放器刚刚暂停，立即检查是否已有另一款切换过来的播放器正在发声，立刻接管避免等待 2s 轮询
+                        if (!resolvedPlaying) {
+                            val otherPlaying = findOtherActiveController(pkg)
+                            if (otherPlaying != null) {
+                                extractBestTrack(activeControllers.values.toList())
+                            }
+                        }
                     } else if (isNowPlaying) {
                         controller.metadata?.let { md ->
                             onMetadataFrom(controller, md)
@@ -1189,12 +1551,60 @@ class MusicRecognitionEngine(private val context: Context) {
             return
         }
 
+        var notifMediaId = ""
+        var notifDuration = 0L
+        var tokenPlaybackState: Int? = null
+        try {
+            val token = extras.getParcelable<android.media.session.MediaSession.Token>(Notification.EXTRA_MEDIA_SESSION)
+            if (token != null) {
+                val controller = MediaController(context, token)
+                tokenPlaybackState = controller.playbackState?.state
+                val meta = controller.metadata
+                if (meta != null) {
+                    notifMediaId = (meta.getString(MediaMetadata.METADATA_KEY_MEDIA_ID)
+                        ?: meta.getString(MediaMetadata.METADATA_KEY_MEDIA_URI)
+                        ?: meta.description?.mediaId
+                        ?: meta.description?.mediaUri?.toString()
+                        ?: "").trim()
+                    notifDuration = meta.getLong(MediaMetadata.METADATA_KEY_DURATION)
+                }
+            }
+        } catch (_: Exception) {}
+
+        // 若该通知携带或对应的 MediaController 明确处于非播放态（暂停/停止），绝不伪造 isPlaying=true
+        val activeCtrlState = try { activeControllers[sbn.packageName]?.playbackState?.state } catch (_: Exception) { null }
+        val authoritativeState = tokenPlaybackState ?: activeCtrlState
+        val isExplicitNotPlaying = authoritativeState != null &&
+            authoritativeState != PlaybackState.STATE_PLAYING &&
+            authoritativeState != PlaybackState.STATE_BUFFERING
+        val isAudioActive = try { audioManager.isMusicActive } catch (_: Exception) { true }
+
+        if (isExplicitNotPlaying && !isAudioActive) {
+            return
+        }
+        val notifIsPlaying = !isExplicitNotPlaying && isAudioActive
+
+        if (notifMediaId.isBlank()) {
+            for (key in extras.keySet()) {
+                val lk = key.lowercase()
+                if (lk == "media_id" || lk == "track_id" || lk == "song_id" || lk == "item_id" || lk == "android.mediaid") {
+                    val v = extras.getString(key)?.trim()
+                    if (!v.isNullOrBlank()) {
+                        notifMediaId = v
+                        break
+                    }
+                }
+            }
+        }
+
         val track = CurrentTrack(
             title = title,
             artist = artist,
+            duration = notifDuration,
             source = MusicSource.NOTIFICATION,
             packageName = sbn.packageName,
-            isPlaying = true
+            isPlaying = notifIsPlaying,
+            mediaId = notifMediaId
         )
         val appName = getAppDisplayName(sbn.packageName)
         updateCurrentTrack(track, "Notification($appName)")
@@ -1247,6 +1657,8 @@ class MusicRecognitionEngine(private val context: Context) {
 
     private fun scanAllSessions() {
         try {
+            val currentTrack = _currentTrack.value
+            verifyKuGouSyncIfNeeded(currentTrack)
             val controllers = mediaSessionManager.getActiveSessions(
                 ComponentName(context, NotificationListenerService::class.java)
             )
@@ -1260,23 +1672,38 @@ class MusicRecognitionEngine(private val context: Context) {
             } else {
                 val musicActive = audioManager.isMusicActive
                 if (musicActive) {
+                    lastAudioInactiveMs = 0L
                     // 若 AudioManager 活跃且蓝牙 A2DP 确实在推流发声，且有已缓存的蓝牙音轨，主动恢复播放
-                    if (_currentTrack.value == null && isBtA2dpStreaming && lastBluetoothTrack != null) {
+                    if (_currentTrack.value == null && isBtA2dpStreaming && !btPausedOrSuppressed && lastBluetoothTrack != null) {
                         _currentTrack.value = lastBluetoothTrack?.copy(isPlaying = true)
                         lastDetectionSource = "Bluetooth-AudioManagerFallback"
                     }
-                    AppLogger.d(TAG, "AudioManager.isMusicActive=true, but no active MediaSessions — 可能是蓝牙播放或系统播放器")
+                    AppLogger.recordBreadcrumb("MEDIA", "AudioManager.isMusicActive=true, no MediaSession")
                     lastRefreshInfo = "轮询: AudioManager 检测到音乐播放中"
                 } else {
+                    if (currentTrack != null && currentTrack.isPlaying && currentTrack.source == MusicSource.MEDIA_SESSION) {
+                        val now = android.os.SystemClock.elapsedRealtime()
+                        if (lastAudioInactiveMs == 0L) {
+                            lastAudioInactiveMs = now
+                        } else if (now - lastAudioInactiveMs >= 1200L) {
+                            AppLogger.i(TAG, "🎵 无活跃 MediaSession 且音频流停播，自动收敛为暂停状态")
+                            _currentTrack.value = currentTrack.copy(isPlaying = false)
+                            lastDetectionSource = "MediaSession-NoSessionAudioInactive"
+                        }
+                    }
                     lastRefreshInfo = "轮询: 无活跃 MediaSession, AudioManager 也未检测到音乐播放"
                 }
             }
         } catch (e: SecurityException) {
-            AppLogger.d(TAG, "scanAllSessions SecurityException (notification listener not enabled?)")
+            AppLogger.recordBreadcrumb("MEDIA", "SecurityException (NotificationListener missing)")
+            if (!hasMediaSessionError) {
+                AppLogger.throttledW(TAG, "未开启通知读取使用权，已平滑回退至底层媒体广播与音频流监测兜底", 60_000L)
+            }
             hasMediaSessionError = true
             val musicActive = audioManager.isMusicActive
             if (musicActive) {
-                if (_currentTrack.value == null && isBtA2dpStreaming && lastBluetoothTrack != null) {
+                lastAudioInactiveMs = 0L
+                if (_currentTrack.value == null && isBtA2dpStreaming && !btPausedOrSuppressed && lastBluetoothTrack != null) {
                     _currentTrack.value = lastBluetoothTrack?.copy(isPlaying = true)
                     lastDetectionSource = "Bluetooth-AudioManagerFallback"
                 }
@@ -1285,8 +1712,24 @@ class MusicRecognitionEngine(private val context: Context) {
                 lastRefreshInfo = "轮询 SecurityException: 通知监听权限可能未开启"
             }
         } catch (e: Exception) {
-            AppLogger.d(TAG, "scanAllSessions failed: ${e.message}")
+            AppLogger.recordBreadcrumb("MEDIA", "scanFailed: ${e.message}")
+            AppLogger.throttledW(TAG, "scanAllSessions 异常: ${e.message}", 60_000L)
             lastRefreshInfo = "轮询异常: ${e.message}"
+        }
+        // 蓝牙停滞主动兜底收敛：只要该蓝牙连接上报过真实非零进度(>0)且超过 2.2 秒进度完全未再前进，强制冻结为暂停态（防御静音只停手机不发 AVRCP PAUSED）
+        val postScanTrack = _currentTrack.value
+        if (postScanTrack != null && postScanTrack.source == MusicSource.BLUETOOTH && postScanTrack.isPlaying &&
+            lastSamplePos > 0L && trackedTitle == postScanTrack.title
+        ) {
+            val nowMs = android.os.SystemClock.elapsedRealtime()
+            if (nowMs - lastPosAdvanceTime >= 2200L) {
+                AppLogger.i(TAG, "⏸️ [蓝牙停滞兜底] 蓝牙曲目 ${postScanTrack.title} 进度停滞在 $lastSamplePos 已达 ${nowMs - lastPosAdvanceTime}ms，强制收敛为暂停态")
+                isBtA2dpStreaming = false
+                btPausedOrSuppressed = true
+                lastBtPauseMs = nowMs
+                isDynamicPlayingConfirmed = false
+                updateCurrentTrack(postScanTrack.copy(position = lastSamplePos, isPlaying = false), "Bluetooth-PosStalled")
+            }
         }
         // 动态自适应轮询：播放中保持 2s 灵敏追踪，空闲静默期平缓退避至 10s，大幅降低车机 Binder IPC 开销与 CPU 唤醒
         val isPlaying = _currentTrack.value?.isPlaying == true || isBtA2dpStreaming
@@ -1395,9 +1838,8 @@ class MusicRecognitionEngine(private val context: Context) {
                 if (pkg == current.packageName) continue
                 val state = controller.playbackState ?: continue
                 val isBt = pkg.contains("bluetooth")
-                val isBtExplicitPaused = isBt && (state.state == PlaybackState.STATE_PAUSED || state.state == 3)
                 val isPlaying = if (isBt) {
-                    !isBtExplicitPaused && (isBtA2dpStreaming || state.state == PlaybackState.STATE_PLAYING || state.state == 2)
+                    isBluetoothPlaying(state)
                 } else {
                     state.state == PlaybackState.STATE_PLAYING || state.state == PlaybackState.STATE_BUFFERING
                 }
@@ -1503,30 +1945,7 @@ class MusicRecognitionEngine(private val context: Context) {
     }
 
     fun getAppDisplayName(packageName: String): String {
-        if (packageName.isBlank() || packageName == "unknown") return "未知播放器"
-        return try {
-            val pm = context.packageManager
-            val appInfo = pm.getApplicationInfo(packageName, 0)
-            pm.getApplicationLabel(appInfo).toString()
-        } catch (_: Exception) {
-            val lower = packageName.lowercase()
-            when {
-                lower.contains("zlink") -> "Zlink (CarPlay)"
-                lower.contains("phonemirror") || lower.contains("autokit") -> "AutoKit (CarPlay)"
-                lower.contains("speedplay") -> "SpeedPlay (CarPlay)"
-                lower.contains("carlife") -> "CarLife"
-                lower.contains("gearhead") -> "Android Auto"
-                lower.contains("bluetooth") -> "蓝牙音乐"
-                lower.contains("cloudmusic") || lower.contains("netease") -> "网易云音乐"
-                lower.contains("qqmusic") || lower.contains("tencent") -> "QQ音乐"
-                lower.contains("kugou") -> "酷狗音乐"
-                lower.contains("kuwo") -> "酷我音乐"
-                lower.contains("luna.music") || lower.contains("qishui") -> "汽水音乐"
-                lower.contains("spotify") -> "Spotify"
-                lower.contains("apple.android.music") -> "Apple Music"
-                else -> packageName
-            }
-        }
+        return getCachedAppDisplayName(context, packageName)
     }
 
     private fun scoreController(controller: MediaController): Long {
@@ -1536,10 +1955,10 @@ class MusicRecognitionEngine(private val context: Context) {
         val metadata = try { controller.metadata } catch (_: Exception) { null }
         val isBt = pkg.contains("bluetooth")
         val stateCode = state?.state ?: PlaybackState.STATE_NONE
-        val isBtExplicitPaused = isBt && (stateCode == PlaybackState.STATE_PAUSED || stateCode == 3)
 
         // 1. 播放状态得分：正在播放 (STATE_PLAYING) 必须具有绝对压倒性优势 (+50000分)，彻底杜绝暂停音源压过播放音源
-        val isBtPlaying = isBt && !isBtExplicitPaused && (isBtA2dpStreaming || stateCode == PlaybackState.STATE_PLAYING || stateCode == 2 || isDynamicPlayingConfirmed == true)
+        val isBtPlaying = isBt && isBluetoothPlaying(state)
+        val isBtExplicitPaused = isBt && !isBtPlaying && (isBluetoothExplicitPaused(state) || btPausedOrSuppressed)
         if (isBtPlaying) {
             score += 50_000L
         } else if (isBtExplicitPaused) {
@@ -1562,32 +1981,36 @@ class MusicRecognitionEngine(private val context: Context) {
         if (!artist.isNullOrBlank()) score += 2_000L
         if (duration > 0L) score += 3_000L
 
-        // 3. 关键进度得分
+        // 3. 关键进度得分（轻微加权：仅在同状态下区分有效进度与空壳，避免新歌起播 pos=0 被旧播放器 15000 分死死压住）
         val pos = state?.position ?: PlaybackState.PLAYBACK_POSITION_UNKNOWN
         if (pos != PlaybackState.PLAYBACK_POSITION_UNKNOWN && pos > 0L) {
-            score += 15_000L
+            score += 2_500L
         } else if (isBt && isBtPlaying && !title.isNullOrBlank()) {
-            // 蓝牙 AVRCP 特性：歌曲刚开始或部分手机协议下 pos 恒为 0，只要音频活跃且有歌名，赋予同等进度信任分
-            score += 12_000L
+            score += 2_000L
         }
 
-        // 4. 当前会话粘性得分 (Session Stickiness)：仅当该会话仍在播放时有效
+        // 4. 当前会话粘性得分 (Session Stickiness)：轻微维持当前主音源焦点，防止后台暂停App抢夺暂停焦点
         val current = _currentTrack.value
-        if (current != null && current.packageName == pkg && current.isPlaying) {
-            score += 8_000L
+        if (current != null && current.packageName == pkg) {
+            score += if (current.isPlaying) 1_500L else 4_000L
         }
 
-        // 5. 蓝牙活跃发声强优先权加成：车机底层正在输出蓝牙 A2DP 音频流或进度稳定推进时，加成保证压过已暂停的本地播放器
+        // 5. 蓝牙活跃发声优先权加成：仅当底层明确有蓝牙推流或近期刚确认进度递增且未暂停时加成
         if (isBt && (isBtA2dpStreaming || isDynamicPlayingConfirmed == true) && isBtPlaying && !title.isNullOrBlank()) {
-            score += 10_000L
+            score += 6_000L
         }
 
         // 6. 常见音乐 App / 互联协议包名优先级加成
         score += musicAppPriority(pkg) * 10L
 
-        // 7. 状态更新时间戳微调
+        // 7. 新近活跃时间戳加权：刚操作起播/更新状态的音源获得合理优先权
         val updateTime = state?.lastPositionUpdateTime ?: 0L
-        score += (updateTime % 100L)
+        if (updateTime > 0L) {
+            val ageMs = (android.os.SystemClock.elapsedRealtime() - updateTime).coerceAtLeast(0L)
+            if (ageMs < 5_000L) {
+                score += (5_000L - ageMs)
+            }
+        }
 
         return score
     }
@@ -1598,7 +2021,7 @@ class MusicRecognitionEngine(private val context: Context) {
             pkg.contains("netease") || pkg.contains("cloudmusic") -> 100
             pkg.contains("qqmusic") || pkg.contains("tencent") -> 99
             pkg.contains("luna") || pkg.contains("qishui") -> 98
-            pkg.contains("kugou") -> 98
+            pkg.contains("kugou") || pkg == "com.chinatsp.music" -> 98
             pkg.contains("kuwo") -> 97
             pkg.contains("bluetooth") -> 96
             pkg.contains("spotify") -> 95

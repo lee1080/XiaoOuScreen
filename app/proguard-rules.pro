@@ -13,6 +13,8 @@
 -keepclassmembers class com.car.xiaoouscreen.data.** { *; }
 -keep class com.car.xiaoouscreen.ui.settings.model.** { *; }
 -keepclassmembers class com.car.xiaoouscreen.ui.settings.model.** { *; }
+-keep class com.car.xiaoouscreen.updater.** { *; }
+-keepclassmembers class com.car.xiaoouscreen.updater.** { *; }
 -keep class com.carlyrics.model.** { *; }
 -keepclassmembers class com.carlyrics.model.** { *; }
 -keep class com.carlyrics.lyrics.** { *; }

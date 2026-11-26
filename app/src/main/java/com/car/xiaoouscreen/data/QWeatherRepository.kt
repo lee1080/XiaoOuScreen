@@ -5,7 +5,8 @@ import android.content.SharedPreferences
 import android.util.Log
 import com.carlyrics.util.AppLogger
 import com.carlyrics.util.PrivacyUtil
-import com.google.gson.Gson
+import com.carlyrics.util.SharedNetwork
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -21,7 +22,7 @@ class QWeatherRepository(private val context: Context) {
     private val prefs: SharedPreferences =
         com.carlyrics.util.PrefsManager.getSafeStorageContext(context)
             .getSharedPreferences("qweather_data_cache", Context.MODE_PRIVATE)
-    private val gson = Gson()
+    private val gson = SharedNetwork.gson
 
     // 内存 L1 缓存
     var lastCachedNow: QWeatherNowDto? = null
@@ -54,7 +55,7 @@ class QWeatherRepository(private val context: Context) {
     }
 
     private val client: OkHttpClient by lazy {
-        OkHttpClient.Builder()
+        SharedNetwork.baseOkHttpClient.newBuilder()
             .connectTimeout(6, TimeUnit.SECONDS)
             .readTimeout(6, TimeUnit.SECONDS)
             .build()
@@ -176,6 +177,8 @@ class QWeatherRepository(private val context: Context) {
                 checkHttpException(e)
                 AppLogger.w(TAG, "❌ [QWeather API] 实况 HTTP 异常: ${e.code()} ${e.message()}")
                 Result.failure(e)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.w(TAG, "⚠️ [QWeather API] 实况网络请求失败: ${e.message}")
                 Result.failure(e)
@@ -211,6 +214,8 @@ class QWeatherRepository(private val context: Context) {
                 checkHttpException(e)
                 AppLogger.w(TAG, "❌ [QWeather API] 分钟降水 HTTP 异常: ${e.code()} ${e.message()}")
                 Result.failure(e)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 AppLogger.w(TAG, "⚠️ [QWeather API] 分钟降水请求失败: ${e.message}")
                 Result.failure(e)
@@ -224,7 +229,7 @@ class QWeatherRepository(private val context: Context) {
 
     private fun checkErrorCode(code: String) {
         if (code == "401" || code == "403" || code == "402") {
-            Log.e(TAG, "QWeather critical error $code, triggering circuit breaker (15 min cooldown)")
+            AppLogger.e(TAG, "QWeather critical error $code, triggering circuit breaker (15 min cooldown)")
             isCircuitBroken = true
             circuitBrokenTimeMs = System.currentTimeMillis()
         }
@@ -232,7 +237,7 @@ class QWeatherRepository(private val context: Context) {
 
     private fun checkHttpException(e: HttpException) {
         if (e.code() == 401 || e.code() == 403 || e.code() == 429) {
-            Log.e(TAG, "QWeather critical HTTP ${e.code()}, triggering circuit breaker (15 min cooldown)")
+            AppLogger.e(TAG, "QWeather critical HTTP ${e.code()}, triggering circuit breaker (15 min cooldown)")
             isCircuitBroken = true
             circuitBrokenTimeMs = System.currentTimeMillis()
         }

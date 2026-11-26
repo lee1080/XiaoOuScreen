@@ -74,17 +74,24 @@ def build_release():
 def find_and_copy_apk():
     print("📦 [3/5] 检索并整理正式版 APK 产物...")
     release_dir = PROJECT_ROOT / "app" / "build" / "outputs" / "apk" / "release"
-    apks = list(release_dir.glob("*.apk"))
+    # 按修改时间逆序排序，确保获取最新编译的 APK
+    apks = sorted(release_dir.glob("*.apk"), key=lambda p: p.stat().st_mtime, reverse=True)
     if not apks:
         print(f"❌ 错误: 未在 {release_dir} 找到生成的 APK")
         sys.exit(1)
 
-    # 优先找 XiaoOuScreen 开头的 APK
+    # 优先找当前版本或 XiaoOuScreen 开头的最新 APK
+    curr_ver = get_current_version()
     target_apk = None
     for apk in apks:
-        if "XiaoOuScreen" in apk.name:
+        if curr_ver in apk.name:
             target_apk = apk
             break
+    if not target_apk:
+        for apk in apks:
+            if "XiaoOuScreen" in apk.name:
+                target_apk = apk
+                break
     if not target_apk:
         target_apk = apks[0]
 

@@ -31,7 +31,7 @@ object LyricsSourceManager {
     private lateinit var appContext: Context
     private lateinit var prefs: SharedPreferences
     private lateinit var sourcesDir: File
-    private val gson = Gson()
+    private val gson = com.carlyrics.util.SharedNetwork.gson
 
     @Volatile
     private var cachedSources: MutableList<LyricsSource> = mutableListOf()
@@ -227,8 +227,8 @@ object LyricsSourceManager {
             }?.let { return it }
         }
 
-        // 4. 酷狗音乐系列 (酷狗音乐手机版/车机版/概念版等)
-        if (pkg.contains("kugou")) {
+        // 4. 酷狗音乐系列 (酷狗音乐手机版/车机版/概念版/原车酷狗 com.chinatsp.music 等)
+        if (pkg.contains("kugou") || pkg == "com.chinatsp.music") {
             availableSources.find { s ->
                 val id = s.id.lowercase()
                 val name = s.name.lowercase()
@@ -245,8 +245,26 @@ object LyricsSourceManager {
             }?.let { return it }
         }
 
-        // 6. 国际流媒体 (Spotify / Apple Music / YouTube Music)
-        if (pkg.contains("spotify") || pkg.contains("apple.android.music") || pkg.contains("youtube")) {
+        // 6. 咪咕音乐系列 (咪咕音乐手机版/车机版等)
+        if (pkg.contains("migu") || pkg.contains("cmcc")) {
+            availableSources.find { s ->
+                val id = s.id.lowercase()
+                val name = s.name.lowercase()
+                id.contains("migu") || name.contains("咪咕")
+            }?.let { return it }
+        }
+
+        // 7. Apple Music 系列
+        if (pkg.contains("apple.android.music") || pkg.contains("apple.music")) {
+            availableSources.find { s ->
+                val id = s.id.lowercase()
+                val name = s.name.lowercase()
+                id.contains("apple") || name.contains("apple")
+            }?.let { return it }
+        }
+
+        // 8. 国际流媒体 (Spotify / YouTube Music 等)
+        if (pkg.contains("spotify") || pkg.contains("youtube")) {
             availableSources.find { s ->
                 val id = s.id.lowercase()
                 val name = s.name.lowercase()

@@ -39,6 +39,8 @@ class SkinVibrantWave(context: Context) : LyricsSkin(context) {
     private val noLyricsText: TextView
     private val darkOverlay: View
     private var bgAnimator: ValueAnimator? = null
+    private var bgLayerTopDrawable: GradientDrawable? = null
+    private var lastBgAlpha = -1
     // 左面板引用（两栏架构）
     private val leftPanelView: LinearLayout
     private val leftPanel: FrameLayout
@@ -65,10 +67,19 @@ class SkinVibrantWave(context: Context) : LyricsSkin(context) {
     }
 
     init {
-        background = GradientDrawable().apply {
-            orientation = GradientDrawable.Orientation.TL_BR
-            colors = GRADIENT_COLORS
+        val gradColors = GRADIENT_COLORS
+        val baseDrawable = GradientDrawable(
+            GradientDrawable.Orientation.TL_BR,
+            intArrayOf(gradColors[0], gradColors[1], gradColors[2], gradColors[3])
+        )
+        val topDrawable = GradientDrawable(
+            GradientDrawable.Orientation.TL_BR,
+            intArrayOf(gradColors[1], gradColors[2], gradColors[3], gradColors[4])
+        ).apply {
+            alpha = 0
         }
+        bgLayerTopDrawable = topDrawable
+        background = android.graphics.drawable.LayerDrawable(arrayOf(baseDrawable, topDrawable))
         startBgAnimation()
 
         darkOverlay = View(context).apply { setBackgroundColor(Color.parseColor("#B3000000")) }
@@ -124,7 +135,7 @@ class SkinVibrantWave(context: Context) : LyricsSkin(context) {
                 val origColor = p.color
                 val origText = text
                 if (origText.isNullOrEmpty()) return
-                val textW = p.measureText(origText.toString())
+                val textW = p.measureText(origText, 0, origText.length)
                 val origX = if (marqueeEnabled) 0f else when (lyricsTextAlignment) {
                     Gravity.START, Gravity.LEFT -> 0f
                     Gravity.END, Gravity.RIGHT -> (width - textW).coerceAtLeast(0f)
@@ -133,18 +144,13 @@ class SkinVibrantWave(context: Context) : LyricsSkin(context) {
                 val fm = p.fontMetrics
                 val origY = height / 2f - (fm.ascent + fm.descent) / 2f
 
-                // Layer 1: 远层大阴影
-                p.setShadowLayer(shadow1Radius, shadow1Dx, shadow1Dy, shadow1Color)
-                p.color = Color.WHITE
-                canvas.drawText(origText.toString(), origX, origY, p)
-
-                // Layer 2: 近层小阴影
-                p.setShadowLayer(shadow2Radius, shadow2Dx, shadow2Dy, shadow2Color)
-                canvas.drawText(origText.toString(), origX, origY, p)
-
-                // Layer 3: 主体文字
+                // 零 GC + 零 GPU BlurMaskFilter：直接用 CharSequence 重载与双层偏移软阴影绘制
                 p.clearShadowLayer()
-                canvas.drawText(origText.toString(), origX, origY, p)
+                p.color = shadow1Color
+                canvas.drawText(origText, 0, origText.length, origX + dp(2).toFloat(), origY + dp(4).toFloat(), p)
+
+                p.color = Color.WHITE
+                canvas.drawText(origText, 0, origText.length, origX, origY, p)
 
                 p.color = origColor
             }
@@ -402,32 +408,35 @@ class SkinVibrantWave(context: Context) : LyricsSkin(context) {
         refreshInfoFontSize()
     }
 
-    override fun onDestroy() { bgAnimator?.cancel() }
+    override fun onPauseAnimations() { bgAnimator?.pause() }
 
-    /** 模拟 CSS animation: gradientBG 30s — REVERSE模式无缝循环 (0→1→0) */
+    override fun onResumeAnimations() { bgAnimator?.resume() }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        bgAnimator?.cancel()
+        bgAnimator = null
+    }
+
+    /** 模拟 CSS animation: gradientBG 30s — 通过预构建双层 Drawable Alpha 交叉淡入，彻底消除每帧 IntArray 与 Shader 重建 */
     private fun startBgAnimation() {
-        val gd = background as GradientDrawable
+        val topLayer = bgLayerTopDrawable ?: return
+        bgAnimator?.cancel()
+        lastBgAlpha = -1
         bgAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = 30000
             repeatCount = ValueAnimator.INFINITE
             repeatMode = ValueAnimator.REVERSE
             interpolator = android.view.animation.LinearInterpolator()
             addUpdateListener {
-                val frac = it.animatedFraction
-                val colors = IntArray(4) { i ->
-                    interpolateColor(GRADIENT_COLORS[i], GRADIENT_COLORS[i+1], frac)
+                val targetAlpha = (it.animatedFraction * 255f + 0.5f).toInt().coerceIn(0, 255)
+                if (targetAlpha != lastBgAlpha) {
+                    lastBgAlpha = targetAlpha
+                    topLayer.alpha = targetAlpha
                 }
-                gd.colors = colors
             }
             start()
         }
-    }
-
-    private fun interpolateColor(c1: Int, c2: Int, f: Float): Int {
-        val r = (Color.red(c1)*(1-f) + Color.red(c2)*f).toInt()
-        val g = (Color.green(c1)*(1-f) + Color.green(c2)*f).toInt()
-        val b = (Color.blue(c1)*(1-f) + Color.blue(c2)*f).toInt()
-        return Color.rgb(r, g, b)
     }
 
     private fun createTV(sp: Float, tf: Typeface, color: Int) = TextView(context).apply {

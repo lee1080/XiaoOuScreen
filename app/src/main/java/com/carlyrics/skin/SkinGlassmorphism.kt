@@ -423,9 +423,18 @@ class SkinGlassmorphism(context: Context) : LyricsSkin(context) {
         refreshInfoFontSize()
     }
 
-    override fun onDestroy() { pulseAnimator?.cancel() }
+    override fun onPauseAnimations() { pulseAnimator?.pause() }
+
+    override fun onResumeAnimations() { pulseAnimator?.resume() }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        pulseAnimator?.cancel()
+        pulseAnimator = null
+    }
 
     private fun startPulseAnimation() {
+        pulseAnimator?.cancel()
         pulseAnimator = ValueAnimator.ofFloat(1f, 1.02f).apply {
             duration = 15000; repeatCount = ValueAnimator.INFINITE
             repeatMode = ValueAnimator.REVERSE; interpolator = android.view.animation.AccelerateDecelerateInterpolator()
@@ -469,7 +478,8 @@ class SkinGlassmorphism(context: Context) : LyricsSkin(context) {
             val gs = gradientStart
             val ge = gradientEnd
             if (gs != null && ge != null) {
-                val currentW = paint.measureText(text.toString())
+                val cs = text ?: ""
+                val currentW = paint.measureText(cs, 0, cs.length)
                 if (cachedShader == null || currentW != lastMeasuredW) {
                     lastMeasuredW = currentW
                     if (currentW > 0f) {

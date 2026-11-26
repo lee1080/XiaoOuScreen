@@ -420,8 +420,11 @@ class DriveModeWipeView @JvmOverloads constructor(
         )
     }
 
+    private var lastBreatheDrawMs: Long = 0L
+
     private fun startBreatheLoop() {
         if (breatheAnimator != null && breatheAnimator!!.isRunning) return
+        lastBreatheDrawMs = 0L
         breatheAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = 2400L // 2.4秒黄金律动周期
             repeatCount = ValueAnimator.INFINITE
@@ -456,7 +459,14 @@ class DriveModeWipeView @JvmOverloads constructor(
                     customCaliperOffset = sinVal * 18f
                     customRulerOffset = (animPhase * 32f) % 16f
 
-                    invalidate()
+                    // 擦除入/退场动画已每帧触发 invalidate()，避免双倍重绘；驻留态呼吸节流至 ~30fps
+                    if (currentState == AnimState.DWELLING) {
+                        val nowMs = anim.currentPlayTime
+                        if (lastBreatheDrawMs == 0L || kotlin.math.abs(nowMs - lastBreatheDrawMs) >= 32L) {
+                            lastBreatheDrawMs = nowMs
+                            invalidate()
+                        }
+                    }
                 }
             }
             start()
@@ -465,9 +475,6 @@ class DriveModeWipeView @JvmOverloads constructor(
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
-        if (cachedBitmap == null && w > 0 && h > 0 && visibility == VISIBLE) {
-            ensureCachedCanvas()
-        }
     }
 
     /**
@@ -504,23 +511,13 @@ class DriveModeWipeView @JvmOverloads constructor(
                 return@post
             }
 
-            // 3. 从 IDLE 常态全新启动：
+            // 3. 从 IDLE 常态全新启动：底层保持透明实时透显，无需额外抓拍 2.95MB 全屏离线快照
             cancelAllAnimators()
             isSwitchingBetweenModes = false
             previousMode = null
             currentMode = targetMode
             currentSnapshotProvider = snapshotProvider
-
-            // 离线捕获底层画面
-            if (snapshotProvider != null) {
-                ensureCachedCanvas().let { c ->
-                    c.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
-                    snapshotProvider.invoke(c)
-                    hasValidSnapshot = true
-                }
-            } else {
-                hasValidSnapshot = false
-            }
+            hasValidSnapshot = false
 
             visibility = VISIBLE
             alpha = 1f
@@ -534,6 +531,7 @@ class DriveModeWipeView @JvmOverloads constructor(
     fun dismiss() {
         val action = Runnable {
             cancelAllAnimators()
+            releaseSnapshotBuffer()
             currentState = AnimState.IDLE
             wipeProgress = 0f
             dwellProgress = 0f
@@ -684,15 +682,8 @@ class DriveModeWipeView @JvmOverloads constructor(
         Log.i(TAG, "startWipeOut: mode=$currentMode, duration=$DURATION_WIPE_OUT_MS ms")
         currentState = AnimState.WIPING_OUT
         wipeProgress = 0f
-
-        // 擦除退场前立即重新就地抓取最新原生时钟气象画面，杜绝露出2秒前的旧时间快照 (彻底解决图四问题)
-        currentSnapshotProvider?.let { provider ->
-            ensureCachedCanvas().let { c ->
-                c.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
-                provider.invoke(c)
-                hasValidSnapshot = true
-            }
-        }
+        // WIPING_OUT 切线左侧保持 100% 透明实时透显主屏，无需抓拍重绘 2.95MB 全屏离线快照
+        hasValidSnapshot = false
 
         wipeOutAnimator?.removeAllListeners()
         wipeOutAnimator?.cancel()
@@ -709,6 +700,7 @@ class DriveModeWipeView @JvmOverloads constructor(
                     Log.i(TAG, "startWipeOut ended -> IDLE")
                     currentState = AnimState.IDLE
                     cancelAllAnimators()
+                    releaseSnapshotBuffer()
                     wipeProgress = 0f
                     visibility = GONE
                     onWipeCompleteListener?.invoke()
@@ -716,6 +708,15 @@ class DriveModeWipeView @JvmOverloads constructor(
             })
             start()
         }
+    }
+
+    private fun releaseSnapshotBuffer() {
+        hasValidSnapshot = false
+        cachedCanvas = null
+        cachedBitmap?.let { bmp ->
+            if (!bmp.isRecycled) bmp.recycle()
+        }
+        cachedBitmap = null
     }
 
     private fun cancelAllAnimators() {
@@ -739,9 +740,7 @@ class DriveModeWipeView @JvmOverloads constructor(
     override fun onDetachedFromWindow() {
         dismiss()
         cancelAllAnimators()
-        cachedBitmap?.recycle()
-        cachedBitmap = null
-        cachedCanvas = null
+        releaseSnapshotBuffer()
         super.onDetachedFromWindow()
     }
 

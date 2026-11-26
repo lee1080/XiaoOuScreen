@@ -74,6 +74,10 @@ android {
     buildTypes {
         debug {
             isMinifyEnabled = false
+            val aospConfig = signingConfigs.getByName("aospPlatform")
+            if (aospConfig.storeFile != null) {
+                signingConfig = aospConfig
+            }
         }
         release {
             isMinifyEnabled = true

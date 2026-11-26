@@ -25,13 +25,23 @@
     <uses-permission android:name="android.permission.BLUETOOTH" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
 
+    <!-- 氛围灯音频频谱律动捕获 (Visualizer 及车机音频路由/混音会话监听) -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_ROUTING" />
+    <uses-permission android:name="android.permission.CAPTURE_AUDIO_OUTPUT" />
+
     <!-- 长安欧尚 Z6 车机 Automotive 底层信号读取权限 (纯 App 顶层接入) -->
     <uses-permission android:name="android.car.permission.CAR_CABIN" />
     <uses-permission android:name="android.car.permission.CAR_POWERTRAIN" />
     <uses-permission android:name="android.car.permission.CAR_VENDOR_EXTENSION" />
     <uses-permission android:name="android.car.permission.CAR_SPEED" />
     <uses-permission android:name="android.car.permission.CAR_INFO" />
+    <uses-permission android:name="android.car.permission.CAR_ENERGY" />
     <uses-permission android:name="android.car.permission.CAR_EXTERIOR_ENVIRONMENT" />
+
+    <!-- 软件应用内自动更新与安装 APK 权限 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <queries>
         <intent>
@@ -50,10 +60,11 @@
         android:networkSecurityConfig="@xml/network_security_config"
         android:theme="@style/Theme.CarWeather">
 
-        <!-- 主屏控制台与效果模拟调试 Activity -->
+        <!-- 主屏控制台与效果模拟调试 Activity (车规级单例任务栈) -->
         <activity
             android:name=".ui.MainActivity"
             android:exported="true"
+            android:launchMode="singleTask"
             android:screenOrientation="sensorLandscape"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize">
             <intent-filter>
@@ -66,14 +77,16 @@
         <activity
             android:name=".ui.LyricsSettingsActivity"
             android:exported="false"
+            android:launchMode="singleTop"
             android:screenOrientation="sensorLandscape"
             android:theme="@style/Theme.CarLyrics"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize" />
 
-        <!-- 副屏全屏独立预览 Activity (可由控制台打开或 ADB 启动) -->
+        <!-- 副屏全屏独立预览 Activity (车规级单例任务栈，可由控制台打开或 ADB 启动) -->
         <activity
             android:name=".ui.CarSubscreenActivity"
             android:exported="true"
+            android:launchMode="singleTask"
             android:screenOrientation="sensorLandscape"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize" />
 
@@ -91,6 +104,15 @@
                 <action android:name="com.car.xiaoouscreen.SIMULATE_PRESET" />
                 <action android:name="com.car.xiaoouscreen.RESET_LIVE" />
                 <action android:name="com.car.xiaoouscreen.CALL_EVENT" />
+                <action android:name="com.car.xiaoouscreen.SIMULATE_MUSIC" />
+                <action android:name="com.car.xiaoouscreen.SIMULATE_BATTERY" />
+                <action android:name="com.car.xiaoouscreen.SIMULATE_TEMPS" />
+                <action android:name="com.car.xiaoouscreen.SIMULATE_GFORCE" />
+                <action android:name="com.car.xiaoouscreen.SIMULATE_MOTOR_POWER" />
+                <action android:name="com.car.xiaoouscreen.SIMULATE_RPM" />
+                <action android:name="com.car.xiaoouscreen.SIMULATE_LANE_CHANGE" />
+                <action android:name="com.car.xiaoouscreen.SIMULATE_TURN_SIGNAL" />
+                <action android:name="com.car.xiaoouscreen.SIMULATE_CLOUDEYE_EXIT" />
             </intent-filter>
         </receiver>
 
@@ -138,6 +160,17 @@
                 <action android:name="android.media.browse.MediaBrowserService" />
             </intent-filter>
         </service>
+
+        <!-- 应用内自动更新 APK 安装 FileProvider -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
     </application>
 

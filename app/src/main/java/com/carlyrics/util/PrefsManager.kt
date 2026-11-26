@@ -38,6 +38,8 @@ object PrefsManager {
     private const val KEY_XIAOOU_AVOIDANCE_ENABLED = "xiaoou_avoidance_enabled"
     private const val KEY_LIQUID_GLASS_CLOCK_ENABLED = "liquid_glass_clock_enabled"
     private const val KEY_BOTTOM_LEFT_GEAR_HUD_ENABLED = "bottom_left_gear_hud_enabled"
+    private const val KEY_MINI_GEAR_POSITION = "mini_gear_position"
+    private const val KEY_MINI_GEAR_REALTIME_COLOR_ENABLED = "mini_gear_realtime_color_enabled"
 
     private var prefs: SharedPreferences? = null
 
@@ -290,6 +292,7 @@ object PrefsManager {
     // ----- 日志记录开关 (默认关闭 false) -----
     fun isLogEnabled(): Boolean = get().getBoolean(KEY_LOG_ENABLED, false)
     fun setLogEnabled(enabled: Boolean) {
+        AppLogger.setDiskLogEnabledCache(enabled)
         get().edit().putBoolean(KEY_LOG_ENABLED, enabled).apply()
     }
 
@@ -325,6 +328,18 @@ object PrefsManager {
         get().edit().putBoolean(KEY_BOTTOM_LEFT_GEAR_HUD_ENABLED, enabled).apply()
     }
 
+    // ----- 微型档位悬浮停靠位置 (0=A区下默认, 1=A区上, 2=屏底中心, 3=C区下, 4=C区上) -----
+    fun getMiniGearPosition(): Int = get().getInt(KEY_MINI_GEAR_POSITION, 0)
+    fun setMiniGearPosition(position: Int) {
+        get().edit().putInt(KEY_MINI_GEAR_POSITION, position).apply()
+    }
+
+    // ----- 实验室特性：微型档位实时背景自适应计算 (根据所在位置背景动态计算高对比度与反色/环境光融入) -----
+    fun isMiniGearRealtimeColorEnabled(): Boolean = get().getBoolean(KEY_MINI_GEAR_REALTIME_COLOR_ENABLED, false)
+    fun setMiniGearRealtimeColorEnabled(enabled: Boolean) {
+        get().edit().putBoolean(KEY_MINI_GEAR_REALTIME_COLOR_ENABLED, enabled).apply()
+    }
+
     // ----- 未匹配到歌词显示默认时钟画面 (默认开启 true) -----
     private const val KEY_SHOW_DEFAULT_CLOCK_WHEN_NO_LYRICS = "show_default_clock_when_no_lyrics"
     fun isShowDefaultClockWhenNoLyrics(): Boolean = get().getBoolean(KEY_SHOW_DEFAULT_CLOCK_WHEN_NO_LYRICS, true)
@@ -344,5 +359,81 @@ object PrefsManager {
     fun isUseCarOutsideTempEnabled(): Boolean = get().getBoolean(KEY_USE_CAR_OUTSIDE_TEMP, true)
     fun setUseCarOutsideTempEnabled(enabled: Boolean) {
         get().edit().putBoolean(KEY_USE_CAR_OUTSIDE_TEMP, enabled).apply()
+    }
+
+    // ----- 小欧屏 A / C 区域可替换模块配置 (A 默认天气信息，C 关闭小欧形象后默认歌曲封面) -----
+    private const val KEY_XIAOOU_SLOT_A = "xiaoou_slot_a"
+    private const val KEY_XIAOOU_SLOT_C = "xiaoou_slot_c"
+
+    fun getXiaoOuSlotA(): String {
+        val v = get().getString(KEY_XIAOOU_SLOT_A, "weather") ?: "weather"
+        return if (v.equals("temp_compare", ignoreCase = true)) "weather" else v
+    }
+    fun setXiaoOuSlotA(slotId: String) {
+        AppLogger.d(TAG, "setXiaoOuSlotA: $slotId")
+        get().edit().putString(KEY_XIAOOU_SLOT_A, slotId).apply()
+    }
+
+    fun getXiaoOuSlotC(): String {
+        val v = get().getString(KEY_XIAOOU_SLOT_C, "album_cover") ?: "album_cover"
+        return if (v.equals("temp_compare", ignoreCase = true)) "album_cover" else v
+    }
+    fun setXiaoOuSlotC(slotId: String) {
+        AppLogger.d(TAG, "setXiaoOuSlotC: $slotId")
+        get().edit().putString(KEY_XIAOOU_SLOT_C, slotId).apply()
+    }
+
+    // ----- 智能场景联动 · 氛围灯音乐同步配置 -----
+    private const val KEY_AMBIENT_LIGHT_SYNC_ENABLED = "ambient_light_sync_enabled"
+    private const val KEY_AMBIENT_LIGHT_COLOR_SYNC = "ambient_light_color_sync"
+    private const val KEY_AMBIENT_LIGHT_RANDOM_COLOR = "ambient_light_random_color"
+    private const val KEY_AMBIENT_LIGHT_SENSITIVITY = "ambient_light_sensitivity"
+
+    fun isAmbientLightSyncEnabled(): Boolean = get().getBoolean(KEY_AMBIENT_LIGHT_SYNC_ENABLED, false)
+    fun setAmbientLightSyncEnabled(enabled: Boolean) {
+        get().edit().putBoolean(KEY_AMBIENT_LIGHT_SYNC_ENABLED, enabled).apply()
+    }
+
+    fun isAmbientLightColorSyncEnabled(): Boolean = get().getBoolean(KEY_AMBIENT_LIGHT_COLOR_SYNC, true)
+    fun setAmbientLightColorSyncEnabled(enabled: Boolean) {
+        get().edit().putBoolean(KEY_AMBIENT_LIGHT_COLOR_SYNC, enabled).apply()
+    }
+
+    fun isAmbientLightRandomColorEnabled(): Boolean = get().getBoolean(KEY_AMBIENT_LIGHT_RANDOM_COLOR, false)
+    fun setAmbientLightRandomColorEnabled(enabled: Boolean) {
+        get().edit().putBoolean(KEY_AMBIENT_LIGHT_RANDOM_COLOR, enabled).apply()
+    }
+
+    fun getAmbientLightSensitivity(): Int = get().getInt(KEY_AMBIENT_LIGHT_SENSITIVITY, 100)
+    fun setAmbientLightSensitivity(sensitivity: Int) {
+        get().edit().putInt(KEY_AMBIENT_LIGHT_SENSITIVITY, sensitivity).apply()
+    }
+
+    // ----- 智能场景联动 · 氛围灯基准亮度模式与自定义亮度 -----
+    private const val KEY_AMBIENT_LIGHT_FOLLOW_CAR_BRIGHTNESS = "ambient_light_follow_car_brightness"
+    private const val KEY_AMBIENT_LIGHT_CUSTOM_BRIGHTNESS = "ambient_light_custom_brightness"
+
+    fun isAmbientLightFollowCarBrightness(): Boolean = get().getBoolean(KEY_AMBIENT_LIGHT_FOLLOW_CAR_BRIGHTNESS, true)
+    fun setAmbientLightFollowCarBrightness(enabled: Boolean) {
+        get().edit().putBoolean(KEY_AMBIENT_LIGHT_FOLLOW_CAR_BRIGHTNESS, enabled).apply()
+    }
+
+    fun getAmbientLightCustomBrightness(): Int = get().getInt(KEY_AMBIENT_LIGHT_CUSTOM_BRIGHTNESS, 80)
+    fun setAmbientLightCustomBrightness(brightnessPercent: Int) {
+        get().edit().putInt(KEY_AMBIENT_LIGHT_CUSTOM_BRIGHTNESS, brightnessPercent.coerceIn(10, 100)).apply()
+    }
+
+    // ----- 智能场景联动 · 转向灯同步与变道辅助光效配置 -----
+    private const val KEY_TURN_SIGNAL_SYNC_ENABLED = "turn_signal_sync_enabled"
+    private const val KEY_LANE_CHANGE_ASSIST_ENABLED = "lane_change_assist_enabled"
+
+    fun isTurnSignalSyncEnabled(): Boolean = get().getBoolean(KEY_TURN_SIGNAL_SYNC_ENABLED, true)
+    fun setTurnSignalSyncEnabled(enabled: Boolean) {
+        get().edit().putBoolean(KEY_TURN_SIGNAL_SYNC_ENABLED, enabled).apply()
+    }
+
+    fun isLaneChangeAssistEnabled(): Boolean = get().getBoolean(KEY_LANE_CHANGE_ASSIST_ENABLED, true)
+    fun setLaneChangeAssistEnabled(enabled: Boolean) {
+        get().edit().putBoolean(KEY_LANE_CHANGE_ASSIST_ENABLED, enabled).apply()
     }
 }

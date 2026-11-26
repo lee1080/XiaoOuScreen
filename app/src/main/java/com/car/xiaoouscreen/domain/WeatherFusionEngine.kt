@@ -121,6 +121,9 @@ class WeatherFusionEngine(
             silentDebounceJob = scope.launch {
                 delay(3000L)
                 val staleMs = System.currentTimeMillis() - lastOnlineSuccessTimeMs
+                if (lastOnlineSuccessTimeMs > 0L && staleMs < 60_000L) {
+                    return@launch
+                }
                 val needForce = (lastOnlineSuccessTimeMs == 0L || staleMs >= 10 * 60 * 1000L)
                 AppLogger.i(TAG, "🌐 [网络恢复补偿] 车机网络已就绪，触发天气刷新 (force=$needForce, 距上次在线成功=${if (lastOnlineSuccessTimeMs == 0L) "从未" else "${staleMs / 1000}s"})")
                 gpsManager.requestFreshLocationForWakeup()
@@ -200,12 +203,16 @@ class WeatherFusionEngine(
     /**
      * 核心刷新方法：执行双源并发融合调度
      */
-    fun refreshWeather(
+        fun refreshWeather(
         lat: Double = gpsManager.currentLatitude,
         lon: Double = gpsManager.currentLongitude,
         force: Boolean = false
     ) {
-        // 避免短时间内重叠发起多个并发刷新任务
+        // 若已有相同/非强制刷新任务在途，避免重复打断并取消底层的 HTTPS/SSL 握手
+        if (!force && refreshJob?.isActive == true) {
+            AppLogger.d(TAG, "⏳ [天气引擎] 已有在线刷新在途，跳过非强制重叠触发以保护连接复用")
+            return
+        }
         refreshJob?.cancel()
         refreshJob = scope.launch {
             val nowMs = System.currentTimeMillis()

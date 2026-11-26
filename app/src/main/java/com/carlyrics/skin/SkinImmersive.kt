@@ -521,7 +521,8 @@ class SkinImmersive(context: Context) : LyricsSkin(context) {
             val gs = gradientStart
             val ge = gradientEnd
             if (gs != null && ge != null) {
-                val currentW = paint.measureText(text.toString())
+                val cs = text ?: ""
+                val currentW = paint.measureText(cs, 0, cs.length)
                 if (textShader == null || currentW != lastMeasuredW) {
                     lastMeasuredW = currentW
                     if (currentW > 0f) {

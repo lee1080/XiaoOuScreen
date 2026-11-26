@@ -51,14 +51,12 @@ class CarBottomLeftGearHudView @JvmOverloads constructor(
         private const val LOGICAL_WIDTH = 1920f
         private const val LOGICAL_HEIGHT = 384f
 
-        // 槽体几何尺寸 (整体 288×60px，在小欧屏可用最左侧 130px 与天气面板最右侧 535px 之间水平居中：130 + (405 - 288)/2 = 188.5px)
+        // 槽体几何尺寸 (整体 288×60px)
         const val DEFAULT_SLOT_LEFT = 188.5f
+        const val DEFAULT_SLOT_TOP = 314f
         private const val SLOT_WIDTH = 288f
         private const val SLOT_HEIGHT = 60f
-        private const val SLOT_TOP = 314f
-        private const val SLOT_BOTTOM = 374f
         private const val SLOT_RADIUS = 17f
-        private const val SLOT_CENTER_Y = (SLOT_TOP + SLOT_BOTTOM) / 2f // 344f
 
         // 激活滑块胶囊尺寸 (48×48px, 留白 Padding = (60 - 48)/2 = 6px)
         private const val CAPSULE_WIDTH = 48f
@@ -80,11 +78,18 @@ class CarBottomLeftGearHudView @JvmOverloads constructor(
         private const val OFFSET_DOT_2 = (OFFSET_GEAR_N + OFFSET_GEAR_D) / 2f // 144f
         private const val OFFSET_DOT_3 = (OFFSET_GEAR_D + OFFSET_GEAR_P) / 2f // 220f
 
-        // 档位色彩定义
+        // 档位色彩定义 (确保4档高饱和可辨识发光色：红 / 冰晶蓝白 / 翡翠绿 / 活力橙)
         private val COLOR_R = Color.parseColor("#EF4444") // 烈焰红
-        private val COLOR_N = Color.parseColor("#F1F5F9") // 金属冷白
+        private val COLOR_N = Color.parseColor("#7DD3FC") // 冰晶银蓝
         private val COLOR_D = Color.parseColor("#10B981") // 极速绿
         private val COLOR_P = Color.parseColor("#F97316") // 活力橙
+
+        // 预烘焙软光晕精灵边距与尺寸 (零 GPU Scratch RenderTarget、零 onDraw 分配)
+        private const val CAPSULE_GLOW_PAD = 14
+        private const val CAPSULE_GLOW_BMP_W = 48 + CAPSULE_GLOW_PAD * 2 // 76
+        private const val CAPSULE_GLOW_BMP_H = 48 + CAPSULE_GLOW_PAD * 2 // 76
+        private const val BAR_GLOW_BMP_W = 40
+        private const val BAR_GLOW_BMP_H = 18
 
         // 降采样液态磨砂玻璃模糊缓冲尺寸 (4x 降采样: 288/4=72, 60/4=15)
         private const val GLASS_BUFFER_W = 72
@@ -97,12 +102,35 @@ class CarBottomLeftGearHudView @JvmOverloads constructor(
     // 外部背景渲染提供者 (支持将底层实时动态天气/晚霞抓取并注入磨砂玻璃模糊层)
     var backgroundProvider: ((Canvas, RectF) -> Unit)? = null
 
-    // 当前槽体水平布局位置
+    // 当前槽体停靠位置配置与布局几何
+    private var currentSlotPosition: MiniGearPosition = MiniGearPosition.BOTTOM_LEFT
     private var currentSlotLeft = DEFAULT_SLOT_LEFT
-    private val slotRect = RectF(DEFAULT_SLOT_LEFT, SLOT_TOP, DEFAULT_SLOT_LEFT + SLOT_WIDTH, SLOT_BOTTOM)
+    private var currentSlotTop = DEFAULT_SLOT_TOP
+    private val slotRect = RectF(DEFAULT_SLOT_LEFT, DEFAULT_SLOT_TOP, DEFAULT_SLOT_LEFT + SLOT_WIDTH, DEFAULT_SLOT_TOP + SLOT_HEIGHT)
     private val slotPath = Path()
     private val capsuleRect = RectF()
+    private val capsuleGlowRect = RectF()
     private val colorBarRect = RectF()
+    private val colorBarGlowRect = RectF()
+
+    // 预烘焙胶囊外辉光 & 底部微光灯条 ALPHA_8 掩码（初始化单次数学烘焙，支持任意滑轨插值变色、0 GC、0 RenderTarget）
+    private val capsuleGlowAlphaBmp: Bitmap = bakeRoundedBoxGlowAlpha(
+        CAPSULE_GLOW_BMP_W, CAPSULE_GLOW_BMP_H, CAPSULE_WIDTH, CAPSULE_HEIGHT, CAPSULE_RADIUS, 7.2f, CAPSULE_GLOW_PAD.toFloat()
+    )
+    private val barGlowAlphaBmp: Bitmap = bakeRoundedBoxGlowAlpha(
+        BAR_GLOW_BMP_W, BAR_GLOW_BMP_H, 18f, 3.0f, 1.5f, 4.8f, 9f
+    )
+
+    // 实验室特性：实时环境色与明度自适应（支持连续平滑过渡，杜绝切歌/切屏色彩突变割裂感）
+    private var isRealtimeColorEnabled = false
+    private var adaptiveBgLuminance: Float = 0.3f
+    private var adaptiveDominantTint: Int = Color.WHITE
+    private var adaptiveLightFactor: Float = 0f
+    private var targetAdaptiveLuminance: Float = 0.3f
+    private var targetAdaptiveDominantTint: Int = Color.WHITE
+    private var targetAdaptiveLightFactor: Float = 0f
+    private var adaptiveColorAnimator: ValueAnimator? = null
+    private var hasAdaptiveSample = false
 
     // 档位标签元数据
     private val gearLabels = arrayOf("R", "N", "D", "P")
@@ -115,6 +143,8 @@ class CarBottomLeftGearHudView @JvmOverloads constructor(
     private var currentGearColor = COLOR_P
 
     private var slideAnimator: ValueAnimator? = null
+    private var positionAnimator: ValueAnimator? = null
+    private var pendingBlurRunnable: Runnable? = null
     private val argbEvaluator = ArgbEvaluator()
     private val slideInterpolator = PathInterpolator(0.22f, 1.0f, 0.36f, 1.0f) // 车规级优雅缓动
 
@@ -169,11 +199,11 @@ class CarBottomLeftGearHudView @JvmOverloads constructor(
     // 画笔定义 (严格与大时间液态玻璃效果 100% 统一)
     // ==========================================
 
-    // 1. 极轻柔晶体悬浮投影画笔 (消除沉重黑框，通透悬浮)
+    // 1. 极轻柔晶体悬浮投影画笔 (零 RenderTarget 轻量描边替代离屏高斯模糊)
     private val shadowAmbientPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.FILL
-        color = Color.TRANSPARENT
-        setShadowLayer(14f, 0f, 4f, Color.argb(45, 0, 0, 0))
+        style = Paint.Style.STROKE
+        strokeWidth = 3.6f
+        color = Color.argb(56, 0, 0, 0)
     }
 
     // 2. 170% 高动态饱和度背景模糊画笔 (与大时间完全一致: setSaturation(1.70f))
@@ -181,10 +211,10 @@ class CarBottomLeftGearHudView @JvmOverloads constructor(
         colorFilter = ColorMatrixColorFilter(ColorMatrix().apply { setSaturation(1.70f) })
     }
 
-    // 3. 叠一层白色微光层 (与大时间完全一致: rgb 255 255 255 / 10%)
+    // 3. 中性深色黑曜石压暗微光层 (保障所有天气/背景下的高可读性)
     private val glassOverlayPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
-        color = Color.argb(26, 255, 255, 255)
+        color = Color.argb(128, 12, 18, 30)
     }
 
     // 4. 表面曲率微流光渐变画笔 (与大时间完全一致: Top 27% 白光反射，底边天光漫射)
@@ -205,29 +235,32 @@ class CarBottomLeftGearHudView @JvmOverloads constructor(
         strokeWidth = 1.4f
     }
 
-    // 7. 边缘折射微弱菲涅尔光晕画笔 (与大时间完全一致: Refraction Halo Glow)
+    // 7. 边缘折射微弱菲涅尔光晕画笔 (半透明外描边替代离屏 BlurMaskFilter)
     private val glassOuterRefractionPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
-        strokeWidth = 1.4f
-        color = Color.TRANSPARENT
-        setShadowLayer(12f, 0f, 0f, Color.argb(110, 255, 255, 255))
+        strokeWidth = 3.0f
+        color = Color.argb(65, 255, 255, 255)
     }
 
-    // 8. 连续物理光轨文字与点画笔 (纯白金属感 + 自适应连续发光)
+    // 8. 连续物理光轨文字与点画笔 (高可读纯白金属感 + 自适应连续发光)
     private val gearTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         textAlign = Paint.Align.CENTER
+        textSize = 22f
         typeface = Typeface.create("sans-serif", Typeface.BOLD)
     }
     private val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
-        color = Color.argb(85, 255, 255, 255)
-        setShadowLayer(2f, 0f, 1f, Color.argb(80, 0, 0, 0))
+        color = Color.argb(135, 255, 255, 255)
     }
 
-    // 9. 激活滑块胶囊：液态凸透晶体聚光镜画笔
-    private val capsuleGlowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    // 9. 激活滑块胶囊：液态凸透晶体聚光镜画笔与档位彩色发光画笔
+    private val capsuleGlowPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    private val capsuleTintPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
-        color = Color.TRANSPARENT
+    }
+    private val capsuleColoredRimPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 1.8f
     }
     private val capsuleBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
@@ -236,83 +269,157 @@ class CarBottomLeftGearHudView @JvmOverloads constructor(
         style = Paint.Style.STROKE
         strokeWidth = 1.3f
     }
-    private val colorBarPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    private val colorBarPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
         style = Paint.Style.FILL
     }
 
     init {
-        updateSlotGeometry(DEFAULT_SLOT_LEFT)
-        setLayerType(LAYER_TYPE_HARDWARE, null)
+        updateSlotGeometry(currentSlotLeft, currentSlotTop)
     }
 
     /**
-     * 更新槽体水平对齐几何与对应 Shaders
+     * 更新槽体水平与垂直对齐几何及对应 Shaders
      */
-    private fun updateSlotGeometry(slotLeft: Float) {
+    private fun updateSlotGeometry(slotLeft: Float, slotTop: Float, updateShaders: Boolean = true) {
         currentSlotLeft = slotLeft
-        slotRect.set(slotLeft, SLOT_TOP, slotLeft + SLOT_WIDTH, SLOT_BOTTOM)
+        currentSlotTop = slotTop
+        slotRect.set(slotLeft, slotTop, slotLeft + SLOT_WIDTH, slotTop + SLOT_HEIGHT)
 
         slotPath.reset()
         slotPath.addRoundRect(slotRect, SLOT_RADIUS, SLOT_RADIUS, Path.Direction.CW)
 
-        setupShaders()
+        if (updateShaders) {
+            setupShaders()
+        }
         isBackgroundDirty = true
         // 关键：由于 capsuleOffset 采用槽内相对坐标，当外部天气面板文字宽度变动自适应推拉槽体时，
         // 胶囊自然同步跟随整体平移，绝对不再打断飞行中动画或造成偏心！
     }
 
     private fun setupShaders() {
-        // 1. 表面曲率微流光渐变 (严格与大时间完全一致: Top 27% 白光反射，底边天光漫射)
-        glassSurfaceShinePaint.shader = LinearGradient(
-            0f, SLOT_TOP,
-            0f, SLOT_BOTTOM,
-            intArrayOf(
-                Color.argb(70, 255, 255, 255), // Top 27% 白光反射
-                Color.argb(12, 255, 255, 255), // Mid 5% 微漫射
-                Color.argb(38, 255, 255, 255)  // Bottom 15% 地平天光
-            ),
-            floatArrayOf(0f, 0.45f, 1f),
-            Shader.TileMode.CLAMP
-        )
+        val slotTop = currentSlotTop
+        val slotBottom = currentSlotTop + SLOT_HEIGHT
+        val slotCenterY = (slotTop + slotBottom) / 2f
+        val capsuleTop = slotCenterY - CAPSULE_HEIGHT / 2f
+        val capsuleBottom = slotCenterY + CAPSULE_HEIGHT / 2f
 
-        // 2. 边缘全曲率晶体折射描边 (严格与大时间完全一致: 四段菲涅尔折射天光)
-        glassRefractionStrokePaint.shader = LinearGradient(
-            currentSlotLeft, SLOT_TOP,
-            currentSlotLeft + SLOT_WIDTH, SLOT_BOTTOM,
-            intArrayOf(
-                Color.argb(245, 255, 255, 255), // 顶左晶亮折射纯白
-                Color.argb(110, 255, 255, 255), // 漫射
-                Color.argb(190, 255, 255, 255), // 下方晶体环境折射
-                Color.argb(225, 255, 255, 255)  // 底右收敛折射纯白
-            ),
-            floatArrayOf(0f, 0.35f, 0.70f, 1f),
-            Shader.TileMode.CLAMP
-        )
+        if (!isRealtimeColorEnabled) {
+            // 经典固化模式 (Classic Fixed Mode):
+            glassSurfaceShinePaint.shader = LinearGradient(
+                0f, slotTop,
+                0f, slotBottom,
+                intArrayOf(
+                    Color.argb(70, 255, 255, 255), // Top 27% 白光反射
+                    Color.argb(12, 255, 255, 255), // Mid 5% 微漫射
+                    Color.argb(38, 255, 255, 255)  // Bottom 15% 地平天光
+                ),
+                floatArrayOf(0f, 0.45f, 1f),
+                Shader.TileMode.CLAMP
+            )
 
-        // 3. 激活滑块胶囊：凸透晶体液态玻璃 Shader (通透聚焦，与主玻璃完美共融)
-        val capsuleTop = SLOT_CENTER_Y - CAPSULE_HEIGHT / 2f
-        val capsuleBottom = SLOT_CENTER_Y + CAPSULE_HEIGHT / 2f
-        capsuleStrokePaint.shader = LinearGradient(
-            0f, capsuleTop,
-            0f, capsuleBottom,
-            intArrayOf(
-                Color.argb(235, 255, 255, 255),
-                Color.argb(120, 255, 255, 255)
-            ),
-            null,
-            Shader.TileMode.CLAMP
-        )
-        capsuleBgPaint.shader = LinearGradient(
-            0f, capsuleTop,
-            0f, capsuleBottom,
-            intArrayOf(
-                Color.argb(75, 255, 255, 255),
-                Color.argb(28, 255, 255, 255),
-                Color.argb(48, 255, 255, 255)
-            ),
-            floatArrayOf(0f, 0.5f, 1f),
-            Shader.TileMode.CLAMP
-        )
+            glassRefractionStrokePaint.shader = LinearGradient(
+                currentSlotLeft, slotTop,
+                currentSlotLeft + SLOT_WIDTH, slotBottom,
+                intArrayOf(
+                    Color.argb(245, 255, 255, 255), // 顶左晶亮折射纯白
+                    Color.argb(110, 255, 255, 255), // 漫射
+                    Color.argb(190, 255, 255, 255), // 下方晶体环境折射
+                    Color.argb(225, 255, 255, 255)  // 底右收敛折射纯白
+                ),
+                floatArrayOf(0f, 0.35f, 0.70f, 1f),
+                Shader.TileMode.CLAMP
+            )
+
+            capsuleStrokePaint.shader = LinearGradient(
+                0f, capsuleTop,
+                0f, capsuleBottom,
+                intArrayOf(
+                    Color.argb(235, 255, 255, 255),
+                    Color.argb(120, 255, 255, 255)
+                ),
+                null,
+                Shader.TileMode.CLAMP
+            )
+            capsuleBgPaint.shader = LinearGradient(
+                0f, capsuleTop,
+                0f, capsuleBottom,
+                intArrayOf(
+                    Color.argb(110, 255, 255, 255),
+                    Color.argb(46, 255, 255, 255),
+                    Color.argb(72, 255, 255, 255)
+                ),
+                floatArrayOf(0f, 0.5f, 1f),
+                Shader.TileMode.CLAMP
+            )
+            // 经典模式同样叠加中性黑曜石磨砂底板（~50%），在保留高饱和背景透视的同时确保所有天气下的可读性
+            glassOverlayPaint.color = Color.argb(128, 12, 18, 30)
+        } else {
+            // 实验室实时环境自适应模式 (Real-time Adaptive Mode · 连续平滑融合)：
+            val tintRim = ColorUtils.blendARGB(Color.WHITE, adaptiveDominantTint, 0.28f)
+            val lf = adaptiveLightFactor.coerceIn(0f, 1f)
+
+            // 底板随明度因子在【44% 中性深黑曜石】与【64% 浓黑曜石】间连续插值，杜绝白昼云海发虚并保持背景色隐约透出
+            val darkSceneOverlay = ColorUtils.blendARGB(
+                Color.argb(112, 10, 16, 28),
+                ColorUtils.setAlphaComponent(adaptiveDominantTint, 124),
+                0.15f
+            )
+            val lightSceneOverlay = Color.argb(164, 10, 15, 26)
+            glassOverlayPaint.color = ColorUtils.blendARGB(darkSceneOverlay, lightSceneOverlay, lf)
+
+            val shineTopAlpha = (68 + (16 * lf)).toInt().coerceIn(0, 255)
+            val shineMidAlpha = (14 + (8 * lf)).toInt().coerceIn(0, 255)
+            val shineBotAlpha = (36 + (10 * lf)).toInt().coerceIn(0, 255)
+            glassSurfaceShinePaint.shader = LinearGradient(
+                0f, slotTop,
+                0f, slotBottom,
+                intArrayOf(
+                    Color.argb(shineTopAlpha, 255, 255, 255),
+                    Color.argb(shineMidAlpha, 255, 255, 255),
+                    Color.argb(shineBotAlpha, 255, 255, 255)
+                ),
+                floatArrayOf(0f, 0.45f, 1f),
+                Shader.TileMode.CLAMP
+            )
+
+            val rimStartAlpha = (245 - (5 * lf)).toInt().coerceIn(0, 255)
+            val rimMidAlpha = (125 + (25 * lf)).toInt().coerceIn(0, 255)
+            val rimEndAlpha = (225 - (5 * lf)).toInt().coerceIn(0, 255)
+            glassRefractionStrokePaint.shader = LinearGradient(
+                currentSlotLeft, slotTop,
+                currentSlotLeft + SLOT_WIDTH, slotBottom,
+                intArrayOf(
+                    Color.argb(rimStartAlpha, 255, 255, 255),
+                    ColorUtils.setAlphaComponent(tintRim, rimMidAlpha),
+                    ColorUtils.setAlphaComponent(tintRim, 195),
+                    Color.argb(rimEndAlpha, 255, 255, 255)
+                ),
+                floatArrayOf(0f, 0.35f, 0.70f, 1f),
+                Shader.TileMode.CLAMP
+            )
+
+            capsuleStrokePaint.shader = LinearGradient(
+                0f, capsuleTop,
+                0f, capsuleBottom,
+                intArrayOf(
+                    Color.argb(240, 255, 255, 255),
+                    ColorUtils.setAlphaComponent(tintRim, 145)
+                ),
+                null,
+                Shader.TileMode.CLAMP
+            )
+            capsuleBgPaint.shader = LinearGradient(
+                0f, capsuleTop,
+                0f, capsuleBottom,
+                intArrayOf(
+                    Color.argb(114, 255, 255, 255),
+                    Color.argb(48, 255, 255, 255),
+                    Color.argb(74, 255, 255, 255)
+                ),
+                floatArrayOf(0f, 0.5f, 1f),
+                Shader.TileMode.CLAMP
+            )
+        }
     }
 
     /**
@@ -360,6 +467,7 @@ class CarBottomLeftGearHudView @JvmOverloads constructor(
             capsuleOffset = newTargetOffset
             targetOffset = newTargetOffset
             currentGearColor = evaluateTrackColor(newTargetOffset)
+            invalidateBackground()
             invalidate()
             return
         }
@@ -400,6 +508,8 @@ class CarBottomLeftGearHudView @JvmOverloads constructor(
                     capsuleOffset = newTargetOffset
                     currentGearColor = evaluateTrackColor(newTargetOffset)
                     slideAnimator = null
+                    // 切档滑动到位后，立即标脏并刷新背景自适应与高光，消除 2.5s 轮询等待
+                    invalidateBackground()
                     invalidate()
                 }
             })
@@ -449,10 +559,15 @@ class CarBottomLeftGearHudView @JvmOverloads constructor(
         super.onDraw(canvas)
         if (hudAlpha <= 0.005f || visibility != VISIBLE) return
 
-        // 动态同步天气文字最左侧锚点
-        val targetLeft = weatherLeftProvider?.invoke() ?: DEFAULT_SLOT_LEFT
-        if (kotlin.math.abs(targetLeft - currentSlotLeft) > 0.5f) {
-            updateSlotGeometry(targetLeft)
+        // 动态同步天气文字最左侧锚点 (仅在 A区下边 默认位置时进行动态对齐微调)
+        val targetLeft = if (currentSlotPosition == MiniGearPosition.BOTTOM_LEFT) {
+            weatherLeftProvider?.invoke() ?: currentSlotPosition.defaultLeft
+        } else {
+            currentSlotPosition.defaultLeft
+        }
+        val targetTop = currentSlotPosition.defaultTop
+        if (positionAnimator == null && (kotlin.math.abs(targetLeft - currentSlotLeft) > 0.5f || kotlin.math.abs(targetTop - currentSlotTop) > 0.5f)) {
+            updateSlotGeometry(targetLeft, targetTop)
         }
 
         val w = width.toFloat()
@@ -512,9 +627,18 @@ class CarBottomLeftGearHudView @JvmOverloads constructor(
         canvas.clipPath(slotPath)
 
         val nowMs = android.os.SystemClock.uptimeMillis()
-        val isSlidingAnim = slideAnimator?.isRunning == true
-        // 切档滑移动画执行期间暂缓盒式模糊重算，直接复用当前快照，保证 60FPS 满帧无卡顿，平时节流至 2500ms
-        if (!isSlidingAnim && (isBackgroundDirty || lastGlassBlurUpdateTime == 0L || (nowMs - lastGlassBlurUpdateTime >= 2500L))) {
+        val isSlidingAnim = slideAnimator?.isRunning == true || positionAnimator?.isRunning == true
+        val elapsed = nowMs - lastGlassBlurUpdateTime
+        // 切档滑移或位置变换动画执行期间暂缓盒式模糊重算，直接复用当前快照，保证 60FPS 满帧无卡顿，平时节流至 2500ms
+        // 当底层天气转场/切歌切屏等外部请求重绘(isBackgroundDirty)时，收紧至 48ms (~20fps) 同步节流，确保与背景转场同频渐变无割裂感
+        val shouldUpdateBlur = !isSlidingAnim && (
+            lastGlassBlurUpdateTime == 0L ||
+            elapsed >= 2500L ||
+            (isBackgroundDirty && elapsed >= 48L)
+        )
+        if (shouldUpdateBlur) {
+            pendingBlurRunnable?.let { removeCallbacks(it) }
+            pendingBlurRunnable = null
             lastGlassBlurUpdateTime = nowMs
             isBackgroundDirty = false
 
@@ -535,6 +659,21 @@ class CarBottomLeftGearHudView @JvmOverloads constructor(
             glassBgBitmap.getPixels(glassPixels, 0, GLASS_BUFFER_W, 0, 0, GLASS_BUFFER_W, GLASS_BUFFER_H)
             fastBoxBlur(glassPixels, glassPixelsTemp, GLASS_BUFFER_W, GLASS_BUFFER_H, 7)
             glassBgBitmap.setPixels(glassPixels, 0, GLASS_BUFFER_W, 0, 0, GLASS_BUFFER_W, GLASS_BUFFER_H)
+
+            // 实验室特性：根据模糊后的背景低开销稀疏采样计算环境色与明度自适应
+            if (isRealtimeColorEnabled) {
+                computeAdaptiveColorsFromBuffer()
+            }
+        } else if (isBackgroundDirty && !isSlidingAnim && pendingBlurRunnable == null) {
+            val remainDelay = (48L - elapsed).coerceAtLeast(16L)
+            val r = Runnable {
+                pendingBlurRunnable = null
+                if (isBackgroundDirty) {
+                    invalidate()
+                }
+            }
+            pendingBlurRunnable = r
+            postDelayed(r, remainDelay)
         }
 
         // 绘制模糊后的高饱和背景 (饱和度 170%)
@@ -586,7 +725,7 @@ class CarBottomLeftGearHudView @JvmOverloads constructor(
      */
     private fun drawGearTrackAndCapsule(canvas: Canvas) {
         val cx = currentSlotLeft + capsuleOffset
-        val cy = SLOT_CENTER_Y
+        val cy = currentSlotTop + SLOT_HEIGHT / 2f
 
         capsuleRect.set(
             cx - CAPSULE_WIDTH / 2f,
@@ -595,17 +734,28 @@ class CarBottomLeftGearHudView @JvmOverloads constructor(
             cy + CAPSULE_HEIGHT / 2f
         )
 
-        // (A) 激活滑块胶囊柔和宝石微光 (克制优雅，杜绝核爆式荧光杂色，画面极简统一)
-        capsuleGlowPaint.setShadowLayer(
-            9f,
-            0f,
-            0f,
-            ColorUtils.setAlphaComponent(currentGearColor, 75)
-        )
-        canvas.drawRoundRect(capsuleRect, CAPSULE_RADIUS, CAPSULE_RADIUS, capsuleGlowPaint)
+        // (A) 激活滑块胶囊柔和宝石外辉光（预烘焙 ALPHA_8 软高斯光晕精灵，零 RenderTarget、零分配、全光谱平滑染色）
+        if (!capsuleGlowAlphaBmp.isRecycled) {
+            capsuleGlowRect.set(
+                capsuleRect.left - CAPSULE_GLOW_PAD,
+                capsuleRect.top - CAPSULE_GLOW_PAD,
+                capsuleRect.right + CAPSULE_GLOW_PAD,
+                capsuleRect.bottom + CAPSULE_GLOW_PAD
+            )
+            capsuleGlowPaint.color = currentGearColor
+            capsuleGlowPaint.alpha = 205
+            canvas.drawBitmap(capsuleGlowAlphaBmp, null, capsuleGlowRect, capsuleGlowPaint)
+        }
 
-        // (B) 液态凸透晶体滑块底座与微高光外框
+        // (B) 液态凸透晶体滑块：先注入档位彩色晶体底晕，再叠加磨砂高光底座与彩色外框
+        capsuleTintPaint.color = ColorUtils.setAlphaComponent(currentGearColor, 88)
+        canvas.drawRoundRect(capsuleRect, CAPSULE_RADIUS, CAPSULE_RADIUS, capsuleTintPaint)
         canvas.drawRoundRect(capsuleRect, CAPSULE_RADIUS, CAPSULE_RADIUS, capsuleBgPaint)
+        capsuleColoredRimPaint.color = ColorUtils.setAlphaComponent(
+            ColorUtils.blendARGB(currentGearColor, Color.WHITE, 0.22f),
+            232
+        )
+        canvas.drawRoundRect(capsuleRect, CAPSULE_RADIUS, CAPSULE_RADIUS, capsuleColoredRimPaint)
         canvas.drawRoundRect(capsuleRect, CAPSULE_RADIUS, CAPSULE_RADIUS, capsuleStrokePaint)
 
         // (B2) 滑块内部内嵌浮雕高光 (inet 1px 1px #fff8 同步赋能滑块晶体厚度)
@@ -615,14 +765,15 @@ class CarBottomLeftGearHudView @JvmOverloads constructor(
         canvas.drawRoundRect(capsuleRect, CAPSULE_RADIUS, CAPSULE_RADIUS, glassInsetLightPaint)
         canvas.restore()
 
-        // (C) 绘制 3 颗小圆点 (轻盈半透白)
-        val dotY = SLOT_CENTER_Y
-        canvas.drawCircle(currentSlotLeft + OFFSET_DOT_1, dotY, 2.0f, dotPaint)
-        canvas.drawCircle(currentSlotLeft + OFFSET_DOT_2, dotY, 2.0f, dotPaint)
-        canvas.drawCircle(currentSlotLeft + OFFSET_DOT_3, dotY, 2.0f, dotPaint)
+        // (C) 绘制 3 颗小圆点 (清晰半透白)
+        val dotY = cy
+        canvas.drawCircle(currentSlotLeft + OFFSET_DOT_1, dotY, 2.1f, dotPaint)
+        canvas.drawCircle(currentSlotLeft + OFFSET_DOT_2, dotY, 2.1f, dotPaint)
+        canvas.drawCircle(currentSlotLeft + OFFSET_DOT_3, dotY, 2.1f, dotPaint)
 
-        // (D) 连续光轨文字点亮：4个档位常驻轨道，当滑块掠过时自适应无级点亮
-        val baseTextY = SLOT_CENTER_Y + 7.5f
+        // (D) 连续光轨文字点亮：4个档位常驻轨道，保持恒定字号 + GPU 缩放，大幅提升全状态清晰度与当前档位发光感
+        val baseTextY = cy + 7.5f
+        val lightFactor = if (isRealtimeColorEnabled) adaptiveLightFactor else 0.5f
         for (i in 0 until 4) {
             val label = gearLabels[i]
             val gx = currentSlotLeft + gearOffsets[i]
@@ -632,32 +783,172 @@ class CarBottomLeftGearHudView @JvmOverloads constructor(
             val proximity = (1f - dist / (CAPSULE_WIDTH * 0.75f)).coerceIn(0f, 1f)
             val glowFraction = proximity * proximity // 二次幂平滑加权
 
-            // 未激活基础 Alpha: 135 (~53% 纯白)，高光滑块经过时平滑提升至 255 (100% 晶亮白)
-            val textAlpha = (135 + (120 * glowFraction)).toInt().coerceIn(0, 255)
-            gearTextPaint.color = Color.argb(textAlpha, 255, 255, 255)
+            val textAlpha = (185 + (70 * glowFraction)).toInt().coerceIn(0, 255)
+            val baseShadowAlpha = 180f + 45f * lightFactor
+            val glowShadowBonus = 45f + 15f * lightFactor
+            val shadowAlpha = (baseShadowAlpha + glowShadowBonus * glowFraction).toInt().coerceIn(0, 255)
 
-            // 清晰立体微暗影，保证在任何云层与背景下文字纯净锐利
-            val shadowAlpha = (110 + (70 * glowFraction)).toInt().coerceIn(0, 255)
-            gearTextPaint.setShadowLayer(
-                3.5f + 1.5f * glowFraction,
-                0f, 1f,
-                Color.argb(shadowAlpha, 0, 0, 0)
-            )
-
-            // 微动态字号：常态 22px，正中高光 23.2px
-            gearTextPaint.textSize = 22f + 1.2f * glowFraction
-
-            canvas.drawText(label, gx, baseTextY, gearTextPaint)
+            gearTextPaint.color = Color.WHITE
+            val textScale = 1f + (1.5f / 22f) * glowFraction
+            if (textScale > 1.003f) {
+                canvas.save()
+                canvas.scale(textScale, textScale, gx, baseTextY - 6f)
+                val haloAlpha = (155 * glowFraction).toInt().coerceIn(0, 255)
+                CanvasRenderUtils.drawTextWithHaloAndShadow(
+                    canvas, label, gx, baseTextY, gearTextPaint,
+                    textAlpha, currentGearColor, haloAlpha, dyGlow = 0.8f, backdropBoost = 0.65f
+                )
+                canvas.restore()
+            } else {
+                CanvasRenderUtils.drawTextWithBrightBackdropShadow(
+                    canvas, label, gx, baseTextY, gearTextPaint,
+                    textAlpha, brightFactor = 0.65f, baseShadowAlpha = shadowAlpha
+                )
+            }
         }
 
-        // (E) 胶囊正下方精致档位彩色短横条 (长 15px, 高 2.6px, 圆角 1.3px, 柔和微光)
-        val barW = 15f
-        val barH = 2.6f
+        // (E) 胶囊正下方醒目档位彩色发光灯条 (18×3.0px + 预烘焙软外辉光，一眼辨识当前档位颜色)
+        val barW = 18f
+        val barH = 3.0f
         val barY = cy + 15.2f
         colorBarRect.set(cx - barW / 2f, barY - barH / 2f, cx + barW / 2f, barY + barH / 2f)
-        colorBarPaint.color = currentGearColor
-        colorBarPaint.setShadowLayer(5f, 0f, 0f, currentGearColor)
-        canvas.drawRoundRect(colorBarRect, 1.3f, 1.3f, colorBarPaint)
+        if (!barGlowAlphaBmp.isRecycled) {
+            colorBarGlowRect.set(
+                cx - BAR_GLOW_BMP_W / 2f,
+                barY - BAR_GLOW_BMP_H / 2f,
+                cx + BAR_GLOW_BMP_W / 2f,
+                barY + BAR_GLOW_BMP_H / 2f
+            )
+            colorBarPaint.color = currentGearColor
+            colorBarPaint.alpha = 230
+            canvas.drawBitmap(barGlowAlphaBmp, null, colorBarGlowRect, colorBarPaint)
+        }
+        colorBarPaint.color = ColorUtils.blendARGB(currentGearColor, Color.WHITE, 0.14f)
+        colorBarPaint.alpha = 255
+        canvas.drawRoundRect(colorBarRect, 1.5f, 1.5f, colorBarPaint)
+    }
+
+    /**
+     * 初始化阶段单次数学烘焙圆角矩形柔和光晕 ALPHA_8 掩码（耗时 < 0.3ms，全周期零 GC、零 GPU Scratch RenderTarget）
+     */
+    private fun bakeRoundedBoxGlowAlpha(
+        bmpW: Int,
+        bmpH: Int,
+        boxW: Float,
+        boxH: Float,
+        cornerRadius: Float,
+        sigma: Float,
+        fadeEdgeDist: Float
+    ): Bitmap {
+        val bmp = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ALPHA_8)
+        val pixels = ByteArray(bmpW * bmpH)
+        val cx = bmpW * 0.5f
+        val cy = bmpH * 0.5f
+        val halfW = boxW * 0.5f - cornerRadius
+        val halfH = boxH * 0.5f - cornerRadius
+        val invTwoSigmaSq = 1f / (2f * sigma * sigma)
+
+        for (y in 0 until bmpH) {
+            val py = y + 0.5f - cy
+            val dy = kotlin.math.max(kotlin.math.abs(py) - halfH, 0f)
+            val rowOffset = y * bmpW
+            for (x in 0 until bmpW) {
+                val px = x + 0.5f - cx
+                val dx = kotlin.math.max(kotlin.math.abs(px) - halfW, 0f)
+                val outsideDist = kotlin.math.hypot(dx.toDouble(), dy.toDouble()).toFloat()
+                val sd = outsideDist + kotlin.math.min(
+                    kotlin.math.max(kotlin.math.abs(px) - halfW, kotlin.math.abs(py) - halfH),
+                    0f
+                ) - cornerRadius
+                val a = if (sd <= 0f) {
+                    255
+                } else {
+                    val edgeWindow = (1f - (sd / fadeEdgeDist)).coerceIn(0f, 1f)
+                    val gaussian = kotlin.math.exp((-sd * sd * invTwoSigmaSq).toDouble()).toFloat()
+                    (255f * gaussian * edgeWindow).toInt().coerceIn(0, 255)
+                }
+                pixels[rowOffset + x] = a.toByte()
+            }
+        }
+        bmp.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(pixels))
+        return bmp
+    }
+
+    /**
+     * 实验室特性：定点低功耗背景色彩与明度稀疏采样 (36 个采样点，耗时 < 0.003ms，0 GC)
+     */
+    private fun computeAdaptiveColorsFromBuffer() {
+        var rSum = 0L
+        var gSum = 0L
+        var bSum = 0L
+        var count = 0
+
+        val stepX = 8
+        val stepY = 4
+        for (y in 2 until GLASS_BUFFER_H step stepY) {
+            val rowOffset = y * GLASS_BUFFER_W
+            for (x in 4 until GLASS_BUFFER_W step stepX) {
+                val pixel = glassPixels[rowOffset + x]
+                val r = (pixel ushr 16) and 0xFF
+                val g = (pixel ushr 8) and 0xFF
+                val b = pixel and 0xFF
+                rSum += r
+                gSum += g
+                bSum += b
+                count++
+            }
+        }
+        if (count == 0) return
+        val avgR = (rSum / count).toInt().coerceIn(0, 255)
+        val avgG = (gSum / count).toInt().coerceIn(0, 255)
+        val avgB = (bSum / count).toInt().coerceIn(0, 255)
+
+        // ITU-R BT.601 知觉明度 (0.0 ~ 1.0)
+        val lum = (0.299f * avgR + 0.587f * avgG + 0.114f * avgB) / 255f
+        val newLightFactor = ((lum - 0.45f) / 0.16f).coerceIn(0f, 1f)
+        val newTint = Color.rgb(avgR, avgG, avgB)
+
+        if (!hasAdaptiveSample) {
+            hasAdaptiveSample = true
+            targetAdaptiveLuminance = lum
+            targetAdaptiveDominantTint = newTint
+            targetAdaptiveLightFactor = newLightFactor
+            adaptiveBgLuminance = lum
+            adaptiveDominantTint = newTint
+            adaptiveLightFactor = newLightFactor
+            setupShaders()
+            return
+        }
+
+        val lumDiff = kotlin.math.abs(targetAdaptiveLuminance - lum)
+        val tintDiff = kotlin.math.abs(Color.red(targetAdaptiveDominantTint) - avgR) +
+            kotlin.math.abs(Color.green(targetAdaptiveDominantTint) - avgG) +
+            kotlin.math.abs(Color.blue(targetAdaptiveDominantTint) - avgB)
+        val lightFactorDiff = kotlin.math.abs(targetAdaptiveLightFactor - newLightFactor)
+
+        if (lumDiff > 0.03f || tintDiff > 16 || lightFactorDiff > 0.05f) {
+            targetAdaptiveLuminance = lum
+            targetAdaptiveDominantTint = newTint
+            targetAdaptiveLightFactor = newLightFactor
+
+            val startTint = adaptiveDominantTint
+            val startLf = adaptiveLightFactor
+            val startLum = adaptiveBgLuminance
+            adaptiveColorAnimator?.cancel()
+            adaptiveColorAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 240L
+                interpolator = slideInterpolator
+                addUpdateListener { va ->
+                    val frac = va.animatedFraction
+                    adaptiveDominantTint = argbEvaluator.evaluate(frac, startTint, newTint) as Int
+                    adaptiveLightFactor = startLf + (newLightFactor - startLf) * frac
+                    adaptiveBgLuminance = startLum + (lum - startLum) * frac
+                    setupShaders()
+                    invalidate()
+                }
+                start()
+            }
+        }
     }
 
     /**
@@ -744,13 +1035,99 @@ class CarBottomLeftGearHudView @JvmOverloads constructor(
         updateBurnInTicker()
     }
 
+    /**
+     * 切换微型档位指示器在小欧屏上的停靠位置 (支持平滑位移动画)
+     */
+    fun setPosition(position: MiniGearPosition, animate: Boolean = true) {
+        val targetLeft = if (position == MiniGearPosition.BOTTOM_LEFT && weatherLeftProvider != null) {
+            weatherLeftProvider?.invoke() ?: position.defaultLeft
+        } else {
+            position.defaultLeft
+        }
+        val targetTop = position.defaultTop
+
+        if (currentSlotPosition == position) {
+            if (!animate && positionAnimator != null) {
+                positionAnimator?.cancel()
+                positionAnimator = null
+                updateSlotGeometry(targetLeft, targetTop, updateShaders = true)
+                invalidateBackground()
+                invalidate()
+            }
+            return
+        }
+
+        val oldLeft = currentSlotLeft
+        val oldTop = currentSlotTop
+        currentSlotPosition = position
+        val newLeft = targetLeft
+        val newTop = targetTop
+
+        if (!animate) {
+            positionAnimator?.cancel()
+            positionAnimator = null
+            updateSlotGeometry(newLeft, newTop, updateShaders = true)
+            invalidateBackground()
+            invalidate()
+            return
+        }
+
+        positionAnimator?.cancel()
+        positionAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 320L
+            interpolator = slideInterpolator
+            addUpdateListener { va ->
+                val frac = va.animatedFraction
+                val l = oldLeft + (newLeft - oldLeft) * frac
+                val t = oldTop + (newTop - oldTop) * frac
+                updateSlotGeometry(l, t, updateShaders = false)
+                invalidate()
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    updateSlotGeometry(newLeft, newTop, updateShaders = true)
+                    invalidateBackground()
+                    invalidate()
+                    positionAnimator = null
+                }
+            })
+            start()
+        }
+    }
+
+    fun getPosition(): MiniGearPosition = currentSlotPosition
+
+    /**
+     * 设置是否开启实验室功能：实时背景环境色与明度自适应计算
+     */
+    fun setRealtimeColorEnabled(enabled: Boolean) {
+        if (isRealtimeColorEnabled == enabled) return
+        isRealtimeColorEnabled = enabled
+        if (!enabled) {
+            adaptiveColorAnimator?.cancel()
+            adaptiveColorAnimator = null
+            hasAdaptiveSample = false
+        }
+        setupShaders()
+        invalidateBackground()
+        invalidate()
+    }
+
+    fun isRealtimeColorEnabled(): Boolean = isRealtimeColorEnabled
+
     fun dismiss() {
+        pendingBlurRunnable?.let { removeCallbacks(it) }
+        pendingBlurRunnable = null
         isBurnInTickerRunning = false
         removeCallbacks(burnInShiftRunnable)
         slideAnimator?.cancel()
         slideAnimator = null
         fadeAnimator?.cancel()
         fadeAnimator = null
+        positionAnimator?.cancel()
+        positionAnimator = null
+        adaptiveColorAnimator?.cancel()
+        adaptiveColorAnimator = null
         backgroundProvider = null
         weatherLeftProvider = null
     }

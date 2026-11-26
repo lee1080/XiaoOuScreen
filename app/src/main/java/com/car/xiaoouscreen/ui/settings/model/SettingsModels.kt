@@ -1,5 +1,7 @@
 package com.car.xiaoouscreen.ui.settings.model
 
+import com.car.xiaoouscreen.ui.slot.XiaoOuSlotType
+
 /**
  * 设置一级菜单枚举与配置
  */
@@ -35,8 +37,13 @@ enum class MenuItemId(
         subtitle = "外观皮肤、排版布局与字体调节",
         hasQuickSwitch = true
     ),
-    SERVICE_SETTINGS(
+    SMART_SCENE(
         indexStr = "6",
+        title = "智能场景联动",
+        subtitle = "整车信号与座舱多场景联动"
+    ),
+    SERVICE_SETTINGS(
+        indexStr = "7",
         title = "服务设置",
         subtitle = "开机启动、分项缓存清理与系统维护"
     )
@@ -74,7 +81,7 @@ data class LyricSourceItemState(
  */
 data class WelcomeState(
     val greetingTitle: String = "欢迎使用小欧屏 · 智享座舱伴侣",
-    val greetingSubtitle: String = "已完成横屏自适应拟物布局初始化。首次上车请确认下方核心系统权限均已开启，以保障小欧屏、天气服务与全屏歌词正常运作。",
+    val greetingSubtitle: String = "首次使用请确认核心系统权限已开启，以保障小欧屏各功能正常运作。",
     val isPermissionsCollapsed: Boolean = false,
     val permissions: List<PermissionItem> = listOf(
         PermissionItem(
@@ -105,7 +112,7 @@ data class WelcomeState(
             granted = false,
             infoTitle = "车机高精定位权限说明",
             infoContent = "和风高精度天气及 Open-Meteo 均依赖车辆经纬度坐标获取实时气象，未开启时仅能显示默认城市天气。",
-            infoRecommend = "点击右侧“去开启”即可一键完成车机定位授权"
+            infoRecommend = "建议允许，用于获取当前车辆位置的天气数据"
         ),
         PermissionItem(
             id = "perm_phone",
@@ -127,7 +134,11 @@ data class XiaoOuState(
     val isProjecting: Boolean = false,
     val showAvatar: Boolean = true,
     val liquidGlassClock: Boolean = true,
-    val miniGearFloat: Boolean = true
+    val miniGearFloat: Boolean = true,
+    val miniGearPosition: Int = 0,
+    val miniGearRealtimeColorCalc: Boolean = false,
+    val slotA: XiaoOuSlotType = XiaoOuSlotType.WEATHER,
+    val slotC: XiaoOuSlotType = XiaoOuSlotType.ALBUM_COVER
 )
 
 /**
@@ -175,7 +186,36 @@ data class ServiceState(
     val weatherCacheMB: Float = 0f,
     val cacheSelectedScope: String = "all",
     val cacheLimitMB: Int = 64, // 8..128, 默认中位 64 (MB)
-    val appVersion: String = "v2.6.0-Release"
+    val appVersion: String = "v2.6.0-Release",
+    val isCheckingUpdate: Boolean = false
+)
+
+/**
+ * 智能场景联动 · 氛围灯、转向灯与变道辅助设置状态
+ */
+data class SmartSceneState(
+    // 座舱氛围灯
+    val ambientSyncMasterEnabled: Boolean = false,
+    val colorFollowsCover: Boolean = true,
+    val randomColorMode: Boolean = false,
+    val sensitivityPercent: Int = 100, // 50..150
+    val isServiceConnected: Boolean = false,
+    val currentLuminanceLevel: Int = 0,
+    val currentColorIndex: Int = 0,
+
+    // 氛围灯基准亮度与昼夜衰减
+    val followCarBrightness: Boolean = true,
+    val nativeCarBrightnessLevel: Int = 8, // 1..10
+    val customBrightnessPercent: Int = 80, // 10..100
+    val effectiveBaseBrightnessPercent: Int = 80, // 10..100
+    val isNightMode: Boolean = false,
+    val effectiveScale: Float = 0.8f,
+
+    // 转向灯三边律动光效联动
+    val turnSignalSyncEnabled: Boolean = true,
+
+    // 变道辅助盲区光幕预警
+    val laneChangeAssistEnabled: Boolean = true
 )
 
 /**
@@ -188,6 +228,18 @@ data class AnnotationInfo(
 )
 
 /**
+ * 应用内自动更新状态
+ */
+data class AppUpdateUiState(
+    val isChecking: Boolean = false,
+    val showUpdateDialog: Boolean = false,
+    val updateInfo: com.car.xiaoouscreen.updater.UpdateInfo? = null,
+    val isDownloading: Boolean = false,
+    val downloadProgress: Int = 0,
+    val downloadError: String? = null
+)
+
+/**
  * 全局设置统一聚合状态
  */
 data class SettingsState(
@@ -196,6 +248,7 @@ data class SettingsState(
     val xiaoou: XiaoOuState = XiaoOuState(),
     val weather: WeatherState = WeatherState(),
     val lyrics: LyricsState = LyricsState(),
+    val smartScene: SmartSceneState = SmartSceneState(),
     val sources: List<LyricSourceItemState> = listOf(
         LyricSourceItemState(
             id = "gdstudio_proxy",
@@ -208,6 +261,7 @@ data class SettingsState(
         )
     ),
     val service: ServiceState = ServiceState(),
+    val update: AppUpdateUiState = AppUpdateUiState(),
     val currentMusicTitle: String? = null,
     val activeAnnotation: AnnotationInfo? = null,
     val showImportDialog: Boolean = false,

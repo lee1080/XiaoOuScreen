@@ -140,7 +140,7 @@ fun FullscreenLyricsPage(
                         color = NeuColors.TextMuted
                     )
                     Text(
-                        text = "全屏歌词目前处于关闭状态。开启上方「启用全屏歌词」后方可调整下方外观与排版参数。",
+                        text = "全屏歌词已关闭，开启后可配置外观与排版参数",
                         fontSize = 11.sp,
                         color = NeuColors.TextSecondary
                     )

@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.drawable.Drawable
+import android.util.LruCache
 import android.widget.ImageView
 import com.bumptech.glide.Glide
 import com.bumptech.glide.load.engine.DiskCacheStrategy
@@ -75,8 +76,34 @@ object LyricsCacheManager {
 
     // ==================== 封面缓存 ====================
 
+    // 内存活跃封面 LruCache：最大 4 张活跃封面，大小根据 byteCount 计算，总上限 8MB，支持 trimMemory
+    private val memoryCoverCache = object : LruCache<String, Bitmap>(8 * 1024 * 1024) {
+        override fun sizeOf(key: String, value: Bitmap): Int {
+            return value.byteCount
+        }
+    }
+
+    /**
+     * 系统低内存时释放内存中的封面位图缓存
+     */
+    fun clearMemoryCache() {
+        synchronized(memoryCoverCache) {
+            memoryCoverCache.evictAll()
+        }
+    }
+
     fun getCachedCover(url: String, reqWidth: Int = 600, reqHeight: Int = 600): Bitmap? {
         ensureInit()
+        val memKey = "${url}_${reqWidth}x${reqHeight}"
+        synchronized(memoryCoverCache) {
+            val memHit = memoryCoverCache.get(memKey)
+            if (memHit != null && !memHit.isRecycled) {
+                return memHit
+            } else if (memHit != null) {
+                memoryCoverCache.remove(memKey)
+            }
+        }
+
         val file = coverFile(url)
         return if (file.exists()) {
             try {
@@ -89,7 +116,13 @@ object LyricsCacheManager {
                 options.inSampleSize = calculateInSampleSize(options, reqWidth, reqHeight)
                 options.inJustDecodeBounds = false
                 options.inPreferredConfig = Bitmap.Config.RGB_565 // 降低图片色彩深度节约 50% 内存
-                BitmapFactory.decodeFile(file.absolutePath, options)
+                val decoded = BitmapFactory.decodeFile(file.absolutePath, options)
+                if (decoded != null) {
+                    synchronized(memoryCoverCache) {
+                        memoryCoverCache.put(memKey, decoded)
+                    }
+                }
+                decoded
             } catch (e: Exception) {
                 AppLogger.e(TAG, "Failed to decode cached cover: ${e.message}")
                 file.delete()
@@ -113,6 +146,12 @@ object LyricsCacheManager {
 
     fun cacheCover(url: String, bitmap: Bitmap) {
         ensureInit()
+        if (!bitmap.isRecycled) {
+            val memKey = "${url}_600x600"
+            synchronized(memoryCoverCache) {
+                memoryCoverCache.put(memKey, bitmap)
+            }
+        }
         try {
             val file = coverFile(url)
             FileOutputStream(file).use { out ->
@@ -123,6 +162,18 @@ object LyricsCacheManager {
         } catch (e: Exception) {
             AppLogger.e(TAG, "Failed to cache cover: ${e.message}", e)
         }
+    }
+
+    /**
+     * 若本地已保存过原厂封面且文件有效，直接返回 file:// URI，跳过重复跨进程 Binder Bitmap 提取与 JPEG 压缩
+     */
+    fun getCachedNativeCoverUri(title: String, artist: String): String? {
+        ensureInit()
+        val key = "native_kugou_${title}_${artist}"
+        val file = coverFile(key)
+        return if (file.exists() && file.length() > 0L) {
+            "file://${file.absolutePath}"
+        } else null
     }
 
     /**
@@ -402,7 +453,15 @@ object LyricsCacheManager {
         }
     }
 
+    @Volatile
+    private var lastEnforceLimitMs: Long = 0L
+
     fun enforceSizeLimitAsync(context: Context? = null) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (lastEnforceLimitMs > 0L && (now - lastEnforceLimitMs) < 45_000L) {
+            return
+        }
+        lastEnforceLimitMs = now
         val ctx = context?.applicationContext ?: appContext
         cacheScope.launch {
             enforceSizeLimit(ctx)
@@ -453,5 +512,54 @@ object LyricsCacheManager {
                     onReady(null)
                 }
             })
+    }
+
+    /**
+     * 车规级异步缩放封面加载（专供小欧屏 A / C 区域渲染，杜绝主线程磁盘 I/O 与超大分辨率 OOM）
+     * 1. 先在 IO 线程尝试读取本地缓存或 file:// 路径（下采样至 sizePx × sizePx）；
+     * 2. 未命中时使用 Glide override(sizePx, sizePx).centerCrop() 拉取，完成后异步落盘并在主线程回调。
+     */
+    fun loadCoverBitmapScaled(
+        context: Context,
+        url: String,
+        sizePx: Int = 320,
+        onReady: (Bitmap?) -> Unit
+    ) {
+        val appCtx = context.applicationContext ?: context
+        val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+        cacheScope.launch {
+            val cached = getCachedCover(url, reqWidth = sizePx, reqHeight = sizePx)
+            if (cached != null && !cached.isRecycled) {
+                mainHandler.post { onReady(cached) }
+                return@launch
+            }
+            mainHandler.post {
+                try {
+                    Glide.with(appCtx)
+                        .asBitmap()
+                        .load(url)
+                        .override(sizePx, sizePx)
+                        .centerCrop()
+                        .diskCacheStrategy(DiskCacheStrategy.NONE)
+                        .into(object : CustomTarget<Bitmap>() {
+                            override fun onResourceReady(resource: Bitmap, transition: Transition<in Bitmap>?) {
+                                cacheScope.launch {
+                                    cacheCover(url, resource)
+                                }
+                                onReady(resource)
+                            }
+
+                            override fun onLoadFailed(errorDrawable: Drawable?) {
+                                onReady(null)
+                            }
+
+                            override fun onLoadCleared(placeholder: Drawable?) {}
+                        })
+                } catch (e: Exception) {
+                    AppLogger.w(TAG, "loadCoverBitmapScaled failed: ${e.message}")
+                    onReady(null)
+                }
+            }
+        }
     }
 }

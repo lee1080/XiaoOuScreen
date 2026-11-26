@@ -26,6 +26,8 @@ class XiaoOuApplication : Application() {
         const val OVERLAY_CHANNEL_ID = "weather_overlay_channel"
         lateinit var instance: XiaoOuApplication
             private set
+        lateinit var rhythmEngine: com.car.xiaoouscreen.car.MusicRhythmEngine
+            private set
     }
 
     private val coroutineExceptionHandler = CoroutineExceptionHandler { _, throwable ->
@@ -69,12 +71,53 @@ class XiaoOuApplication : Application() {
         CarLyricsApplication.instance = this
         CarLyricsApplication.recognitionEngine = engine
 
+        // 2.1 初始化音乐氛围灯律动引擎
+        rhythmEngine = com.car.xiaoouscreen.car.MusicRhythmEngine(this).apply {
+            masterEnabled = PrefsManager.isAmbientLightSyncEnabled()
+            colorSyncEnabled = PrefsManager.isAmbientLightColorSyncEnabled()
+            randomColorMode = PrefsManager.isAmbientLightRandomColorEnabled()
+            sensitivityPercent = PrefsManager.getAmbientLightSensitivity()
+        }
+
         createNotificationChannels()
 
         // 3. 启动媒体与通知监听桥接
         engine.startMediaSessionListening()
         NotificationListenerService.onNotificationPosted = { sbn ->
             engine.processNotification(sbn)
+        }
+
+        // 3.1 监听音轨变化联动氛围灯 (曲目与封面防抖去重，避免 500ms 进度推进引发主线程重复加载与算力浪费)
+        appScope.launch {
+            var lastLyricsTrackKey: String? = null
+            var lastLyricsSize = -1
+            var lastCoverTrackKey: String? = null
+            var lastCoverUrl: String? = null
+            engine.currentTrack.collect { track ->
+                rhythmEngine.onTrackChanged(track)
+                val trackKey = if (track != null) "${track.title}|${track.artist}" else null
+                val nativeLyrics = track?.nativeLyrics
+                if (nativeLyrics != null && nativeLyrics.isNotEmpty()) {
+                    if (trackKey != lastLyricsTrackKey || nativeLyrics.size != lastLyricsSize) {
+                        lastLyricsTrackKey = trackKey
+                        lastLyricsSize = nativeLyrics.size
+                        rhythmEngine.onLyricsLoaded(nativeLyrics)
+                    }
+                } else if (trackKey != lastLyricsTrackKey) {
+                    lastLyricsTrackKey = trackKey
+                    lastLyricsSize = 0
+                }
+                val coverUrl = track?.nativeCoverUrl
+                if (!coverUrl.isNullOrBlank()) {
+                    if (trackKey != lastCoverTrackKey || coverUrl != lastCoverUrl) {
+                        lastCoverTrackKey = trackKey
+                        lastCoverUrl = coverUrl
+                        LyricsCacheManager.loadCoverBitmapScaled(this@XiaoOuApplication, coverUrl, 320) { bmp ->
+                            rhythmEngine.onCoverLoaded(bmp)
+                        }
+                    }
+                }
+            }
         }
 
         // 4. 重型 I/O、歌词源同步、通知白名单授权全量放入 IO 线程，彻底解除主线程冷启卡顿
@@ -93,18 +136,28 @@ class XiaoOuApplication : Application() {
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
         AppLogger.d("XiaoOuApp", "系统触发 onTrimMemory: level=$level")
-        if (level >= ComponentCallbacks2.TRIM_MEMORY_MODERATE || 
-            level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL || 
-            level >= ComponentCallbacks2.TRIM_MEMORY_COMPLETE) {
+        com.car.xiaoouscreen.util.SharedHmiAssetManager.trimMemory(level)
+        // 注意常量值大小关系：TRIM_MEMORY_RUNNING_CRITICAL(15) < TRIM_MEMORY_UI_HIDDEN(20) < TRIM_MEMORY_MODERATE(60)
+        // 仅在真正处于前台运行时紧急内存告急(RUNNING_CRITICAL=15)或后台中度/完全紧张(>=MODERATE=60)时清空全量缓存，避免 UI_HIDDEN(20) 误杀导致冷热图重载卡顿
+        if (level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL ||
+            level >= ComponentCallbacks2.TRIM_MEMORY_MODERATE) {
             com.car.xiaoouscreen.util.SharedHmiAssetManager.clearAll()
             try {
                 com.bumptech.glide.Glide.get(this).clearMemory()
             } catch (_: Exception) {}
             try {
+                rhythmEngine.clearCoverCache()
+                com.carlyrics.recognition.NotificationLyricsSniffer.clearPackageContextCache()
                 LyricsSourceRunner.cancelAll()
                 LyricsSourceRunner.clearScriptCache()
                 com.carlyrics.skin.KaraokeHelper.clearWordSpanCache()
                 com.carlyrics.lyrics.LyricsApiManager.clearPreloadCache()
+                com.carlyrics.util.LyricsCacheManager.clearMemoryCache()
+            } catch (_: Exception) {}
+        } else if (level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW ||
+            level == ComponentCallbacks2.TRIM_MEMORY_BACKGROUND) {
+            try {
+                com.bumptech.glide.Glide.get(this).trimMemory(level)
             } catch (_: Exception) {}
         }
     }
@@ -117,10 +170,13 @@ class XiaoOuApplication : Application() {
             com.bumptech.glide.Glide.get(this).clearMemory()
         } catch (_: Exception) {}
         try {
+            rhythmEngine.clearCoverCache()
+            com.carlyrics.recognition.NotificationLyricsSniffer.clearPackageContextCache()
             LyricsSourceRunner.cancelAll()
             LyricsSourceRunner.clearScriptCache()
             com.carlyrics.skin.KaraokeHelper.clearWordSpanCache()
             com.carlyrics.lyrics.LyricsApiManager.clearPreloadCache()
+            com.carlyrics.util.LyricsCacheManager.clearMemoryCache()
         } catch (_: Exception) {}
     }
 

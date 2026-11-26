@@ -10,17 +10,23 @@ import android.os.Looper
 import android.util.Log
 import com.carlyrics.util.AppLogger
 import com.carlyrics.util.PrivacyUtil
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /**
  * 车载 GPS / 粗略定位管理
  * 实现规范 5.1 节：15分钟与 5km 复合触发闸门 (高速巡航防连击)，杜绝请求风暴
  */
-class CarGpsManager(private val context: Context) {
+class CarGpsManager private constructor(context: Context) {
+
+    private val appContext = context.applicationContext
 
     private val locationManager =
-        context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        appContext.getSystemService(Context.LOCATION_SERVICE) as LocationManager
 
-    private val prefs = com.carlyrics.util.PrefsManager.getSafeStorageContext(context)
+    private val prefs = com.carlyrics.util.PrefsManager.getSafeStorageContext(appContext)
         .getSharedPreferences("car_gps_prefs", Context.MODE_PRIVATE)
 
     // 默认经纬度 (采用双精度 LongBits 存储，杜绝 Float 强转精度截断与跳变)
@@ -54,7 +60,7 @@ class CarGpsManager(private val context: Context) {
     private var isListening: Boolean = false
 
     init {
-        java.util.concurrent.Executors.newSingleThreadExecutor().execute {
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             try {
                 val providers = listOf(
                     LocationManager.GPS_PROVIDER,
@@ -258,8 +264,9 @@ class CarGpsManager(private val context: Context) {
         try {
             locationManager.removeUpdates(locationListener)
             isListening = false
+            onLocationChangedCallback = null
         } catch (e: Exception) {
-            Log.e(TAG, "Error stopping location updates", e)
+            AppLogger.e(TAG, "Error stopping location updates", e)
         }
     }
 
@@ -269,5 +276,14 @@ class CarGpsManager(private val context: Context) {
 
     companion object {
         private const val TAG = "CarGpsManager"
+
+        @Volatile
+        private var instance: CarGpsManager? = null
+
+        fun getInstance(context: Context): CarGpsManager {
+            return instance ?: synchronized(this) {
+                instance ?: CarGpsManager(context.applicationContext).also { instance = it }
+            }
+        }
     }
 }

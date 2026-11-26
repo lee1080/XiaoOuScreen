@@ -23,6 +23,7 @@ import com.car.xiaoouscreen.ui.settings.viewmodel.SettingsViewModel
 import com.carlyrics.CarLyricsApplication
 import com.carlyrics.model.CurrentTrack
 import com.carlyrics.util.PrefsManager
+import com.carlyrics.util.AppLogger
 
 /**
  * 车规级「小欧屏 — 设置中心」原生主入口 Activity
@@ -36,6 +37,28 @@ class MainActivity : ComponentActivity(), WeatherOverlayService.ServiceCallback 
     }
 
     private lateinit var viewModel: SettingsViewModel
+    private val deferredStartServiceRunnable = Runnable {
+        try {
+            if (PrefsManager.getOverlayVisible() && WeatherOverlayService.instance?.isShowing() != true) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !android.provider.Settings.canDrawOverlays(this)) {
+                    Log.w(TAG, "无悬浮窗权限，跳过自动拉起投屏服务，防止在单屏/手机上发生崩溃或触控遮挡")
+                    return@Runnable
+                }
+                val showAvatar = PrefsManager.isXiaoOuAvatarEnabled()
+                val targetAction = if (showAvatar) WeatherOverlayService.ACTION_SHOW_FITNESS else WeatherOverlayService.ACTION_SHOW_TOP
+                val serviceIntent = Intent(this, WeatherOverlayService::class.java).apply {
+                    action = targetAction
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(serviceIntent)
+                } else {
+                    startService(serviceIntent)
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Start WeatherOverlayService deferred: ${e.message}")
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -44,7 +67,7 @@ class MainActivity : ComponentActivity(), WeatherOverlayService.ServiceCallback 
         try {
             PrefsManager.init(this)
         } catch (e: Exception) {
-            Log.e(TAG, "PrefsManager.init error: ${e.message}")
+            AppLogger.e(TAG, "PrefsManager.init error: ${e.message}", e)
         }
 
         // 2. 初始化 ViewModel
@@ -68,28 +91,7 @@ class MainActivity : ComponentActivity(), WeatherOverlayService.ServiceCallback 
         applyCarFullscreenImmersive()
 
         // 5. 若用户之前开启过投屏且当前未在运行，等主界面首帧稳定渲染完毕后 (延时500ms) 再平滑拉起投屏，杜绝启动争抢主线程
-        window.decorView.postDelayed({
-            try {
-                if (PrefsManager.getOverlayVisible() && WeatherOverlayService.instance?.isShowing() != true) {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !android.provider.Settings.canDrawOverlays(this)) {
-                        Log.w(TAG, "无悬浮窗权限，跳过自动拉起投屏服务，防止在单屏/手机上发生崩溃或触控遮挡")
-                        return@postDelayed
-                    }
-                    val showAvatar = PrefsManager.isXiaoOuAvatarEnabled()
-                    val targetAction = if (showAvatar) WeatherOverlayService.ACTION_SHOW_FITNESS else WeatherOverlayService.ACTION_SHOW_TOP
-                    val serviceIntent = Intent(this, WeatherOverlayService::class.java).apply {
-                        action = targetAction
-                    }
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        startForegroundService(serviceIntent)
-                    } else {
-                        startService(serviceIntent)
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Start WeatherOverlayService deferred: ${e.message}")
-            }
-        }, 500L)
+        window.decorView.postDelayed(deferredStartServiceRunnable, 500L)
 
         WeatherOverlayService.serviceCallback = this
     }
@@ -115,6 +117,7 @@ class MainActivity : ComponentActivity(), WeatherOverlayService.ServiceCallback 
 
     override fun onDestroy() {
         super.onDestroy()
+        window.decorView.removeCallbacks(deferredStartServiceRunnable)
         if (WeatherOverlayService.serviceCallback == this) {
             WeatherOverlayService.serviceCallback = null
         }

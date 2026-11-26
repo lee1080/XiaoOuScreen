@@ -6,10 +6,10 @@ import android.util.Log
 import com.car.xiaoouscreen.domain.WeatherSceneConfig
 import com.car.xiaoouscreen.domain.WeatherSceneMapper
 import com.carlyrics.util.AppLogger
-import com.google.gson.Gson
+import com.carlyrics.util.SharedNetwork
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import java.util.concurrent.TimeUnit
@@ -19,7 +19,7 @@ class OpenMeteoRepository(context: Context) {
     private val prefs: SharedPreferences =
         com.carlyrics.util.PrefsManager.getSafeStorageContext(context)
             .getSharedPreferences("car_weather_cache", Context.MODE_PRIVATE)
-    private val gson = Gson()
+    private val gson = SharedNetwork.gson
 
     /**
      * 最新一次获取的未来数小时最大降水概率 (0-100)
@@ -58,7 +58,7 @@ class OpenMeteoRepository(context: Context) {
     }
 
     private val api: OpenMeteoApi by lazy {
-        val client = OkHttpClient.Builder()
+        val client = SharedNetwork.baseOkHttpClient.newBuilder()
             .connectTimeout(8, TimeUnit.SECONDS)
             .readTimeout(8, TimeUnit.SECONDS)
             .build()
@@ -110,6 +110,8 @@ class OpenMeteoRepository(context: Context) {
                 )
                 AppLogger.i(TAG, "✅ [Open-Meteo] 在线刷新成功: temp=${scene.temperatureCelsius}℃, state=${scene.weatherState}, wind=${scene.windSpeedKmh}km/h, pop=$lastMaxPrecipProbability%")
                 Result.success(scene)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 lastFetchFromNetwork = false
                 AppLogger.w(TAG, "⚠️ [Open-Meteo] 网络请求失败 (${e.message})，暂时回退本地缓存并交由退避引擎重试")
@@ -134,7 +136,7 @@ class OpenMeteoRepository(context: Context) {
             val json = gson.toJson(response)
             prefs.edit().putString(KEY_CACHED_JSON, json).apply()
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to cache weather data", e)
+            AppLogger.e(TAG, "Failed to cache weather data", e)
         }
     }
 
@@ -158,7 +160,7 @@ class OpenMeteoRepository(context: Context) {
                 windDirection = current.windDirection10m
             )
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to parse cached weather", e)
+            AppLogger.e(TAG, "Failed to parse cached weather", e)
             null
         }
     }

@@ -19,10 +19,11 @@ import com.carlyrics.util.AppLogger
 import com.carlyrics.util.LyricsCacheManager
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.launch
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * 欧尚 B561 原厂酷狗音乐 (com.chinatsp.music) 专用 AIDL 原生客户端
@@ -78,9 +79,21 @@ class KuGouNativeClient(
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val bgScope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, e ->
+    // 单线程串行 IPC 调度器：彻底消除 onInfoChange / onStatusChange / verifyPlayback 并发读写造成的时序倒挂与旧态覆盖
+    private val ipcExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "KuGouIpcThread").apply { isDaemon = true }
+    }
+    private val bgScope = CoroutineScope(ipcExecutor.asCoroutineDispatcher() + SupervisorJob() + CoroutineExceptionHandler { _, e ->
         AppLogger.e(TAG, "KuGouNativeClient 后台协程异常: ${e.message}", e)
     })
+
+    // 状态序列号与上一首原生歌词指纹，用于识别切歌瞬间酷狗内部 LRC 缓存尚未刷新的脏歌词
+    private val trackRefreshSeq = AtomicLong(0L)
+    private var currentSessionTrackKey: String = ""
+    private var lastValidCurrentLrcSignature: String = ""
+    private var previousTrackLrcSignature: String = ""
+    private val staleLrcRetryRunnable1 = Runnable { refreshTrackAsync("staleLrcRetry-350ms") }
+    private val staleLrcRetryRunnable2 = Runnable { refreshTrackAsync("staleLrcRetry-850ms") }
 
     @Volatile
     private var remoteBinder: IBinder? = null
@@ -95,10 +108,11 @@ class KuGouNativeClient(
     private val reconnectRunnable = Runnable { connectService() }
 
     private val deathRecipient = IBinder.DeathRecipient {
-        AppLogger.w(TAG, "酷狗音乐服务已终止 (Binder Died)，注销状态并准备重连...")
+        AppLogger.w(TAG, "酷狗音乐服务已终止 (Binder Died)，注销状态、通知暂停并准备重连...")
         remoteBinder = null
         isBound = false
         isRegisteredListener = false
+        mainHandler.post { listener.onPlaybackStateChanged(false) }
         mainHandler.postDelayed(reconnectRunnable, 3000L)
     }
 
@@ -164,9 +178,13 @@ class KuGouNativeClient(
 
         override fun onServiceDisconnected(name: ComponentName?) {
             AppLogger.w(TAG, "KuGouMusicInterfaceService 连接断开: $name")
+            try {
+                remoteBinder?.unlinkToDeath(deathRecipient, 0)
+            } catch (_: Exception) {}
             remoteBinder = null
             isBound = false
             isRegisteredListener = false
+            mainHandler.post { listener.onPlaybackStateChanged(false) }
             mainHandler.postDelayed(reconnectRunnable, 2000L)
         }
     }
@@ -179,8 +197,12 @@ class KuGouNativeClient(
     fun stopListening() {
         AppLogger.d(TAG, "停止原车酷狗 AIDL 监听客户端")
         mainHandler.removeCallbacks(reconnectRunnable)
+        cancelStaleLrcRetries()
         unregisterMediaChangeListenerInternal()
         if (isBound) {
+            try {
+                remoteBinder?.unlinkToDeath(deathRecipient, 0)
+            } catch (_: Exception) {}
             try {
                 context.unbindService(connection)
             } catch (e: Exception) {
@@ -272,14 +294,36 @@ class KuGouNativeClient(
         }
     }
 
+    private fun cancelStaleLrcRetries() {
+        mainHandler.removeCallbacks(staleLrcRetryRunnable1)
+        mainHandler.removeCallbacks(staleLrcRetryRunnable2)
+    }
+
+    private fun scheduleStaleLrcRetries() {
+        cancelStaleLrcRetries()
+        mainHandler.postDelayed(staleLrcRetryRunnable1, 350L)
+        mainHandler.postDelayed(staleLrcRetryRunnable2, 850L)
+    }
+
+    private fun computeLrcSignature(lines: List<LyricLine>?): String {
+        if (lines.isNullOrEmpty()) return ""
+        val first = lines.first()
+        val mid = lines[lines.size / 2]
+        val last = lines.last()
+        return "${lines.size}|${first.timestamp}:${first.text}|${mid.timestamp}:${mid.text}|${last.timestamp}:${last.text}"
+    }
+
     private fun handleStatusChange() {
+        val seq = trackRefreshSeq.incrementAndGet()
         bgScope.launch {
             val playing = isPlayingInternal()
             AppLogger.d(TAG, "酷狗回调 onStatusChange: isPlaying=$playing")
-            mainHandler.post {
-                listener.onPlaybackStateChanged(playing)
+            if (seq == trackRefreshSeq.get()) {
+                mainHandler.post {
+                    listener.onPlaybackStateChanged(playing)
+                }
             }
-            refreshTrackAsync("onStatusChange")
+            refreshTrackSync("onStatusChange", seq)
         }
     }
 
@@ -295,63 +339,108 @@ class KuGouNativeClient(
     }
 
     /**
-     * 异步提取完整歌曲元数据、原生歌词与原生封面
+     * 异步提取完整歌曲元数据、原生歌词与原生封面（严格在单线程 IPC 调度器中串行执行，杜绝并发倒挂）
      */
     fun refreshTrackAsync(trigger: String) {
         val binder = remoteBinder
         if (binder == null || !binder.isBinderAlive) {
             return
         }
+        val seq = trackRefreshSeq.incrementAndGet()
         bgScope.launch {
-            try {
-                val title = getMediaTitleInternal()
-                val artist = getMediaArtistInternal()
-                if (title.isBlank()) {
-                    return@launch
-                }
-                val isPlaying = isPlayingInternal()
-                val duration = getDurationInternal()
-                val position = getPositionInternal()
-                val mediaType = getMediaTypeInternal()
+            refreshTrackSync(trigger, seq)
+        }
+    }
 
-                // 1. 原生歌词获取 (支持在线与 U 盘音乐直读)
-                val hasLrc = hasLyricsInternal()
-                val nativeLines: List<LyricLine>? = if (hasLrc) {
-                    val rawLrcList = getLrcDataInternal()
-                    if (!rawLrcList.isNullOrEmpty()) {
-                        rawLrcList.filter { !it.text.isNullOrBlank() }.map {
-                            LyricLine(timestamp = it.time, text = it.text?.trim() ?: "")
-                        }
-                    } else null
-                } else null
-
-                // 2. 原生封面提取与本地持久缓存 (支持 U 盘 MP3/FLAC ID3 APIC 直读)
-                val albumBitmap = getMediaAlbumInternal(512, 512)
-                val nativeCoverUrl: String? = if (albumBitmap != null) {
-                    LyricsCacheManager.saveNativeCover(title, artist, albumBitmap)
-                } else null
-
-                val track = CurrentTrack(
-                    title = title,
-                    artist = artist,
-                    album = mediaType ?: "",
-                    position = position,
-                    duration = duration,
-                    source = MusicSource.KUGOU_NATIVE,
-                    packageName = KUGOU_PACKAGE,
-                    isPlaying = isPlaying,
-                    nativeLyrics = nativeLines,
-                    nativeCoverUrl = nativeCoverUrl
-                )
-
-                AppLogger.d(TAG, "[$trigger] 原车酷狗提取成功: $title - $artist, hasLrc=${!nativeLines.isNullOrEmpty()}(${nativeLines?.size ?: 0}行), hasCover=${nativeCoverUrl != null}, isPlaying=$isPlaying")
-
-                mainHandler.post {
-                    listener.onTrackChanged(track)
-                }
-            } catch (e: Exception) {
-                AppLogger.w(TAG, "[$trigger] 提取原车酷狗音轨信息失败: ${e.message}")
+    private fun refreshTrackSync(trigger: String, seq: Long) {
+        if (seq != trackRefreshSeq.get()) {
+            // 已有更新的刷新任务排队，跳过过期中间帧（避免旧帧覆盖新状态）
+            return
+        }
+        try {
+            val title = getMediaTitleInternal().trim()
+            val artist = getMediaArtistInternal().trim()
+            if (title.isBlank()) {
+                return
             }
+            val trackKey = "$title|$artist"
+            val isTrackSwitch = trackKey != currentSessionTrackKey
+            if (isTrackSwitch) {
+                if (lastValidCurrentLrcSignature.isNotBlank()) {
+                    previousTrackLrcSignature = lastValidCurrentLrcSignature
+                }
+                currentSessionTrackKey = trackKey
+                lastValidCurrentLrcSignature = ""
+                cancelStaleLrcRetries()
+            }
+
+            val duration = getDurationInternal()
+            val position = getPositionInternal()
+            val mediaType = getMediaTypeInternal()
+
+            // 1. 原生歌词获取 (支持在线与 U 盘音乐直读)
+            val hasLrc = hasLyricsInternal()
+            val rawLines: List<LyricLine>? = if (hasLrc) {
+                val rawLrcList = getLrcDataInternal()
+                if (!rawLrcList.isNullOrEmpty()) {
+                    rawLrcList.filter { !it.text.isNullOrBlank() }.map {
+                        LyricLine(timestamp = it.time, text = it.text?.trim() ?: "")
+                    }
+                } else null
+            } else null
+
+            // 防御原车酷狗切歌异步竞争：刚切到新歌时 getLrcData() 可能仍返回上一首歌的旧歌词缓存
+            val sig = computeLrcSignature(rawLines)
+            val nativeLines: List<LyricLine>? = if (
+                sig.isNotBlank() &&
+                previousTrackLrcSignature.isNotBlank() &&
+                sig == previousTrackLrcSignature
+            ) {
+                AppLogger.w(TAG, "[$trigger] ⚠️ 检测到原车酷狗切歌歌词缓存尚未刷新 ($title 仍返回上一首的 ${rawLines?.size ?: 0} 行旧歌词)，丢弃旧词并预约延迟重读")
+                mainHandler.post { scheduleStaleLrcRetries() }
+                null
+            } else {
+                if (sig.isNotBlank()) {
+                    lastValidCurrentLrcSignature = sig
+                    cancelStaleLrcRetries()
+                }
+                rawLines
+            }
+
+            // 2. 原生封面提取与本地持久缓存 (支持 U 盘 MP3/FLAC ID3 APIC 直读；命中磁盘缓存时跳过跨进程 512x512 Binder 位图拷贝与 JPEG 压缩)
+            val nativeCoverUrl: String? = LyricsCacheManager.getCachedNativeCoverUri(title, artist)
+                ?: getMediaAlbumInternal(512, 512)?.let { albumBitmap ->
+                    LyricsCacheManager.saveNativeCover(title, artist, albumBitmap)
+                }
+
+            // 3. 在耗时 IPC 提取结束后重新复核一次最新的在播状态与曲名，彻底杜绝旧状态覆写新播放态
+            val latestTitle = getMediaTitleInternal().trim()
+            if (latestTitle.isNotBlank() && latestTitle != title) {
+                AppLogger.d(TAG, "[$trigger] 提取期间检测到已再次切歌 ($title -> $latestTitle)，放弃过期快照")
+                return
+            }
+            val latestIsPlaying = isPlayingInternal()
+
+            val track = CurrentTrack(
+                title = title,
+                artist = artist,
+                album = mediaType ?: "",
+                position = position,
+                duration = duration,
+                source = MusicSource.KUGOU_NATIVE,
+                packageName = KUGOU_PACKAGE,
+                isPlaying = latestIsPlaying,
+                nativeLyrics = nativeLines,
+                nativeCoverUrl = nativeCoverUrl
+            )
+
+            AppLogger.d(TAG, "[$trigger] 原车酷狗提取成功: $title - $artist, hasLrc=${!nativeLines.isNullOrEmpty()}(${nativeLines?.size ?: 0}行), hasCover=${nativeCoverUrl != null}, isPlaying=$latestIsPlaying")
+
+            mainHandler.post {
+                listener.onTrackChanged(track)
+            }
+        } catch (e: Exception) {
+            AppLogger.w(TAG, "[$trigger] 提取原车酷狗音轨信息失败: ${e.message}")
         }
     }
 
@@ -362,6 +451,37 @@ class KuGouNativeClient(
     fun isPlaying(): Boolean = isPlayingInternal()
     fun getPosition(): Long = getPositionInternal()
     fun getDuration(): Long = getDurationInternal()
+
+    /**
+     * 双向异步校验酷狗真实在播状态、切歌或迟到歌词，兼顾停播收敛与换播放器首曲/复播自愈
+     */
+    fun verifyPlaybackAsync(
+        expectedPlaying: Boolean = true,
+        expectedTitle: String = "",
+        needsLyrics: Boolean = false
+    ) {
+        val binder = remoteBinder
+        if (binder == null || !binder.isBinderAlive) {
+            if (expectedPlaying) {
+                mainHandler.post { listener.onPlaybackStateChanged(false) }
+            }
+            return
+        }
+        bgScope.launch {
+            val actualPlaying = isPlayingInternal()
+            val actualTitle = getMediaTitleInternal().trim()
+            if (expectedPlaying && !actualPlaying) {
+                mainHandler.post { listener.onPlaybackStateChanged(false) }
+            } else if (!expectedPlaying && actualPlaying && actualTitle.isNotBlank()) {
+                AppLogger.i(TAG, "🔄 [酷狗自愈校验] 轮询检测到酷狗已实际在播 ($actualTitle)，主动唤醒提取完整音轨与歌词")
+                refreshTrackSync("pollStateRecover", trackRefreshSeq.incrementAndGet())
+            } else if (actualPlaying && actualTitle.isNotBlank() &&
+                ((expectedTitle.isNotBlank() && actualTitle != expectedTitle) || needsLyrics)
+            ) {
+                refreshTrackSync("pollTrackOrLrcRecover", trackRefreshSeq.incrementAndGet())
+            }
+        }
+    }
 
     private fun isPlayingInternal(): Boolean {
         val binder = remoteBinder ?: return false

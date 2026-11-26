@@ -166,15 +166,15 @@ fun LyricsSettingsPage(
                             }
                             NeuInfoButton(
                                 info = AnnotationInfo(
-                                    title = "歌词源插件管理说明",
-                                    content = "勾选下方复选框可开启对应源参与匹配；点击“+ 导入源”可从 URL、文件或单源新增；点击“删除选中源”清理旧源；点击“打开源管理弹窗”进行批量测速与管理。",
-                                    recommend = "建议至少保持 2 个歌词源处于勾选状态"
+                                    title = "歌词源插件说明",
+                                    content = "支持主流平台歌词源插件，按列表顺序轮询匹配。可通过源管理导入自定义脚本并测速。",
+                                    recommend = "建议保持 1~2 个有效歌词源开启"
                                 ),
                                 onShowInfo = onShowInfo
                             )
                         }
                         Text(
-                            text = "支持长按拖拽排序歌词源插件，越靠上优先级越高；勾选参与匹配的源将按序轮询匹配",
+                            text = "拖拽调整源优先级，播放时按序轮询匹配歌词",
                             fontSize = 11.sp,
                             color = NeuColors.TextSecondary
                         )

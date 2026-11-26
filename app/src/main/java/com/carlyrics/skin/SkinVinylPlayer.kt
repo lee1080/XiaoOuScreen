@@ -43,6 +43,7 @@ class SkinVinylPlayer(context: Context) : LyricsSkin(context) {
     private val vinylDisc: VinylDiscView
     private val coverImage: ImageView
     private var spinAnimator: ValueAnimator? = null
+    private val barAnimators = mutableListOf<ValueAnimator>()
     private val nowPlayingLabel: TextView
     private val titleText: TextView
     private val artistText: TextView
@@ -310,9 +311,15 @@ class SkinVinylPlayer(context: Context) : LyricsSkin(context) {
             coverImage.setImageResource(com.car.xiaoouscreen.R.drawable.ic_default_cover)
             vinylDisc.setCoverBitmap(null)
         } else {
-            LyricsCacheManager.loadCoverInto(context, url, coverImage)
+            // 单次缓存查询与解码同时驱动左侧封面与黑胶唱片中心图，避免双倍加载解包
             LyricsCacheManager.loadCoverBitmap(context, url) { bitmap ->
-                bitmap?.let { vinylDisc.setCoverBitmap(it) }
+                if (bitmap != null && !bitmap.isRecycled) {
+                    coverImage.setImageBitmap(bitmap)
+                    vinylDisc.setCoverBitmap(bitmap)
+                } else {
+                    coverImage.setImageResource(com.car.xiaoouscreen.R.drawable.ic_default_cover)
+                    vinylDisc.setCoverBitmap(null)
+                }
             }
         }
     }
@@ -497,24 +504,43 @@ class SkinVinylPlayer(context: Context) : LyricsSkin(context) {
         leftContainerView.requestLayout()
     }
 
-    override fun onDestroy() { spinAnimator?.cancel() }
+    override fun onPauseAnimations() {
+        spinAnimator?.pause()
+        barAnimators.forEach { it.pause() }
+    }
+
+    override fun onResumeAnimations() {
+        spinAnimator?.resume()
+        barAnimators.forEach { it.resume() }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        spinAnimator?.cancel()
+        spinAnimator = null
+        barAnimators.forEach { it.cancel() }
+        barAnimators.clear()
+    }
 
     override fun onInfoFontScaleChanged(scale: Float) {
         refreshInfoFontSize()
     }
 
     private fun startAllAnimations() {
+        spinAnimator?.cancel()
         spinAnimator = ValueAnimator.ofFloat(0f, 360f).apply {
             duration = 20000; repeatCount = ValueAnimator.INFINITE; interpolator = LinearInterpolator()
             addUpdateListener { anim -> vinylDisc.rotation = anim.animatedValue as Float }
             start()
         }
 
-        // 彩色频谱律动跳动动画 (GPU scaleY 硬件加速，零 requestLayout 开销，响应极速流畅)
+        // 彩色频谱律动跳动动画 (GPU scaleY 硬件加速，零 requestLayout 开销，追踪并可随生命周期暂停释放)
+        barAnimators.forEach { it.cancel() }
+        barAnimators.clear()
         val durations = longArrayOf(420L, 280L, 550L, 340L, 480L, 310L, 390L)
         val minScales = floatArrayOf(0.18f, 0.35f, 0.12f, 0.40f, 0.22f, 0.30f, 0.15f)
         visualizerBars.forEachIndexed { i, bar ->
-            ValueAnimator.ofFloat(minScales[i % minScales.size], 1.0f).apply {
+            val barAnim = ValueAnimator.ofFloat(minScales[i % minScales.size], 1.0f).apply {
                 duration = durations[i % durations.size]
                 repeatMode = ValueAnimator.REVERSE
                 repeatCount = ValueAnimator.INFINITE
@@ -524,6 +550,7 @@ class SkinVinylPlayer(context: Context) : LyricsSkin(context) {
                 }
                 start()
             }
+            barAnimators.add(barAnim)
         }
     }
 

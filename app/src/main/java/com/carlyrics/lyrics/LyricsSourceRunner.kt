@@ -28,10 +28,10 @@ import java.util.concurrent.TimeUnit
 object LyricsSourceRunner {
 
     private const val TAG = "LyricsSourceRunner"
-    private val gson = Gson()
+    private val gson = com.carlyrics.util.SharedNetwork.gson
 
     val client: OkHttpClient by lazy {
-        OkHttpClient.Builder()
+        com.carlyrics.util.SharedNetwork.baseOkHttpClient.newBuilder()
             .dns(object : Dns {
                 override fun lookup(hostname: String): List<InetAddress> {
                     val addresses = Dns.SYSTEM.lookup(hostname)
@@ -56,9 +56,9 @@ object LyricsSourceRunner {
                 }
                 chain.proceed(request)
             }
-            .connectTimeout(3000, TimeUnit.MILLISECONDS)
-            .readTimeout(4000, TimeUnit.MILLISECONDS)
-            .writeTimeout(3000, TimeUnit.MILLISECONDS)
+            .connectTimeout(2500, TimeUnit.MILLISECONDS)
+            .readTimeout(3000, TimeUnit.MILLISECONDS)
+            .writeTimeout(2500, TimeUnit.MILLISECONDS)
             .followRedirects(true)
             .followSslRedirects(true)
             .build()
@@ -159,17 +159,23 @@ object LyricsSourceRunner {
         }
     """
 
+    private val META_NAME_REGEX = Regex("""@name\s+([^\r\n]+)""")
+    private val META_ID_REGEX = Regex("""@id\s+([^\r\n]+)""")
+    private val META_VERSION_REGEX = Regex("""@version\s+([^\r\n]+)""")
+    private val META_AUTHOR_REGEX = Regex("""@author\s+([^\r\n]+)""")
+    private val META_DESC_REGEX = Regex("""@description\s+([^\r\n]+)""")
+
     /**
      * 从脚本头部提取元数据 (@name, @id, @version, @author, @description)
      */
     fun parseMetadata(script: String, defaultId: String = ""): LyricsSource {
-        val name = Regex("""@name\s+([^\r\n]+)""").find(script)?.groupValues?.get(1)?.trim()
+        val name = META_NAME_REGEX.find(script)?.groupValues?.get(1)?.trim()
             ?: defaultId.ifEmpty { "未命名源" }
-        val id = Regex("""@id\s+([^\r\n]+)""").find(script)?.groupValues?.get(1)?.trim()
+        val id = META_ID_REGEX.find(script)?.groupValues?.get(1)?.trim()
             ?: defaultId.ifEmpty { "source_" + System.currentTimeMillis() }
-        val version = Regex("""@version\s+([^\r\n]+)""").find(script)?.groupValues?.get(1)?.trim() ?: "1.0.0"
-        val author = Regex("""@author\s+([^\r\n]+)""").find(script)?.groupValues?.get(1)?.trim() ?: "社区开发者"
-        val desc = Regex("""@description\s+([^\r\n]+)""").find(script)?.groupValues?.get(1)?.trim() ?: ""
+        val version = META_VERSION_REGEX.find(script)?.groupValues?.get(1)?.trim() ?: "1.0.0"
+        val author = META_AUTHOR_REGEX.find(script)?.groupValues?.get(1)?.trim() ?: "社区开发者"
+        val desc = META_DESC_REGEX.find(script)?.groupValues?.get(1)?.trim() ?: ""
 
         return LyricsSource(
             id = id,
@@ -388,7 +394,9 @@ object LyricsSourceRunner {
                     if (resp.isSuccessful) resp.body?.string() else null
                 }
             } catch (e: Exception) {
-                if (e is java.io.InterruptedIOException || e.message?.contains("Canceled", ignoreCase = true) == true) {
+                if (e is java.net.SocketTimeoutException) {
+                    AppLogger.d(TAG, "http.get 超时: $urlStr")
+                } else if (e is java.io.InterruptedIOException || e.message?.contains("Canceled", ignoreCase = true) == true) {
                     AppLogger.d(TAG, "http.get 已取消")
                 } else {
                     AppLogger.d(TAG, "http.get 失败: $urlStr, err=${e.message}")
@@ -416,7 +424,9 @@ object LyricsSourceRunner {
                     if (resp.isSuccessful) resp.body?.string() else null
                 }
             } catch (e: Exception) {
-                if (e is java.io.InterruptedIOException || e.message?.contains("Canceled", ignoreCase = true) == true) {
+                if (e is java.net.SocketTimeoutException) {
+                    AppLogger.d(TAG, "http.post 超时: $urlStr")
+                } else if (e is java.io.InterruptedIOException || e.message?.contains("Canceled", ignoreCase = true) == true) {
                     AppLogger.d(TAG, "http.post 已取消")
                 } else {
                     AppLogger.d(TAG, "http.post 失败: $urlStr, err=${e.message}")

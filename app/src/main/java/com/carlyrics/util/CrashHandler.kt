@@ -63,6 +63,9 @@ object CrashHandler : Thread.UncaughtExceptionHandler {
                 appendLine()
                 appendLine("调用栈:")
                 append(sw.toString())
+                appendLine()
+                appendLine("最近传感器与系统心跳 (Breadcrumbs):")
+                appendLine(AppLogger.dumpBreadcrumbs(30))
                 appendLine("==============================")
             }
 

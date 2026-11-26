@@ -2,6 +2,7 @@ package com.carlyrics.skin
 
 import android.animation.ValueAnimator
 import android.content.Context
+import android.graphics.Bitmap
 import android.view.View
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -152,6 +153,7 @@ abstract class LyricsSkin(context: Context) : FrameLayout(context) {
     abstract fun setLyrics(lines: List<LyricLine>)
     abstract fun updateProgress(positionMs: Long): Int
     abstract fun setCoverUrl(url: String?)
+    open fun setCoverBitmap(bitmap: Bitmap?) {}
     abstract fun setTrackInfo(title: String, artist: String)
 
     // ---- 子类可选覆写 (回调) ----
@@ -278,6 +280,12 @@ abstract class LyricsSkin(context: Context) : FrameLayout(context) {
             updatePanelLayouts()
         }
     }
+
+    /** 暂停皮肤动画（容器不可见或退居后台时释放 Choreographer 与 GPU 负载） */
+    open fun onPauseAnimations() {}
+
+    /** 恢复皮肤动画 */
+    open fun onResumeAnimations() {}
 
     /** 销毁资源/取消动画 */
     open fun onDestroy() {

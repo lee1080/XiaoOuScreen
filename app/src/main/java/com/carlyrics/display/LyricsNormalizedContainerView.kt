@@ -71,23 +71,26 @@ class LyricsNormalizedContainerView @JvmOverloads constructor(
     private val vignetteLeftRect = RectF(0f, 0f, SAFE_MARGIN_PX, LOGICAL_HEIGHT)
     private val vignetteRightRect = RectF(SAFE_RIGHT_START_PX, 0f, LOGICAL_WIDTH, LOGICAL_HEIGHT)
 
-    // 小欧 3D 虚拟形象指示器 (实车物理规格: 贴副屏右侧 500px 避让区，形象宽 358px，paddingEnd 136px)
-    // 铁律：生产环境 (悬浮窗/投屏) 默认为 false 绝不展示；仅在设置界面预览中显式开启用于示意
-    private val xiaoOuIndicatorView = FrameLayout(normalizedContext).apply {
-        visibility = View.GONE
-        clipChildren = false
-        clipToPadding = false
+    // 小欧 3D 虚拟形象指示器 (懒加载：仅当设置预览显式开启 showAvatarIndicator 时才创建 View 与解码 PNG，避免生产悬浮窗常驻解码半身图)
+    private var xiaoOuIndicatorCreated = false
+    private val xiaoOuIndicatorView: FrameLayout by lazy(LazyThreadSafetyMode.NONE) {
+        xiaoOuIndicatorCreated = true
+        FrameLayout(normalizedContext).apply {
+            visibility = View.GONE
+            clipChildren = false
+            clipToPadding = false
 
-        val avatarImg = ImageView(normalizedContext).apply {
-            setImageResource(R.drawable.xiaoou_3d_avatar_half)
-            scaleType = ImageView.ScaleType.FIT_END
-        }
+            val avatarImg = ImageView(normalizedContext).apply {
+                setImageResource(R.drawable.xiaoou_3d_avatar_half)
+                scaleType = ImageView.ScaleType.FIT_END
+            }
 
-        val avatarLp = LayoutParams(358, 384).apply {
-            gravity = Gravity.BOTTOM or Gravity.END
-            rightMargin = 136
+            val avatarLp = LayoutParams(358, 384).apply {
+                gravity = Gravity.BOTTOM or Gravity.END
+                rightMargin = 136
+            }
+            addView(avatarImg, avatarLp)
         }
-        addView(avatarImg, avatarLp)
     }
 
     private var calculatedScale = 1.0f
@@ -95,6 +98,17 @@ class LyricsNormalizedContainerView @JvmOverloads constructor(
     private var calculatedOffsetY = 0f
 
     private var isPaused = false
+    var onBackgroundUpdated: (() -> Unit)? = null
+    private val bgSyncPulseRunnable = Runnable { onBackgroundUpdated?.invoke() }
+
+    private fun scheduleBackgroundSyncPulses(hasNetworkUrl: Boolean) {
+        onBackgroundUpdated?.invoke()
+        removeCallbacks(bgSyncPulseRunnable)
+        postDelayed(bgSyncPulseRunnable, 120L)
+        if (hasNetworkUrl) {
+            postDelayed({ onBackgroundUpdated?.invoke() }, 420L)
+        }
+    }
 
     // 防烧屏微距像素漂移低频心跳（生产常亮投屏模式生效，即使暂停歌曲也能持续缓慢防残影）
     private var isBurnInTickerRunning = false
@@ -125,6 +139,7 @@ class LyricsNormalizedContainerView @JvmOverloads constructor(
     private var savedTitle: String = ""
     private var savedArtist: String = ""
     private var savedCoverUrl: String? = null
+    private var savedCoverBitmap: Bitmap? = null
     private var savedLyricLines: List<LyricLine> = emptyList()
     private var savedProgressMs: Long = 0L
 
@@ -134,6 +149,7 @@ class LyricsNormalizedContainerView @JvmOverloads constructor(
     var showAvatarIndicator: Boolean = false
         set(value) {
             field = value
+            if (value) ensureSkinCreated()
             updateAvatarVisibility()
             updateBurnInTicker()
         }
@@ -146,7 +162,20 @@ class LyricsNormalizedContainerView @JvmOverloads constructor(
         }
 
     private fun updateAvatarVisibility() {
-        xiaoOuIndicatorView.visibility = if (xiaoOuAvoidanceEnabled && showAvatarIndicator) View.VISIBLE else View.GONE
+        if (xiaoOuAvoidanceEnabled && showAvatarIndicator) {
+            val av = xiaoOuIndicatorView
+            if (av.parent == null) {
+                contentFrame.addView(
+                    av,
+                    LayoutParams(LyricsSkin.XIAOOU_AVATAR_WIDTH_PX, LayoutParams.MATCH_PARENT).apply {
+                        gravity = Gravity.END
+                    }
+                )
+            }
+            av.visibility = View.VISIBLE
+        } else if (xiaoOuIndicatorCreated) {
+            xiaoOuIndicatorView.visibility = View.GONE
+        }
     }
 
     init {
@@ -163,8 +192,18 @@ class LyricsNormalizedContainerView @JvmOverloads constructor(
 
         xiaoOuAvoidanceEnabled = PrefsManager.isXiaoOuAvoidanceEnabled()
 
-        // 加载当前皮肤
-        reloadSkin(PrefsManager.getSkinType())
+        // 记录默认皮肤类型；若容器当前不可见或处于暂停态，延迟到激活展现时再实例化视图，实现 0 视图冗余与 0 后台空转
+        currentSkinType = PrefsManager.getSkinType()
+        if (visibility == View.VISIBLE && !isPaused) {
+            reloadSkin(currentSkinType!!, force = true)
+        }
+    }
+
+    fun ensureSkinCreated() {
+        val targetType = currentSkinType ?: PrefsManager.getSkinType()
+        if (currentSkin == null || currentSkinType != targetType) {
+            reloadSkin(targetType, force = true)
+        }
     }
 
     /**
@@ -175,6 +214,10 @@ class LyricsNormalizedContainerView @JvmOverloads constructor(
             return
         }
         currentSkinType = skinType
+        // 若容器正处于隐藏或休眠状态（且非预览界面强制加载），仅记录皮肤类型与数据，避免在独立全屏歌词关闭时实例化上百个 View 与动画器
+        if (!force && (isPaused || visibility != View.VISIBLE) && !showAvatarIndicator && currentSkin == null) {
+            return
+        }
         val oldSkin = currentSkin
         try { oldSkin?.onDestroy() } catch (_: Exception) {}
 
@@ -194,7 +237,9 @@ class LyricsNormalizedContainerView @JvmOverloads constructor(
         if (savedTitle.isNotEmpty() || savedArtist.isNotEmpty()) {
             newSkin.setTrackInfo(savedTitle, savedArtist)
         }
-        if (savedCoverUrl != null) {
+        if (savedCoverBitmap != null) {
+            newSkin.setCoverBitmap(savedCoverBitmap)
+        } else if (savedCoverUrl != null) {
             newSkin.setCoverUrl(savedCoverUrl)
         }
         if (savedLyricLines.isNotEmpty()) {
@@ -210,19 +255,25 @@ class LyricsNormalizedContainerView @JvmOverloads constructor(
             LayoutParams(LOGICAL_WIDTH.toInt(), LOGICAL_HEIGHT.toInt())
         )
 
-        // 确保小欧指示器层叠在皮肤之上 (仅在设置预览显式开启 showAvatarIndicator 时可见)
-        if (xiaoOuIndicatorView.parent != null) {
-            (xiaoOuIndicatorView.parent as? android.view.ViewGroup)?.removeView(xiaoOuIndicatorView)
-        }
-        contentFrame.addView(
-            xiaoOuIndicatorView,
-            LayoutParams(LyricsSkin.XIAOOU_AVATAR_WIDTH_PX, LayoutParams.MATCH_PARENT).apply {
-                gravity = Gravity.END
+        if (xiaoOuIndicatorCreated || (xiaoOuAvoidanceEnabled && showAvatarIndicator)) {
+            val av = xiaoOuIndicatorView
+            if (av.parent != null) {
+                (av.parent as? android.view.ViewGroup)?.removeView(av)
             }
-        )
-        updateAvatarVisibility()
+            contentFrame.addView(
+                av,
+                LayoutParams(LyricsSkin.XIAOOU_AVATAR_WIDTH_PX, LayoutParams.MATCH_PARENT).apply {
+                    gravity = Gravity.END
+                }
+            )
+            updateAvatarVisibility()
+        }
 
         currentSkin = newSkin
+        if (isPaused || visibility != View.VISIBLE) {
+            newSkin.onPauseAnimations()
+        }
+        scheduleBackgroundSyncPulses(hasNetworkUrl = !savedCoverUrl.isNullOrBlank())
     }
 
     fun getSkin(): LyricsSkin? = currentSkin
@@ -236,6 +287,17 @@ class LyricsNormalizedContainerView @JvmOverloads constructor(
     fun setCoverUrl(url: String?) {
         savedCoverUrl = url
         currentSkin?.setCoverUrl(url)
+        if (currentSkin != null && !isPaused && visibility == View.VISIBLE) {
+            scheduleBackgroundSyncPulses(hasNetworkUrl = !url.isNullOrBlank())
+        }
+    }
+
+    fun setCoverBitmap(bitmap: Bitmap?) {
+        savedCoverBitmap = bitmap
+        currentSkin?.setCoverBitmap(bitmap)
+        if (currentSkin != null && !isPaused && visibility == View.VISIBLE) {
+            scheduleBackgroundSyncPulses(hasNetworkUrl = false)
+        }
     }
 
     fun setLyrics(lines: List<LyricLine>) {
@@ -245,28 +307,45 @@ class LyricsNormalizedContainerView @JvmOverloads constructor(
 
     fun updateProgress(positionMs: Long) {
         savedProgressMs = positionMs
-        if (!isPaused) {
+        if (!isPaused && visibility == View.VISIBLE) {
             currentSkin?.updateProgress(positionMs)
         }
     }
 
     /**
-     * 深度休眠：暂停跑马灯、清空不必要的动画刷新，节省车机资源
+     * 深度休眠：暂停跑马灯、停止皮肤动效，节省车机资源
      */
     fun pause() {
         if (isPaused) return
         isPaused = true
         updateBurnInTicker()
+        currentSkin?.onPauseAnimations()
         (currentSkin as? View)?.visibility = View.INVISIBLE
     }
 
     /**
-     * 唤醒激活：恢复跑马灯与动画渲染
+     * 彻底销毁释放子视图与皮肤动画
+     */
+    fun destroy() {
+        pause()
+        removeCallbacks(burnInShiftRunnable)
+        currentSkin?.onDestroy()
+        removeAllViews()
+        currentSkin = null
+    }
+
+    /**
+     * 唤醒激活：按需懒加载皮肤视图，并恢复跑马灯与动画渲染
      */
     fun resume() {
-        if (!isPaused) return
+        if (!isPaused && currentSkin != null) {
+            currentSkin?.onResumeAnimations()
+            return
+        }
         isPaused = false
+        ensureSkinCreated()
         (currentSkin as? View)?.visibility = View.VISIBLE
+        currentSkin?.onResumeAnimations()
         updateBurnInTicker()
     }
 
@@ -355,6 +434,8 @@ class LyricsNormalizedContainerView @JvmOverloads constructor(
     override fun onDetachedFromWindow() {
         isBurnInTickerRunning = false
         removeCallbacks(burnInShiftRunnable)
+        removeCallbacks(bgSyncPulseRunnable)
+        onBackgroundUpdated = null
         pause()
         super.onDetachedFromWindow()
     }
@@ -363,12 +444,14 @@ class LyricsNormalizedContainerView @JvmOverloads constructor(
      * 将歌词内容绘制到指定的严格 1920×384 Canvas 上
      */
     fun drawStrict1920(canvas: Canvas) {
+        canvas.save()
+        canvas.clipRect(0f, 0f, LOGICAL_WIDTH, LOGICAL_HEIGHT)
+        // 还原容器纯黑底色，确保半透明渐变/封面皮肤与实屏像素一致
+        canvas.drawColor(Color.BLACK)
         if (!showAvatarIndicator) {
             val nowShiftMs = SystemClock.uptimeMillis()
             val shiftX = BurnInProtection.getShiftX(nowShiftMs)
             val shiftY = BurnInProtection.getShiftY(nowShiftMs)
-            canvas.save()
-            canvas.clipRect(0f, 0f, LOGICAL_WIDTH, LOGICAL_HEIGHT)
             canvas.translate(shiftX, shiftY)
             canvas.scale(
                 BurnInProtection.FULLSCREEN_OVERSCAN_SCALE,
@@ -377,10 +460,10 @@ class LyricsNormalizedContainerView @JvmOverloads constructor(
                 LOGICAL_HEIGHT / 2f
             )
             contentFrame.draw(canvas)
-            canvas.restore()
         } else {
             contentFrame.draw(canvas)
         }
+        canvas.restore()
     }
 
     /**
